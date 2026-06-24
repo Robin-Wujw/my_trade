@@ -1,0 +1,226 @@
+# -*- coding: utf-8 -*-
+"""
+Sector volume and limit-up watch.
+
+This script is intentionally separate from factorStock.py. It first asks
+"which sectors are becoming the main line?", then the stock selector can look
+inside those sectors. The scoring favors repeated strength, amount expansion,
+weak-market resilience, and limit-up participation.
+"""
+import argparse
+import os
+import time
+from datetime import datetime
+
+import akshare as ak
+import numpy as np
+import pandas as pd
+
+from trade_utils import get_project_path
+
+
+OUTPUT_DIR = get_project_path("板块观察")
+BENCHMARK_SYMBOL = "000001"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="板块量能与涨停观察")
+    parser.add_argument("--days", type=int, default=80, help="板块历史天数")
+    parser.add_argument("--top", type=int, default=30, help="展示前N个板块")
+    parser.add_argument("--sleep", type=float, default=0.03, help="逐板块请求间隔")
+    parser.add_argument("--limit-up-days", type=int, default=5, help="统计近N日涨停板块归属")
+    return parser.parse_args()
+
+
+def score_direct(value, low, high):
+    if value is None or pd.isna(value) or high == low:
+        return 0.0
+    return max(0.0, min(100.0, (float(value) - low) / (high - low) * 100.0))
+
+
+def pct_change(series, days):
+    if len(series) <= days:
+        return np.nan
+    base = series.iloc[-days - 1]
+    return series.iloc[-1] / base - 1 if base else np.nan
+
+
+def normalize_board_name(name):
+    return str(name).replace("行业板块", "").strip()
+
+
+def load_board_names():
+    df = ak.stock_board_industry_name_em()
+    if df is None or df.empty:
+        return pd.DataFrame()
+    name_col = "板块名称" if "板块名称" in df.columns else "名称"
+    df = df.rename(columns={name_col: "board_name"})
+    df["board_name"] = df["board_name"].map(normalize_board_name)
+    return df.dropna(subset=["board_name"])
+
+
+def load_board_history(board_name, days):
+    df = ak.stock_board_industry_hist_em(symbol=board_name, period="日k", adjust="")
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df = df.copy()
+    df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
+    for col in ["开盘", "收盘", "最高", "最低", "成交额", "成交量", "涨跌幅"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["日期", "收盘"]).sort_values("日期").tail(days).reset_index(drop=True)
+    return df
+
+
+def load_benchmark(days):
+    df = ak.stock_zh_index_daily_em(symbol=BENCHMARK_SYMBOL)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    return df.dropna(subset=["date", "close"]).sort_values("date").tail(days).reset_index(drop=True)
+
+
+def calc_board_metrics(board_name, hist, benchmark):
+    close = hist["收盘"]
+    amount = hist["成交额"] if "成交额" in hist.columns else pd.Series(dtype=float)
+    ret1 = pct_change(close, 1)
+    ret3 = pct_change(close, 3)
+    ret5 = pct_change(close, 5)
+    ret20 = pct_change(close, 20)
+    amount5 = amount.tail(5).mean() if len(amount) >= 5 else np.nan
+    amount20 = amount.tail(20).mean() if len(amount) >= 20 else np.nan
+    amount60 = amount.tail(60).mean() if len(amount) >= 60 else np.nan
+    amount_ratio_5_20 = amount5 / amount20 if amount20 and amount20 > 0 else np.nan
+    amount_ratio_20_60 = amount20 / amount60 if amount60 and amount60 > 0 else np.nan
+
+    resilience = np.nan
+    attack = np.nan
+    if benchmark is not None and not benchmark.empty:
+        merged = hist[["日期", "收盘"]].rename(columns={"日期": "date", "收盘": "board_close"}).merge(
+            benchmark[["date", "close"]].rename(columns={"close": "bench_close"}),
+            on="date",
+            how="inner",
+        )
+        if len(merged) >= 10:
+            board_pct = merged["board_close"].pct_change()
+            bench_pct = merged["bench_close"].pct_change()
+            down = bench_pct < 0
+            up = bench_pct > 0
+            if down.sum() >= 3:
+                resilience = float((board_pct[down] > bench_pct[down]).mean())
+            if up.sum() >= 3:
+                attack = float((board_pct[up] > bench_pct[up]).mean())
+
+    score = (
+        score_direct(ret5, -0.03, 0.10) * 0.20
+        + score_direct(ret20, -0.05, 0.25) * 0.20
+        + score_direct(amount_ratio_5_20, 0.80, 1.80) * 0.20
+        + score_direct(amount_ratio_20_60, 0.85, 1.60) * 0.15
+        + score_direct(resilience, 0.45, 0.75) * 0.15
+        + score_direct(attack, 0.45, 0.75) * 0.10
+    )
+    return {
+        "board": board_name,
+        "date": hist.iloc[-1]["日期"].strftime("%Y-%m-%d"),
+        "close": close.iloc[-1],
+        "ret1": ret1,
+        "ret3": ret3,
+        "ret5": ret5,
+        "ret20": ret20,
+        "amount_5_20": amount_ratio_5_20,
+        "amount_20_60": amount_ratio_20_60,
+        "weak_resilience": resilience,
+        "strong_attack": attack,
+        "mainline_score": round(score, 1),
+    }
+
+
+def load_limit_up_counts(days):
+    counts = {}
+    try:
+        dates = pd.bdate_range(end=pd.Timestamp.today(), periods=days * 2)
+        for day in reversed(dates):
+            date_str = day.strftime("%Y%m%d")
+            try:
+                zt = ak.stock_zt_pool_em(date=date_str)
+            except Exception:
+                continue
+            if zt is None or zt.empty:
+                continue
+            for _, row in zt.iterrows():
+                board = row.get("所属行业") or row.get("行业")
+                if not board or pd.isna(board):
+                    continue
+                board = normalize_board_name(board)
+                counts[board] = counts.get(board, 0) + 1
+            days -= 1
+            if days <= 0:
+                break
+    except Exception:
+        return {}
+    return counts
+
+
+def print_sector_report(df, path, top):
+    display = df.head(top).copy()
+    cols = [
+        "board", "final_score", "mainline_score", "limit_up_count", "ret1", "ret3",
+        "ret5", "ret20", "amount_5_20", "amount_20_60", "weak_resilience", "strong_attack",
+    ]
+    print("\n================ 板块主线观察 ================")
+    print(f"结果文件: {path}")
+    print("阅读顺序: 总分 -> 主线分 -> 涨停扩散 -> 短中期涨幅 -> 量能 -> 弱市韧性/强市进攻")
+    print(display[cols].to_string(index=False, formatters={
+        "ret1": lambda v: f"{v:.1%}" if pd.notna(v) else "-",
+        "ret3": lambda v: f"{v:.1%}" if pd.notna(v) else "-",
+        "ret5": lambda v: f"{v:.1%}" if pd.notna(v) else "-",
+        "ret20": lambda v: f"{v:.1%}" if pd.notna(v) else "-",
+        "amount_5_20": lambda v: f"{v:.2f}" if pd.notna(v) else "-",
+        "amount_20_60": lambda v: f"{v:.2f}" if pd.notna(v) else "-",
+        "weak_resilience": lambda v: f"{v:.0%}" if pd.notna(v) else "-",
+        "strong_attack": lambda v: f"{v:.0%}" if pd.notna(v) else "-",
+    }))
+    print("\n复盘提示:")
+    print("1. final_score 高且 amount_5_20 > 1，说明短期资金正在放大。")
+    print("2. weak_resilience 高，说明大盘弱时更抗跌；strong_attack 高，说明大盘强时更有进攻性。")
+    print("3. limit_up_count 连续扩散时，优先回看该板块内的右侧候选和首板/连板结构。")
+
+
+def main():
+    args = parse_args()
+    boards = load_board_names()
+    if boards.empty:
+        raise SystemExit("无法获取行业板块列表")
+    benchmark = load_benchmark(args.days + 5)
+    limit_up_counts = load_limit_up_counts(args.limit_up_days)
+
+    rows = []
+    for idx, board_name in enumerate(boards["board_name"].tolist(), start=1):
+        try:
+            hist = load_board_history(board_name, args.days)
+            if len(hist) >= 25:
+                row = calc_board_metrics(board_name, hist, benchmark)
+                row["limit_up_count"] = limit_up_counts.get(board_name, 0)
+                row["final_score"] = round(row["mainline_score"] + score_direct(row["limit_up_count"], 0, 8) * 0.15, 1)
+                rows.append(row)
+        except Exception as exc:
+            print(f"跳过 {board_name}: {exc}")
+        if args.sleep > 0:
+            time.sleep(args.sleep)
+        if idx % 20 == 0:
+            print(f"进度 {idx}/{len(boards)}, 有效 {len(rows)}")
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        raise SystemExit("无有效板块数据")
+    df = df.sort_values(["final_score", "mainline_score", "ret5"], ascending=False)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    path = os.path.join(OUTPUT_DIR, f"sector_watch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+    df.to_csv(path, index=False, encoding="utf-8-sig")
+    print_sector_report(df, path, args.top)
+
+
+if __name__ == "__main__":
+    main()

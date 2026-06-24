@@ -10,6 +10,7 @@ import json
 import multiprocessing
 import os
 import signal
+import sys
 from datetime import datetime
 
 import akshare as ak
@@ -41,9 +42,12 @@ DEFAULT_QUALITY_MIN_SCORE = DEFAULT_MIN_SCORE
 DEFAULT_LOW_VALUE_MIN_SCORE = 75
 DEFAULT_CORE_MIN_SCORE = 80
 DEFAULT_DIAGNOSTIC_TOP = 30
+DEFAULT_VALUE_WATCH_TOP = 20
 VALUE_UNDERVALUED_RATIO = 0.85
 VALUE_LOW_VALUE_RATIO = 1.00
 VALUE_REASONABLE_RATIO = 1.10
+VALUE_WATCH_RATIO = 1.08
+VALUE_WATCH_MIN_QUALITY_SCORE = 55
 VALUE_QUALITY_MAX_RATIO = 1.80
 PEPB_REASONABLE_RATIO = 1.10
 PEPB_REASONABLE_PERCENTILE = 0.25
@@ -1578,6 +1582,33 @@ def pass_diagnostic_gate(row):
     return is_actionable_watch(row) or row.get("total_score", 0) >= 70 or row.get("mainline_score", 0) >= 65
 
 
+def is_value_watch_candidate(row, max_price_to_value=VALUE_WATCH_RATIO):
+    if row is None or row.get("method") != "VALUE":
+        return False
+    price_to_value = row.get("price_to_value")
+    if price_to_value is None or pd.isna(price_to_value):
+        return False
+    if price_to_value > max_price_to_value:
+        return False
+    mktcap = row.get("mktcap")
+    if mktcap is not None and pd.notna(mktcap) and mktcap < VALUE_MIN_MKTCAP:
+        return False
+    if row.get("quality_score", 0) < VALUE_WATCH_MIN_QUALITY_SCORE:
+        return False
+    return True
+
+
+def get_value_watch_rows(rows, max_price_to_value=VALUE_WATCH_RATIO, top=DEFAULT_VALUE_WATCH_TOP):
+    candidates = [row for row in rows if is_value_watch_candidate(row, max_price_to_value)]
+    candidates.sort(key=lambda row: (
+        abs((row.get("price_to_value") or 0) - 1.0),
+        row.get("price_to_value") or 99,
+        -(row.get("quality_score") or 0),
+        -(row.get("liquidity_score") or 0),
+    ))
+    return candidates[:top] if top and top > 0 else candidates
+
+
 def get_block_reason(row, quality_min_score, low_min_score, core_min_score):
     if row is None:
         return ""
@@ -1978,11 +2009,25 @@ def build_theme_summary(rows):
         for _, r in summary.iterrows()
     )
     return (
-        "<h3>主线观察</h3>"
         "<table border='1' cellpadding='4' style='border-collapse:collapse'>"
         "<tr><th>主题</th><th>入选数</th><th>平均主线分</th><th>20日均涨幅</th><th>60日均涨幅</th><th>代表股票</th></tr>"
         f"{rows_html}</table>"
     )
+
+
+def build_daily_risk_notes(core_rows, low_value_rows, high_quality_rows, value_watch_rows):
+    notes = [
+        "先看板块/主题是否持续有量，再看个股是否进入右侧或回到价值线附近。",
+        "价值线附近观察不等于正式买入，趋势未确认时只适合盯盘和等待右侧信号。",
+        "右侧主线候选波动通常更大，追高前需要结合量能、扣抵价和波段分位复核。",
+    ]
+    if not core_rows and not low_value_rows:
+        notes.append("今日正式低估组合较弱，说明左侧安全垫样本不足。")
+    if not high_quality_rows:
+        notes.append("今日右侧主线候选为空，说明趋势确认不足。")
+    if value_watch_rows and not low_value_rows:
+        notes.append("有价值线附近股票但低估价值正式入选少，优先观察承接而不是直接按低估买入。")
+    return notes
 
 
 def build_push_list(rows, top):
@@ -2000,20 +2045,29 @@ def build_push_list(rows, top):
     return f"<ol>{items}</ol>"
 
 
-def build_push_content(diff_html, core_rows, low_value_rows, high_quality_rows, quality_min_score, low_min_score, core_min_score, top):
+def build_push_table(rows, top):
+    return build_html_table(rows[:top])
+
+
+def build_push_content(diff_html, core_rows, low_value_rows, high_quality_rows, value_watch_rows, quality_min_score, low_min_score, core_min_score, top):
     display_top = min(top, 10)
     all_rows = core_rows + low_value_rows + high_quality_rows
+    risk_items = "".join(f"<li>{note}</li>" for note in build_daily_risk_notes(core_rows, low_value_rows, high_quality_rows, value_watch_rows))
     return (
-        f"{diff_html}"
-        f"<p>入选条件：低估且高质量 >= {core_min_score}；低估价值 >= {low_min_score}；高质量趋势 >= {quality_min_score}。"
-        f"推送每组最多展示前 {display_top} 只，全量结果见服务器 CSV。</p>"
-        f"{build_theme_summary(all_rows)}"
-        f"<h3>低估且高质量({len(core_rows)}只)</h3>"
-        f"{build_push_list(core_rows, display_top)}"
-        f"<h3>低估价值({len(low_value_rows)}只)</h3>"
-        f"{build_push_list(low_value_rows, display_top)}"
-        f"<h3>高质量趋势({len(high_quality_rows)}只)</h3>"
-        f"{build_push_list(high_quality_rows, display_top)}"
+        "<h2>每日交易观察</h2>"
+        f"<p>展示顺序：主线主题 -> 右侧主线候选 -> 价值线附近观察 -> 左侧低估组合 -> 风险提示。"
+        f"正式入选阈值：低估且高质量 >= {core_min_score}；低估价值 >= {low_min_score}；"
+        f"高质量趋势 >= {quality_min_score}。每组最多展示前 {display_top} 只，全量结果见服务器 CSV。</p>"
+        f"<h3>0. 较上一日变化</h3>{diff_html}"
+        f"<h3>1. 主线主题</h3>{build_theme_summary(all_rows)}"
+        f"<h3>2. 右侧主线候选({len(high_quality_rows)}只)</h3>"
+        f"{build_push_table(high_quality_rows, display_top)}"
+        f"<h3>3. 价值线附近观察({len(value_watch_rows)}只)</h3>"
+        f"{build_push_table(value_watch_rows, display_top)}"
+        f"<h3>4. 左侧低估组合</h3>"
+        f"<h4>低估且高质量({len(core_rows)}只)</h4>{build_push_table(core_rows, display_top)}"
+        f"<h4>低估价值({len(low_value_rows)}只)</h4>{build_push_table(low_value_rows, display_top)}"
+        f"<h3>5. 风险提示</h3><ul>{risk_items}</ul>"
     )
 
 
@@ -2028,6 +2082,8 @@ def parse_args():
     parser.add_argument("--workers", type=int, default=4, help="并行处理进程数；1表示串行")
     parser.add_argument("--no-push", action="store_true", help="只输出结果，不推送")
     parser.add_argument("--diagnostic-top", type=int, default=DEFAULT_DIAGNOSTIC_TOP, help="额外打印和保存观察候选数量")
+    parser.add_argument("--value-watch-ratio", type=float, default=VALUE_WATCH_RATIO, help="价值线附近观察池最高现价/价值线")
+    parser.add_argument("--value-watch-top", type=int, default=DEFAULT_VALUE_WATCH_TOP, help="价值线附近观察池展示数量；0表示全部")
     return parser.parse_args()
 
 
@@ -2079,19 +2135,89 @@ def print_theme_summary(rows):
     }))
 
 
+def print_value_watch_summary(rows, top):
+    print(f"\n--- 价值线附近观察({len(rows)}只，显示前{min(top, len(rows))}只) ---")
+    if not rows:
+        print("无")
+        return
+    display_rows = []
+    for row in rows[:top]:
+        display = row.copy()
+        display["valuation_detail"] = build_valuation_detail(row)
+        display_rows.append(display)
+    cols = [
+        "code", "name", "theme", "close", "price_to_value", "value_line", "total_score",
+        "quality_score", "trend_score", "liquidity_score", "selection_bucket", "block_reason",
+        "valuation_detail", "risk_flags",
+    ]
+    print(pd.DataFrame(display_rows)[cols].to_string(index=False, formatters={
+        "price_to_value": lambda v: fmt_num(v, 2),
+        "value_line": lambda v: fmt_num(v, 2),
+    }))
+
+
+def print_compact_rows(title, rows, top, columns=None):
+    print(f"\n{title}({len(rows)}只，显示前{min(top, len(rows))}只)")
+    if not rows:
+        print("无")
+        return
+    base_columns = [
+        "code", "name", "theme", "selection_bucket", "close", "total_score",
+        "price_to_value", "value_line", "quality_score", "trend_score",
+        "liquidity_score", "mainline_score", "mainline_label", "risk_flags",
+    ]
+    cols = columns or base_columns
+    frame = pd.DataFrame(rows[:top])
+    cols = [col for col in cols if col in frame.columns]
+    print(frame[cols].to_string(index=False, formatters={
+        "price_to_value": lambda v: fmt_num(v, 2),
+        "value_line": lambda v: fmt_num(v, 2),
+        "ret20": lambda v: fmt_pct(v, 0),
+        "ret60": lambda v: fmt_pct(v, 0),
+    }))
+
+
+def print_daily_report(today_str, core_rows, low_value_rows, high_quality_rows, value_watch_rows, top):
+    all_rows = core_rows + low_value_rows + high_quality_rows
+    display_top = min(top, 10)
+    print("\n================ 每日交易观察 ================")
+    print(f"交易日: {today_str}")
+    print("阅读顺序: 主线主题 -> 右侧主线候选 -> 价值线附近观察 -> 左侧低估组合 -> 风险提示")
+    print(
+        f"正式入选: {len(all_rows)}只 | 右侧主线 {len(high_quality_rows)}只 | "
+        f"价值线附近观察 {len(value_watch_rows)}只 | 低估且高质量 {len(core_rows)}只 | 低估价值 {len(low_value_rows)}只"
+    )
+
+    print_theme_summary(all_rows)
+    print_compact_rows("2. 右侧主线候选", high_quality_rows, display_top, [
+        "code", "name", "theme", "close", "total_score", "quality_score", "trend_score",
+        "liquidity_score", "mainline_score", "mainline_label", "ret20", "ret60", "risk_flags",
+    ])
+    print_compact_rows("3. 价值线附近观察", value_watch_rows, display_top, [
+        "code", "name", "theme", "close", "price_to_value", "value_line", "total_score",
+        "quality_score", "trend_score", "liquidity_score", "block_reason", "risk_flags",
+    ])
+    print_compact_rows("4.1 低估且高质量", core_rows, display_top)
+    print_compact_rows("4.2 低估价值", low_value_rows, display_top)
+
+    print("\n5. 风险提示")
+    for idx, note in enumerate(build_daily_risk_notes(core_rows, low_value_rows, high_quality_rows, value_watch_rows), start=1):
+        print(f"{idx}. {note}")
+
+
 def main():
     global BENCHMARK_DF
     args = parse_args()
     lg = bs.login()
     if lg.error_code != "0":
         print("登录失败:", lg.error_msg)
-        return
+        sys.exit(1)
 
     today_str, df_stocks = get_trade_day_and_universe()
     if not today_str or df_stocks.empty:
         print("无法获取股票列表")
         bs.logout()
-        return
+        sys.exit(1)
     industry_map = get_industry_map()
     year, quarter = get_latest_quarter(today_str)
     BENCHMARK_DF = get_benchmark_history(today_str)
@@ -2200,11 +2326,9 @@ def main():
         print(f"诊断结果已保存: {diagnostic_path}")
 
     print(f"\n共筛选出 {len(rows)} 只：低估且高质量 {len(core_rows)} 只，低估价值 {len(low_value_rows)} 只，高质量趋势 {len(high_quality_rows)} 只")
+    value_watch_rows = get_value_watch_rows(all_rows, args.value_watch_ratio, args.value_watch_top)
+    print_daily_report(today_str, core_rows, low_value_rows, high_quality_rows, value_watch_rows, args.top)
     print_diagnostic_summary(all_rows, skipped, args.diagnostic_top)
-    print_theme_summary(rows)
-    print_result_section("低估且高质量", core_rows, args.top)
-    print_result_section("低估价值", low_value_rows, args.top)
-    print_result_section("高质量趋势", high_quality_rows, args.top)
 
     last_dict = load_last_result(LAST_RESULT_FILE)
     diff_html = build_diff_html(last_dict, top_rows) if last_dict else "<p>首次运行，无历史对比</p>"
@@ -2218,7 +2342,7 @@ def main():
         send_pushplus(f"{today_str} 因子选股", "今日无符合因子模型条件股票" + diff_html)
         return
 
-    content = build_push_content(diff_html, core_rows, low_value_rows, high_quality_rows, args.quality_min_score, args.low_min_score, args.core_min_score, args.top)
+    content = build_push_content(diff_html, core_rows, low_value_rows, high_quality_rows, value_watch_rows, args.quality_min_score, args.low_min_score, args.core_min_score, args.top)
     send_pushplus(f"{today_str} 因子选股({len(top_rows)}/{len(rows)}只)", content)
 
 

@@ -1,4 +1,8 @@
 .pushplus_token
 *.log
 __pycache__/
+.cache/
+logs/
 选股结果/
+板块观察/
+回测结果/

@@ -23,6 +23,7 @@ def parse_args():
     parser.add_argument("--buy-date", required=True, help="买入日期 YYYY-MM-DD")
     parser.add_argument("--end-date", required=True, help="结束日期 YYYY-MM-DD")
     parser.add_argument("--source", choices=["baostock", "akshare"], default="baostock")
+    parser.add_argument("--code-prefixes", default="", help="只修复指定代码前缀，多个用逗号分隔，如 sz.300,sh.688")
     parser.add_argument("--sleep", type=float, default=0.02, help="逐股请求间隔秒数")
     return parser.parse_args()
 
@@ -106,8 +107,12 @@ def close_pair_baostock(code, buy_date, end_date, adjustflag):
     )
 
 
-def repair_file(path, buy_date, end_date, sleep_seconds, source):
+def repair_file(path, buy_date, end_date, sleep_seconds, source, code_prefixes=""):
     df = pd.read_csv(path)
+    if code_prefixes:
+        prefixes = tuple(prefix.strip().lower() for prefix in code_prefixes.split(",") if prefix.strip())
+        if prefixes:
+            df = df[df["code"].astype(str).str.lower().str.startswith(prefixes)].copy()
     rows = []
     errors = []
     cache = {}
@@ -174,7 +179,7 @@ def main():
         logged_in = True
     try:
         for path in args.files:
-            repair_file(path, args.buy_date, args.end_date, args.sleep, args.source)
+            repair_file(path, args.buy_date, args.end_date, args.sleep, args.source, args.code_prefixes)
     finally:
         if logged_in:
             bs.logout()

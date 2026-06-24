@@ -12,7 +12,6 @@ import os
 from datetime import datetime
 
 import baostock as bs
-import efinance as ef
 import akshare as ak
 import numpy as np
 import pandas as pd
@@ -46,6 +45,11 @@ from factorStock import (
     score_inverse,
     time_limit,
 )
+
+try:
+    import efinance as ef
+except ImportError:
+    ef = None
 
 
 OUTPUT_DIR = get_project_path("回测结果")
@@ -91,6 +95,7 @@ def parse_args():
     parser.add_argument("--offset", type=int, default=0, help="分段续跑用，从截面股票列表第N只开始")
     parser.add_argument("--limit", type=int, default=0, help="调试用，只处理前N只")
     parser.add_argument("--codes", default="", help="只回测指定代码，多个用逗号分隔，如 sz.300502,300308")
+    parser.add_argument("--code-prefixes", default="", help="只回测指定代码前缀，多个用逗号分隔，如 sz.300,sh.688")
     parser.add_argument("--maxtasksperchild", type=int, default=120, help="多进程模式下每个worker处理多少任务后重启")
     parser.add_argument("--include-earnings-mainline", action="store_true", help="补充财报后主线候选实验层")
     parser.add_argument("--earnings-mainline-min-score", type=float, default=70)
@@ -660,6 +665,8 @@ def get_latest_quotes_for_rows(rows):
     codes = [row["code"].replace("sh.", "").replace("sz.", "") for row in rows]
     if not codes:
         return {}
+    if ef is None:
+        return {}
     quotes = {}
     for start in range(0, len(codes), 80):
         batch = codes[start:start + 80]
@@ -745,6 +752,9 @@ def main():
     if args.codes:
         selected_codes = {normalize_code(code) for code in args.codes.split(",")}
         universe = universe[universe["code"].isin(selected_codes)].reset_index(drop=True)
+    if args.code_prefixes:
+        prefixes = tuple(prefix.strip().lower() for prefix in args.code_prefixes.split(",") if prefix.strip())
+        universe = universe[universe["code"].str.lower().str.startswith(prefixes)].reset_index(drop=True)
     if args.offset:
         universe = universe.iloc[args.offset:].reset_index(drop=True)
     if args.limit:
