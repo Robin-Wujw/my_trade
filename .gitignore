@@ -1,8 +1,15 @@
 .pushplus_token
+.pushplus_token
 *.log
 __pycache__/
 .cache/
+.claude/
 logs/
+.factorStock_last.json
+.selectStock_last.json
+.stockpush_last.json
+.valuePEPB_last.json
+.valueStock_last.json
 选股结果/
 板块观察/
 回测结果/
