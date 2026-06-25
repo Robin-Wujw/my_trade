@@ -8,7 +8,9 @@ inside those sectors. The scoring favors repeated strength, amount expansion,
 weak-market resilience, and limit-up participation.
 """
 import argparse
+import hashlib
 import os
+import random
 import time
 from datetime import datetime
 
@@ -20,6 +22,7 @@ from trade_utils import get_project_path
 
 
 OUTPUT_DIR = get_project_path("板块观察")
+CACHE_DIR = get_project_path(".cache/sector_watch")
 BENCHMARK_SYMBOL = "000001"
 
 
@@ -28,8 +31,57 @@ def parse_args():
     parser.add_argument("--days", type=int, default=80, help="板块历史天数")
     parser.add_argument("--top", type=int, default=30, help="展示前N个板块")
     parser.add_argument("--sleep", type=float, default=0.03, help="逐板块请求间隔")
+    parser.add_argument("--retries", type=int, default=4, help="东方财富接口失败重试次数")
+    parser.add_argument("--retry-delay", type=float, default=2.0, help="接口失败后的退避基准秒数")
     parser.add_argument("--limit-up-days", type=int, default=5, help="统计近N日涨停板块归属")
     return parser.parse_args()
+
+
+def call_with_backoff(func, label, retries=4, retry_delay=2.0):
+    last_exc = None
+    for attempt in range(1, max(1, retries) + 1):
+        try:
+            return func()
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= retries:
+                break
+            wait = retry_delay * attempt + random.uniform(0, retry_delay)
+            print(f"{label} 请求失败: {exc} | 第 {attempt}/{retries} 次，{wait:.1f}s 后重试")
+            time.sleep(wait)
+    raise last_exc
+
+
+def cache_path(kind, key):
+    safe = hashlib.md5(str(key).encode("utf-8")).hexdigest()
+    return os.path.join(CACHE_DIR, kind, f"{safe}.csv")
+
+
+def read_cache(kind, key, date_cols=None):
+    path = cache_path(kind, key)
+    try:
+        if os.path.exists(path):
+            df = pd.read_csv(path)
+            for col in date_cols or []:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col], errors="coerce")
+            return df
+    except Exception as exc:
+        print(f"读取缓存失败 {kind}/{key}: {exc}")
+    return pd.DataFrame()
+
+
+def write_cache(kind, key, df):
+    if df is None or df.empty:
+        return
+    path = cache_path(kind, key)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = f"{path}.{os.getpid()}.tmp"
+        df.to_csv(tmp_path, index=False, encoding="utf-8-sig")
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        print(f"写入缓存失败 {kind}/{key}: {exc}")
 
 
 def score_direct(value, low, high):
@@ -49,18 +101,44 @@ def normalize_board_name(name):
     return str(name).replace("行业板块", "").strip()
 
 
-def load_board_names():
-    df = ak.stock_board_industry_name_em()
+def load_board_names(retries=4, retry_delay=2.0):
+    try:
+        df = call_with_backoff(
+            ak.stock_board_industry_name_em,
+            "行业板块列表",
+            retries=retries,
+            retry_delay=retry_delay,
+        )
+    except Exception as exc:
+        cached = read_cache("board_names", "industry")
+        if not cached.empty:
+            print(f"行业板块列表读取失败，使用缓存: {exc}")
+            return cached
+        raise
     if df is None or df.empty:
         return pd.DataFrame()
     name_col = "板块名称" if "板块名称" in df.columns else "名称"
     df = df.rename(columns={name_col: "board_name"})
     df["board_name"] = df["board_name"].map(normalize_board_name)
-    return df.dropna(subset=["board_name"])
+    df = df.dropna(subset=["board_name"])
+    write_cache("board_names", "industry", df)
+    return df
 
 
-def load_board_history(board_name, days):
-    df = ak.stock_board_industry_hist_em(symbol=board_name, period="日k", adjust="")
+def load_board_history(board_name, days, retries=4, retry_delay=2.0):
+    try:
+        df = call_with_backoff(
+            lambda: ak.stock_board_industry_hist_em(symbol=board_name, period="日k", adjust=""),
+            f"{board_name} 板块K线",
+            retries=retries,
+            retry_delay=retry_delay,
+        )
+    except Exception as exc:
+        cached = read_cache("board_history", board_name, date_cols=["日期"])
+        if not cached.empty:
+            print(f"{board_name} K线读取失败，使用缓存: {exc}")
+            return cached.tail(days).reset_index(drop=True)
+        raise
     if df is None or df.empty:
         return pd.DataFrame()
     df = df.copy()
@@ -68,8 +146,9 @@ def load_board_history(board_name, days):
     for col in ["开盘", "收盘", "最高", "最低", "成交额", "成交量", "涨跌幅"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.dropna(subset=["日期", "收盘"]).sort_values("日期").tail(days).reset_index(drop=True)
-    return df
+    df = df.dropna(subset=["日期", "收盘"]).sort_values("日期").reset_index(drop=True)
+    write_cache("board_history", board_name, df)
+    return df.tail(days).reset_index(drop=True)
 
 
 def load_benchmark(days):
@@ -190,7 +269,7 @@ def print_sector_report(df, path, top):
 
 def main():
     args = parse_args()
-    boards = load_board_names()
+    boards = load_board_names(retries=args.retries, retry_delay=args.retry_delay)
     if boards.empty:
         raise SystemExit("无法获取行业板块列表")
     benchmark = load_benchmark(args.days + 5)
@@ -199,7 +278,12 @@ def main():
     rows = []
     for idx, board_name in enumerate(boards["board_name"].tolist(), start=1):
         try:
-            hist = load_board_history(board_name, args.days)
+            hist = load_board_history(
+                board_name,
+                args.days,
+                retries=args.retries,
+                retry_delay=args.retry_delay,
+            )
             if len(hist) >= 25:
                 row = calc_board_metrics(board_name, hist, benchmark)
                 row["limit_up_count"] = limit_up_counts.get(board_name, 0)

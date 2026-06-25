@@ -2080,6 +2080,7 @@ def parse_args():
     parser.add_argument("--value-min-mktcap", type=float, default=VALUE_MIN_MKTCAP, help="VALUE股票最低市值，单位亿元")
     parser.add_argument("--limit", type=int, default=0, help="只处理前N只股票，调试用；0表示全量")
     parser.add_argument("--workers", type=int, default=4, help="并行处理进程数；1表示串行")
+    parser.add_argument("--maxtasksperchild", type=int, default=120, help="多进程模式下每个worker处理多少任务后重启")
     parser.add_argument("--no-push", action="store_true", help="只输出结果，不推送")
     parser.add_argument("--diagnostic-top", type=int, default=DEFAULT_DIAGNOSTIC_TOP, help="额外打印和保存观察候选数量")
     parser.add_argument("--value-watch-ratio", type=float, default=VALUE_WATCH_RATIO, help="价值线附近观察池最高现价/价值线")
@@ -2246,7 +2247,12 @@ def main():
     workers = max(1, args.workers)
     if workers > 1:
         bs.logout()
-        with multiprocessing.Pool(processes=workers, initializer=init_worker, initargs=(today_str,)) as pool:
+        with multiprocessing.Pool(
+            processes=workers,
+            initializer=init_worker,
+            initargs=(today_str,),
+            maxtasksperchild=args.maxtasksperchild if args.maxtasksperchild > 0 else None,
+        ) as pool:
             for idx, result in enumerate(pool.imap_unordered(score_stock_task, tasks), start=1):
                 if result["error"]:
                     print(f"  {result['code']} {result['name']} 处理失败: {result['error']}")

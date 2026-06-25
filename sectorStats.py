@@ -9,7 +9,9 @@ The workbook is designed for daily review:
 4. A text-analysis sheet for quick reading.
 """
 import argparse
+import hashlib
 import os
+import random
 import time
 from datetime import datetime
 
@@ -24,6 +26,7 @@ from trade_utils import get_project_path
 
 
 OUTPUT_DIR = get_project_path("板块观察")
+CACHE_DIR = get_project_path(".cache/sector_stats")
 BENCHMARK_SYMBOL = "000001"
 SECTOR_GROUPS = [
     "有色资源类",
@@ -52,8 +55,57 @@ def parse_args():
     parser.add_argument("--history-days", type=int, default=90, help="板块历史K线拉取天数")
     parser.add_argument("--top-amount", type=int, default=50, help="统计成交额前N板块")
     parser.add_argument("--sleep", type=float, default=0.03, help="板块接口请求间隔")
+    parser.add_argument("--retries", type=int, default=4, help="东方财富接口失败重试次数")
+    parser.add_argument("--retry-delay", type=float, default=2.0, help="接口失败后的退避基准秒数")
     parser.add_argument("--sample", action="store_true", help="生成离线样例，不访问网络")
     return parser.parse_args()
+
+
+def call_with_backoff(func, label, retries=4, retry_delay=2.0):
+    last_exc = None
+    for attempt in range(1, max(1, retries) + 1):
+        try:
+            return func()
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= retries:
+                break
+            wait = retry_delay * attempt + random.uniform(0, retry_delay)
+            print(f"{label} 请求失败: {exc} | 第 {attempt}/{retries} 次，{wait:.1f}s 后重试")
+            time.sleep(wait)
+    raise last_exc
+
+
+def cache_path(kind, key):
+    safe = hashlib.md5(str(key).encode("utf-8")).hexdigest()
+    return os.path.join(CACHE_DIR, kind, f"{safe}.csv")
+
+
+def read_cache(kind, key, date_cols=None):
+    path = cache_path(kind, key)
+    try:
+        if os.path.exists(path):
+            df = pd.read_csv(path)
+            for col in date_cols or []:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col], errors="coerce")
+            return df
+    except Exception as exc:
+        print(f"读取缓存失败 {kind}/{key}: {exc}")
+    return pd.DataFrame()
+
+
+def write_cache(kind, key, df):
+    if df is None or df.empty:
+        return
+    path = cache_path(kind, key)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = f"{path}.{os.getpid()}.tmp"
+        df.to_csv(tmp_path, index=False, encoding="utf-8-sig")
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        print(f"写入缓存失败 {kind}/{key}: {exc}")
 
 
 def classify_group(name):
@@ -90,19 +142,45 @@ def candle_label(row):
     return f"{level}{direction}"
 
 
-def load_board_names():
-    df = ak.stock_board_industry_name_em()
+def load_board_names(retries=4, retry_delay=2.0):
+    try:
+        df = call_with_backoff(
+            ak.stock_board_industry_name_em,
+            "行业板块列表",
+            retries=retries,
+            retry_delay=retry_delay,
+        )
+    except Exception as exc:
+        cached = read_cache("board_names", "industry")
+        if not cached.empty:
+            print(f"行业板块列表读取失败，使用缓存: {exc}")
+            return cached
+        raise
     if df is None or df.empty:
         return pd.DataFrame()
     name_col = "板块名称" if "板块名称" in df.columns else "名称"
     df = df.rename(columns={name_col: "board"})
     df["board"] = df["board"].map(normalize_board_name)
     df["group"] = df["board"].map(classify_group)
-    return df.dropna(subset=["board"]).drop_duplicates(subset=["board"], keep="first")
+    df = df.dropna(subset=["board"]).drop_duplicates(subset=["board"], keep="first")
+    write_cache("board_names", "industry", df)
+    return df
 
 
-def load_board_history(board, days):
-    df = ak.stock_board_industry_hist_em(symbol=board, period="日k", adjust="")
+def load_board_history(board, days, retries=4, retry_delay=2.0):
+    try:
+        df = call_with_backoff(
+            lambda: ak.stock_board_industry_hist_em(symbol=board, period="日k", adjust=""),
+            f"{board} 板块K线",
+            retries=retries,
+            retry_delay=retry_delay,
+        )
+    except Exception as exc:
+        cached = read_cache("board_history", board, date_cols=["date"])
+        if not cached.empty:
+            print(f"{board} K线读取失败，使用缓存: {exc}")
+            return cached.tail(days).reset_index(drop=True)
+        raise
     if df is None or df.empty:
         return pd.DataFrame()
     df = df.copy()
@@ -114,7 +192,9 @@ def load_board_history(board, days):
         df["pct_chg"] = pd.to_numeric(df["涨跌幅"], errors="coerce") / 100.0
     else:
         df["pct_chg"] = df["close"].pct_change()
-    return df.dropna(subset=["date", "close"]).sort_values("date").tail(days).reset_index(drop=True)
+    df = df.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
+    write_cache("board_history", board, df)
+    return df.tail(days).reset_index(drop=True)
 
 
 def build_board_daily(history_map, board_info, lookback):
@@ -433,7 +513,7 @@ def main():
         })
     else:
         try:
-            boards = load_board_names()
+            boards = load_board_names(retries=args.retries, retry_delay=args.retry_delay)
         except Exception as exc:
             raise SystemExit(f"无法访问东方财富板块接口：{exc}\n可先用 --sample 查看版式，或换网络后重跑真实数据。")
         if boards.empty:
@@ -442,7 +522,12 @@ def main():
         history_map = {}
         for idx, board in enumerate(boards["board"].tolist(), start=1):
             try:
-                history_map[board] = load_board_history(board, args.history_days)
+                history_map[board] = load_board_history(
+                    board,
+                    args.history_days,
+                    retries=args.retries,
+                    retry_delay=args.retry_delay,
+                )
             except Exception as exc:
                 print(f"跳过 {board}: {exc}")
             if args.sleep > 0:

@@ -41,8 +41,15 @@ run_step() {
 }
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-FACTOR_WORKERS="${FACTOR_WORKERS:-4}"
-FORMULA33_WORKERS="${FORMULA33_WORKERS:-12}"
+FACTOR_WORKERS="${FACTOR_WORKERS:-2}"
+FORMULA33_WORKERS="${FORMULA33_WORKERS:-2}"
+FORMULA33_SLEEP="${FORMULA33_SLEEP:-0.08}"
+FORMULA33_RETRIES="${FORMULA33_RETRIES:-4}"
+FORMULA33_RETRY_DELAY="${FORMULA33_RETRY_DELAY:-2}"
+FORMULA33_CAPITAL_WORKERS="${FORMULA33_CAPITAL_WORKERS:-2}"
+SECTOR_SLEEP="${SECTOR_SLEEP:-0.08}"
+SECTOR_RETRIES="${SECTOR_RETRIES:-4}"
+SECTOR_RETRY_DELAY="${SECTOR_RETRY_DELAY:-2}"
 
 run_step "factorStock daily selection" 7200 \
   "$PYTHON_BIN" -u factorStock.py \
@@ -60,6 +67,11 @@ run_step "formula33 market structure" 7200 \
   --lookback 21 \
   --history-days 90 \
   --workers "$FORMULA33_WORKERS" \
+  --sleep "$FORMULA33_SLEEP" \
+  --retries "$FORMULA33_RETRIES" \
+  --retry-delay "$FORMULA33_RETRY_DELAY" \
+  --capital-workers "$FORMULA33_CAPITAL_WORKERS" \
+  --require-end-trade \
   --price-source akshare \
   --market-cap-source akshare-capital
 
@@ -68,14 +80,18 @@ run_step "sector horizontal statistics" 3600 \
   --lookback 10 \
   --history-days 90 \
   --top-amount 50 \
-  --sleep 0.03
+  --sleep "$SECTOR_SLEEP" \
+  --retries "$SECTOR_RETRIES" \
+  --retry-delay "$SECTOR_RETRY_DELAY"
 
 run_step "sector mainline watch" 3600 \
   "$PYTHON_BIN" -u sectorWatch.py \
   --top 30 \
   --days 80 \
   --limit-up-days 5 \
-  --sleep 0.03
+  --sleep "$SECTOR_SLEEP" \
+  --retries "$SECTOR_RETRIES" \
+  --retry-delay "$SECTOR_RETRY_DELAY"
 
 {
   echo
