@@ -2085,6 +2085,7 @@ def parse_args():
     parser.add_argument("--diagnostic-top", type=int, default=DEFAULT_DIAGNOSTIC_TOP, help="额外打印和保存观察候选数量")
     parser.add_argument("--value-watch-ratio", type=float, default=VALUE_WATCH_RATIO, help="价值线附近观察池最高现价/价值线")
     parser.add_argument("--value-watch-top", type=int, default=DEFAULT_VALUE_WATCH_TOP, help="价值线附近观察池展示数量；0表示全部")
+    parser.add_argument("--allow-login-fail", action="store_true", help="Baostock登录失败时写入占位诊断并返回成功，避免每日流程中断")
     return parser.parse_args()
 
 
@@ -2212,6 +2213,17 @@ def main():
     lg = bs.login()
     if lg.error_code != "0":
         print("登录失败:", lg.error_msg)
+        if args.allow_login_fail:
+            today_str = pd.Timestamp.today().strftime("%Y-%m-%d")
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            path = os.path.join(OUTPUT_DIR, f"factor_diagnostic_{today_str}_{datetime.now().strftime('%H%M%S')}.csv")
+            pd.DataFrame([{
+                "date": today_str,
+                "status": "baostock_login_failed",
+                "skip_reason": lg.error_msg,
+            }]).to_csv(path, index=False, encoding="utf-8-sig")
+            print(f"已按 --allow-login-fail 写入占位诊断: {path}")
+            return
         sys.exit(1)
 
     today_str, df_stocks = get_trade_day_and_universe()

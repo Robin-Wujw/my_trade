@@ -34,6 +34,7 @@ def parse_args():
     parser.add_argument("--retries", type=int, default=4, help="东方财富接口失败重试次数")
     parser.add_argument("--retry-delay", type=float, default=2.0, help="接口失败后的退避基准秒数")
     parser.add_argument("--limit-up-days", type=int, default=5, help="统计近N日涨停板块归属")
+    parser.add_argument("--fallback-sample", action="store_true", help="真实板块接口失败时自动生成离线样例，避免每日流程中断")
     return parser.parse_args()
 
 
@@ -267,10 +268,51 @@ def print_sector_report(df, path, top):
     print("3. limit_up_count 连续扩散时，优先回看该板块内的右侧候选和首板/连板结构。")
 
 
+def sample_watch_rows():
+    boards = ["半导体", "通信设备", "电池", "能源金属", "消费电子", "软件服务"]
+    rows = []
+    for idx, board in enumerate(boards):
+        rows.append({
+            "board": board,
+            "final_score": round(86 - idx * 4.5, 1),
+            "mainline_score": round(78 - idx * 3.8, 1),
+            "limit_up_count": max(0, 5 - idx),
+            "ret1": 0.018 - idx * 0.002,
+            "ret3": 0.042 - idx * 0.004,
+            "ret5": 0.067 - idx * 0.006,
+            "ret20": 0.16 - idx * 0.012,
+            "amount_5_20": 1.42 - idx * 0.05,
+            "amount_20_60": 1.18 - idx * 0.03,
+            "weak_resilience": 0.72 - idx * 0.04,
+            "strong_attack": 0.68 - idx * 0.03,
+            "data_status": "fallback_sample",
+        })
+    return pd.DataFrame(rows)
+
+
 def main():
     args = parse_args()
-    boards = load_board_names(retries=args.retries, retry_delay=args.retry_delay)
+    try:
+        boards = load_board_names(retries=args.retries, retry_delay=args.retry_delay)
+    except Exception as exc:
+        if args.fallback_sample:
+            print(f"真实板块接口失败，改用 --fallback-sample 样例数据: {exc}")
+            df = sample_watch_rows()
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            path = os.path.join(OUTPUT_DIR, f"sector_watch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+            df.to_csv(path, index=False, encoding="utf-8-sig")
+            print_sector_report(df, path, args.top)
+            return
+        raise
     if boards.empty:
+        if args.fallback_sample:
+            print("真实板块列表为空，改用 --fallback-sample 样例数据")
+            df = sample_watch_rows()
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            path = os.path.join(OUTPUT_DIR, f"sector_watch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+            df.to_csv(path, index=False, encoding="utf-8-sig")
+            print_sector_report(df, path, args.top)
+            return
         raise SystemExit("无法获取行业板块列表")
     benchmark = load_benchmark(args.days + 5)
     limit_up_counts = load_limit_up_counts(args.limit_up_days)
@@ -298,6 +340,14 @@ def main():
 
     df = pd.DataFrame(rows)
     if df.empty:
+        if args.fallback_sample:
+            print("真实板块历史为空，改用 --fallback-sample 样例数据")
+            df = sample_watch_rows()
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            path = os.path.join(OUTPUT_DIR, f"sector_watch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+            df.to_csv(path, index=False, encoding="utf-8-sig")
+            print_sector_report(df, path, args.top)
+            return
         raise SystemExit("无有效板块数据")
     df = df.sort_values(["final_score", "mainline_score", "ret5"], ascending=False)
     os.makedirs(OUTPUT_DIR, exist_ok=True)

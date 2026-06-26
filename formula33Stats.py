@@ -27,7 +27,7 @@ import multiprocessing
 import os
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import akshare as ak
 import baostock as bs
@@ -59,6 +59,7 @@ def parse_args():
     parser.add_argument("--lookback", type=int, default=21, help="统计最近N个交易日")
     parser.add_argument("--start-date", default="", help="统计起始交易日，格式 YYYY-MM-DD；传入后按日期区间统计")
     parser.add_argument("--end-date", default="", help="统计截止交易日，格式 YYYY-MM-DD；留空则使用当前日期")
+    parser.add_argument("--data-ready-time", default="16:00", help="未指定 --end-date 时，当天日线视为可用的本地时间")
     parser.add_argument("--history-days", type=int, default=90, help="为指标计算额外拉取的自然日长度")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--sleep", type=float, default=0.0)
@@ -71,6 +72,7 @@ def parse_args():
     parser.add_argument("--exclude-codes", default="", help="逗号分隔的股票代码，按截图/外部股票池复核时可排除")
     parser.add_argument("--maxtasksperchild", type=int, default=200, help="多进程模式下每个worker处理多少任务后重启")
     parser.add_argument("--price-source", choices=["baostock", "akshare"], default="akshare", help="前复权K线来源")
+    parser.add_argument("--metadata-source", choices=["akshare", "baostock", "auto"], default="akshare", help="交易日/股票池/上市日期来源，默认优先 AkShare")
     parser.add_argument("--min-mktcap", type=float, default=100.0, help="最低总市值，单位亿元")
     parser.add_argument("--min-list-days", type=int, default=300, help="最低上市天数")
     parser.add_argument("--debug-filters", action="store_true", help="打印最近交易日各条件逐步通过数量")
@@ -80,6 +82,12 @@ def parse_args():
         choices=["auto", "tushare", "akshare", "akshare-capital", "none"],
         default="auto",
         help="总市值来源；none 仅用于临时复核技术指标数量，会跳过 FINANCE(40) 过滤",
+    )
+    parser.add_argument(
+        "--missing-mktcap-policy",
+        choices=["exclude", "pass"],
+        default="pass",
+        help="总市值源缺失个股时的处理：exclude 严格剔除，pass 不因接口缺字段误杀",
     )
     parser.add_argument("--sample", action="store_true", help="生成离线样例，不访问网络")
     return parser.parse_args()
@@ -169,6 +177,20 @@ def select_trade_dates(trade_dates, start_date, end_date, lookback):
     if start_date:
         return trade_dates
     return trade_dates[-lookback:]
+
+
+def resolve_auto_end_date(end_date, data_ready_time):
+    if end_date:
+        return end_date
+    try:
+        hour, minute = [int(part) for part in str(data_ready_time).split(":", 1)]
+    except (TypeError, ValueError):
+        raise SystemExit(f"--data-ready-time 格式错误: {data_ready_time}")
+    now = datetime.now()
+    ready_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if now < ready_at:
+        return (now.date() - timedelta(days=1)).strftime("%Y-%m-%d")
+    return now.strftime("%Y-%m-%d")
 
 
 def parse_code_set(value):
@@ -695,12 +717,14 @@ def fetch_one_stock(task):
         retry_delay,
         debug_filters,
         require_end_trade,
+        missing_mktcap_policy,
     ) = task
     if sleep > 0:
         time.sleep(sleep)
     if ipo_date is None:
         return []
-    if min_mktcap is not None and mktcap_yi is None:
+    mktcap_missing_ok = min_mktcap is not None and mktcap_yi is None and missing_mktcap_policy == "pass"
+    if min_mktcap is not None and mktcap_yi is None and not mktcap_missing_ok:
         return []
     try:
         df = load_kline_with_cache(
@@ -735,7 +759,7 @@ def fetch_one_stock(task):
     if pd.isna(ipo_ts):
         return []
     current_list_days = (pd.to_datetime(end_date) - ipo_ts).days
-    current_mktcap_ok = min_mktcap is None or float(mktcap_yi) > min_mktcap
+    current_mktcap_ok = min_mktcap is None or mktcap_missing_ok or float(mktcap_yi) > min_mktcap
     current_list_days_ok = current_list_days > min_list_days
 
     kd80 = k > 80
@@ -752,7 +776,7 @@ def fetch_one_stock(task):
             continue
         row_date = pd.to_datetime(row["date"], errors="coerce")
         list_days = (row_date - ipo_ts).days if pd.notna(row_date) else current_list_days
-        if min_mktcap is None:
+        if min_mktcap is None or mktcap_missing_ok:
             mktcap_at_date = np.nan
         else:
             mktcap_at_date = float(mktcap_yi)
@@ -932,23 +956,32 @@ def main():
         print(summary.tail(8).to_string(index=False))
         return
 
-    lg = bs.login()
-    bs_available = lg.error_code == "0"
-    if not bs_available:
-        print(f"Baostock不可用，改用 akshare 元数据: {lg.error_msg}")
-        if args.price_source == "baostock":
-            raise SystemExit("Baostock不可用时不能使用 --price-source baostock，请改用 --price-source akshare")
+    bs_available = False
+    if args.price_source == "baostock" or args.metadata_source in ("baostock", "auto"):
+        lg = bs.login()
+        bs_available = lg.error_code == "0"
+        if not bs_available:
+            print(f"Baostock不可用，改用 akshare 元数据: {lg.error_msg}")
+            if args.price_source == "baostock":
+                raise SystemExit("Baostock不可用时不能使用 --price-source baostock，请改用 --price-source akshare")
     try:
-        raw_trade_dates = get_trade_dates(args.lookback + 5, args.history_days + 45) if bs_available else []
+        raw_trade_dates = (
+            get_trade_dates(args.lookback + 5, args.history_days + 45)
+            if bs_available and args.metadata_source in ("baostock", "auto")
+            else []
+        )
         if len(raw_trade_dates) < args.lookback:
             raw_trade_dates = get_trade_dates_akshare(args.lookback + 5, args.history_days + 45)
         if not raw_trade_dates or (not args.start_date and len(raw_trade_dates) < args.lookback):
             raise SystemExit("交易日不足，无法统计")
-        trade_dates = select_trade_dates(raw_trade_dates, args.start_date, args.end_date, args.lookback)
+        effective_end_date = resolve_auto_end_date(args.end_date, args.data_ready_time)
+        if not args.end_date:
+            print(f"未指定 --end-date，按数据可用时间 {args.data_ready_time} 使用截止日: {effective_end_date}")
+        trade_dates = select_trade_dates(raw_trade_dates, args.start_date, effective_end_date, args.lookback)
         if not trade_dates or (not args.start_date and len(trade_dates) < args.lookback):
             raise SystemExit(f"交易日不足，无法统计最近 {args.lookback} 个交易日")
         latest_date = trade_dates[-1]
-        if bs_available:
+        if bs_available and args.metadata_source == "baostock":
             universe_date, universe = get_universe_with_fallback(trade_dates)
         else:
             universe_date, universe = latest_date, get_universe_akshare()
@@ -972,7 +1005,7 @@ def main():
             universe = universe.iloc[args.offset:].reset_index(drop=True)
         if args.limit > 0:
             universe = universe.head(args.limit)
-        basic = load_stock_basic() if bs_available else pd.DataFrame()
+        basic = load_stock_basic() if bs_available and args.metadata_source == "baostock" else pd.DataFrame()
         if basic.empty:
             basic = load_stock_basic_akshare()
         list_date_map = {}
@@ -1013,6 +1046,7 @@ def main():
                 args.retry_delay,
                 args.debug_filters,
                 args.require_end_trade,
+                args.missing_mktcap_policy,
             ))
 
         hits = []

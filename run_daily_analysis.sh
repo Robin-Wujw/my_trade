@@ -10,6 +10,9 @@ cd "$SCRIPT_DIR" || exit 1
 
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=utf-8
+export HTTP_PROXY="${HTTP_PROXY:-http://127.0.0.1:7897}"
+export HTTPS_PROXY="${HTTPS_PROXY:-http://127.0.0.1:7897}"
+export ALL_PROXY="${ALL_PROXY:-http://127.0.0.1:7897}"
 
 LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
 mkdir -p "$LOG_DIR"
@@ -41,15 +44,15 @@ run_step() {
 }
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-FACTOR_WORKERS="${FACTOR_WORKERS:-2}"
-FORMULA33_WORKERS="${FORMULA33_WORKERS:-2}"
-FORMULA33_SLEEP="${FORMULA33_SLEEP:-0.08}"
-FORMULA33_RETRIES="${FORMULA33_RETRIES:-4}"
-FORMULA33_RETRY_DELAY="${FORMULA33_RETRY_DELAY:-2}"
-FORMULA33_CAPITAL_WORKERS="${FORMULA33_CAPITAL_WORKERS:-2}"
-SECTOR_SLEEP="${SECTOR_SLEEP:-0.08}"
-SECTOR_RETRIES="${SECTOR_RETRIES:-4}"
-SECTOR_RETRY_DELAY="${SECTOR_RETRY_DELAY:-2}"
+FACTOR_WORKERS="${FACTOR_WORKERS:-1}"
+FORMULA33_WORKERS="${FORMULA33_WORKERS:-1}"
+FORMULA33_SLEEP="${FORMULA33_SLEEP:-0.2}"
+FORMULA33_RETRIES="${FORMULA33_RETRIES:-5}"
+FORMULA33_RETRY_DELAY="${FORMULA33_RETRY_DELAY:-5}"
+FORMULA33_CAPITAL_WORKERS="${FORMULA33_CAPITAL_WORKERS:-1}"
+SECTOR_SLEEP="${SECTOR_SLEEP:-0.3}"
+SECTOR_RETRIES="${SECTOR_RETRIES:-5}"
+SECTOR_RETRY_DELAY="${SECTOR_RETRY_DELAY:-5}"
 
 run_step "factorStock daily selection" 7200 \
   "$PYTHON_BIN" -u factorStock.py \
@@ -60,7 +63,8 @@ run_step "factorStock daily selection" 7200 \
   --value-min-mktcap 100 \
   --workers "$FACTOR_WORKERS" \
   --value-watch-ratio 1.08 \
-  --value-watch-top 20
+  --value-watch-top 20 \
+  --allow-login-fail
 
 run_step "formula33 market structure" 7200 \
   "$PYTHON_BIN" -u formula33Stats.py \
@@ -73,7 +77,9 @@ run_step "formula33 market structure" 7200 \
   --capital-workers "$FORMULA33_CAPITAL_WORKERS" \
   --require-end-trade \
   --price-source akshare \
-  --market-cap-source akshare-capital
+  --metadata-source akshare \
+  --missing-mktcap-policy pass \
+  --market-cap-source none
 
 run_step "sector horizontal statistics" 3600 \
   "$PYTHON_BIN" -u sectorStats.py \
@@ -82,7 +88,8 @@ run_step "sector horizontal statistics" 3600 \
   --top-amount 50 \
   --sleep "$SECTOR_SLEEP" \
   --retries "$SECTOR_RETRIES" \
-  --retry-delay "$SECTOR_RETRY_DELAY"
+  --retry-delay "$SECTOR_RETRY_DELAY" \
+  --fallback-sample
 
 run_step "sector mainline watch" 3600 \
   "$PYTHON_BIN" -u sectorWatch.py \
@@ -91,7 +98,8 @@ run_step "sector mainline watch" 3600 \
   --limit-up-days 5 \
   --sleep "$SECTOR_SLEEP" \
   --retries "$SECTOR_RETRIES" \
-  --retry-delay "$SECTOR_RETRY_DELAY"
+  --retry-delay "$SECTOR_RETRY_DELAY" \
+  --fallback-sample
 
 {
   echo

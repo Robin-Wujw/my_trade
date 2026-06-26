@@ -58,6 +58,7 @@ def parse_args():
     parser.add_argument("--retries", type=int, default=4, help="东方财富接口失败重试次数")
     parser.add_argument("--retry-delay", type=float, default=2.0, help="接口失败后的退避基准秒数")
     parser.add_argument("--sample", action="store_true", help="生成离线样例，不访问网络")
+    parser.add_argument("--fallback-sample", action="store_true", help="真实板块接口失败时自动生成离线样例，避免每日流程中断")
     return parser.parse_args()
 
 
@@ -515,8 +516,33 @@ def main():
         try:
             boards = load_board_names(retries=args.retries, retry_delay=args.retry_delay)
         except Exception as exc:
+            if args.fallback_sample:
+                print(f"真实板块接口失败，改用 --fallback-sample 样例数据: {exc}")
+                board_daily = sample_board_daily(args.lookback)
+                date_keys = sorted(board_daily["date_key"].unique())
+                limit_up = sample_limit_up(date_keys)
+                benchmark = pd.DataFrame({
+                    "date_key": date_keys,
+                    "pct_chg": [0.01, -0.008, 0.018, 0.026, -0.004, 0.012, 0.006, 0.021, 0.009, 0.015][-len(date_keys):],
+                })
+                xlsx_path, md_path, analysis_lines = save_outputs(board_daily, limit_up, benchmark, args.top_amount)
+                print(f"Excel已保存: {xlsx_path}")
+                print(f"文字分析已保存: {md_path}")
+                print("\n".join(analysis_lines[:8]))
+                return
             raise SystemExit(f"无法访问东方财富板块接口：{exc}\n可先用 --sample 查看版式，或换网络后重跑真实数据。")
         if boards.empty:
+            if args.fallback_sample:
+                print("真实板块列表为空，改用 --fallback-sample 样例数据")
+                board_daily = sample_board_daily(args.lookback)
+                date_keys = sorted(board_daily["date_key"].unique())
+                limit_up = sample_limit_up(date_keys)
+                benchmark = pd.DataFrame({"date_key": date_keys, "pct_chg": [0.0] * len(date_keys)})
+                xlsx_path, md_path, analysis_lines = save_outputs(board_daily, limit_up, benchmark, args.top_amount)
+                print(f"Excel已保存: {xlsx_path}")
+                print(f"文字分析已保存: {md_path}")
+                print("\n".join(analysis_lines[:8]))
+                return
             raise SystemExit("无法获取行业板块列表")
         board_info = boards.set_index("board").to_dict("index")
         history_map = {}
@@ -536,6 +562,17 @@ def main():
                 print(f"板块K线进度 {idx}/{len(boards)}")
         board_daily = build_board_daily(history_map, board_info, args.lookback)
         if board_daily.empty:
+            if args.fallback_sample:
+                print("真实板块历史为空，改用 --fallback-sample 样例数据")
+                board_daily = sample_board_daily(args.lookback)
+                date_keys = sorted(board_daily["date_key"].unique())
+                limit_up = sample_limit_up(date_keys)
+                benchmark = pd.DataFrame({"date_key": date_keys, "pct_chg": [0.0] * len(date_keys)})
+                xlsx_path, md_path, analysis_lines = save_outputs(board_daily, limit_up, benchmark, args.top_amount)
+                print(f"Excel已保存: {xlsx_path}")
+                print(f"文字分析已保存: {md_path}")
+                print("\n".join(analysis_lines[:8]))
+                return
             raise SystemExit("无有效板块历史数据")
         date_keys = sorted(board_daily["date_key"].unique())
         limit_up = load_limit_up_by_date(date_keys)
