@@ -192,6 +192,7 @@ def make_row(code, name, industry, method, history, valuation_score, quality_sco
         "pepb_ratio": extra.get("ratio"),
         "valuation_percentile": extra.get("percentile"),
     }
+    row.update(history.get("downtrend_recovery") or {})
     row["selection_bucket"], row["valuation_state"] = classify_selection_bucket(row)
     if row["selection_bucket"] == CORE_BUCKET:
         row["total_score"] = row["core_score"]
@@ -220,6 +221,8 @@ def build_earnings_mainline_row(code, name, industry, method, history, value, re
 
     theme = infer_theme(name, industry)
     max_ptv = 1.45 if theme in {"AI算力/CPO", "半导体/电子", "资源金属"} else 1.25
+    if theme == "AI算力/CPO" and yoy >= 0.25 and quality_score >= 80:
+        max_ptv = 8.0
     if ptv <= 1.00:
         return None
     if ptv > max_ptv:
@@ -228,11 +231,6 @@ def build_earnings_mainline_row(code, name, industry, method, history, value, re
         return None
     if yoy < 0.12:
         return None
-    if history["ret20"] is not None and history["ret20"] < -0.25:
-        return None
-    if history["ret60"] is not None and history["ret60"] < -0.30:
-        return None
-
     valuation_part = score_inverse(ptv, best=0.70, worst=max_ptv)
     growth_part = score_direct(yoy, 0.10, 0.70)
     trend_part = max(
@@ -285,6 +283,7 @@ def build_earnings_mainline_row(code, name, industry, method, history, value, re
         "valuation_percentile": None,
         "earnings_yoy": yoy,
     }
+    row.update(history.get("downtrend_recovery") or {})
     return row
 
 
@@ -301,11 +300,6 @@ def build_value_left_row(code, name, industry, history, value, base_row, report_
         return None
     if yoy < 0.05:
         return None
-    if history["ret20"] is not None and history["ret20"] < -0.25:
-        return None
-    if history["ret60"] is not None and history["ret60"] < -0.35:
-        return None
-
     valuation_floor = max(value.get("valuation_score", 0), 75)
     total_score = valuation_floor * 0.55 + quality_score * 0.35 + history["liquidity_score"] * 0.10
     row = dict(base_row)
@@ -409,6 +403,7 @@ def build_theme_momentum_row(code, name, industry, method, history, base_row):
         "relative_ret60": relative_ret60,
         "volume_ratio_20_120": volume_ratio,
     })
+    row.update(history.get("downtrend_recovery") or {})
     return row
 
 
@@ -739,7 +734,7 @@ def valuation_detail_for_display(row):
 def main():
     args = parse_args()
     if args.portfolio_profile is None:
-        args.portfolio_profile = "theme" if args.include_theme_momentum else "focused"
+        args.portfolio_profile = "theme" if args.include_theme_momentum else "right_side"
     lg = bs.login()
     if lg.error_code != "0":
         print("baostock登录失败:", lg.error_msg)

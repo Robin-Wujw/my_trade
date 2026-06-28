@@ -51,6 +51,7 @@ OUTPUT_DIR = get_project_path("板块观察")
 ADJUST_FLAG_QFQ = "2"
 SHARE_CACHE_FILE = get_project_path(".cache/formula33_share_capital.json")
 KLINE_CACHE_DIR = get_project_path(".cache/formula33_kline")
+UNIVERSE_CACHE_FILE = get_project_path(".cache/stock_universe.csv")
 REQUEST_RETRY_ERRORS = (BrokenPipeError, ConnectionError, TimeoutError, OSError)
 
 
@@ -219,7 +220,13 @@ def get_universe(latest_date):
         df = df[df["tradeStatus"] != "0"]
     if "code_name" in df.columns:
         df = df[~df["code_name"].astype(str).str.contains("ST", na=False)]
-    return df[["code", "code_name"]].drop_duplicates("code")
+    result = df[["code", "code_name"]].drop_duplicates("code").reset_index(drop=True)
+    try:
+        os.makedirs(os.path.dirname(UNIVERSE_CACHE_FILE), exist_ok=True)
+        result.to_csv(UNIVERSE_CACHE_FILE, index=False, encoding="utf-8-sig")
+    except OSError:
+        pass
+    return result
 
 
 def get_universe_with_fallback(trade_dates):
@@ -244,7 +251,13 @@ def get_universe_akshare():
     )
     df = df[mask].copy()
     df = df[~df["code_name"].astype(str).str.contains("ST|退", na=False)]
-    return df[["code", "code_name"]].drop_duplicates("code")
+    result = df[["code", "code_name"]].drop_duplicates("code").reset_index(drop=True)
+    try:
+        os.makedirs(os.path.dirname(UNIVERSE_CACHE_FILE), exist_ok=True)
+        result.to_csv(UNIVERSE_CACHE_FILE, index=False, encoding="utf-8-sig")
+    except OSError:
+        pass
+    return result
 
 
 def load_stock_basic():
@@ -592,22 +605,28 @@ def filter_kline_range(df, start_date, end_date):
 
 def load_kline_with_cache(source, code, start_date, end_date, retries=4, retry_delay=1.5):
     cached = load_cached_kline(source, code)
+    fetch_ranges = []
     if not cached.empty:
         cached_min = cached["date"].min()
         cached_max = cached["date"].max()
         if cached_min <= start_date and cached_max >= end_date:
             return filter_kline_range(cached, start_date, end_date)
-        fetch_start = start_date if cached_max < start_date else (
-            pd.to_datetime(cached_max) + pd.DateOffset(days=1)
-        ).strftime("%Y-%m-%d")
+        if cached_min > start_date:
+            left_end = (pd.to_datetime(cached_min) - pd.DateOffset(days=1)).strftime("%Y-%m-%d")
+            if start_date <= left_end:
+                fetch_ranges.append((start_date, left_end))
+        if cached_max < end_date:
+            right_start = (pd.to_datetime(cached_max) + pd.DateOffset(days=1)).strftime("%Y-%m-%d")
+            if right_start <= end_date:
+                fetch_ranges.append((right_start, end_date))
     else:
-        fetch_start = start_date
+        fetch_ranges.append((start_date, end_date))
 
-    if fetch_start <= end_date:
+    for fetch_start, fetch_end in fetch_ranges:
         if source == "akshare":
-            fresh = load_kline_akshare(code, fetch_start, end_date, retries=retries, retry_delay=retry_delay)
+            fresh = load_kline_akshare(code, fetch_start, fetch_end, retries=retries, retry_delay=retry_delay)
         else:
-            fresh = load_kline_baostock(code, fetch_start, end_date, retries=retries, retry_delay=retry_delay)
+            fresh = load_kline_baostock(code, fetch_start, fetch_end, retries=retries, retry_delay=retry_delay)
         if fresh is not None and not fresh.empty:
             cached = pd.concat([cached, fresh], ignore_index=True, sort=False)
             save_cached_kline(source, code, cached)

@@ -8,6 +8,7 @@ import requests
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PUSHPLUS_URL = os.environ.get("PUSHPLUS_URL", "https://www.pushplus.plus/send")
+PUSHPLUS_MAX_CONTENT_CHARS = int(os.environ.get("PUSHPLUS_MAX_CONTENT_CHARS", "12000"))
 
 
 def get_project_path(filename):
@@ -70,6 +71,12 @@ def send_pushplus(title, content, retries=3, timeout=10):
         print("PushPlus token 未配置，跳过推送。请设置 PUSHPLUS_TOKEN 或 .pushplus_token。")
         return False
 
+    title = str(title)[:100]
+    content = str(content)
+    if len(content) > PUSHPLUS_MAX_CONTENT_CHARS:
+        suffix = "<hr><p>内容超过推送长度限制，已自动截断；完整报告请查看本地 daily_report 文件。</p>"
+        content = content[: max(0, PUSHPLUS_MAX_CONTENT_CHARS - len(suffix))] + suffix
+        print(f"PushPlus正文已截断到 {len(content)} 字符")
     payload = {"token": token, "title": title, "content": content, "template": "html"}
     headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
 

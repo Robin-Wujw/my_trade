@@ -54,22 +54,10 @@ SECTOR_SLEEP="${SECTOR_SLEEP:-0.3}"
 SECTOR_RETRIES="${SECTOR_RETRIES:-5}"
 SECTOR_RETRY_DELAY="${SECTOR_RETRY_DELAY:-5}"
 
-run_step "factorStock daily selection" 7200 \
-  "$PYTHON_BIN" -u factorStock.py \
-  --top 30 \
-  --core-min-score 80 \
-  --low-min-score 75 \
-  --quality-min-score 80 \
-  --value-min-mktcap 100 \
-  --workers "$FACTOR_WORKERS" \
-  --value-watch-ratio 1.08 \
-  --value-watch-top 20 \
-  --allow-login-fail
-
 run_step "formula33 market structure" 7200 \
   "$PYTHON_BIN" -u formula33Stats.py \
   --lookback 21 \
-  --history-days 90 \
+  --history-days 420 \
   --workers "$FORMULA33_WORKERS" \
   --sleep "$FORMULA33_SLEEP" \
   --retries "$FORMULA33_RETRIES" \
@@ -94,12 +82,37 @@ run_step "sector horizontal statistics" 3600 \
 run_step "sector mainline watch" 3600 \
   "$PYTHON_BIN" -u sectorWatch.py \
   --top 30 \
+  --workers 4 \
   --days 80 \
   --limit-up-days 5 \
   --sleep "$SECTOR_SLEEP" \
   --retries "$SECTOR_RETRIES" \
   --retry-delay "$SECTOR_RETRY_DELAY" \
   --fallback-sample
+
+run_step "factorStock daily selection" 7200 \
+  "$PYTHON_BIN" -u factorStock.py \
+  --top 200 \
+  --core-min-score 80 \
+  --low-min-score 75 \
+  --quality-min-score 80 \
+  --value-min-mktcap 100 \
+  --workers "$FACTOR_WORKERS" \
+  --value-watch-ratio 1.08 \
+  --value-watch-top 20 \
+  --akshare-cache-only \
+  --allow-login-fail
+
+run_step "daily fundamental sections" 600 \
+  "$PYTHON_BIN" -u dailyFundamentalSelect.py \
+  --value-ratio 1.08 \
+  --normal-top 30
+
+run_step "daily consolidated PushPlus report" 300 \
+  "$PYTHON_BIN" -u dailyReportPush.py \
+  --top 10 \
+  --selection-top 30 \
+  --max-chars 12000
 
 {
   echo

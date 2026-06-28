@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from trade_utils import build_diff_html, get_project_path, load_last_result, save_current_result, send_pushplus
+from wave_utils import infer_downtrend_recovery, level_price
 
 try:
     import adata
@@ -69,6 +70,7 @@ BONUS_DF_CACHE = {}
 
 PE_KEYWORDS = [
     "货币金融", "银行", "保险", "酒、饮料和精制茶", "食品制造", "批发", "零售", "医药制造", "纺织服装",
+    "住宿", "餐饮", "旅游",
 ]
 
 PB_KEYWORDS = [
@@ -854,6 +856,7 @@ def get_history_metrics(code, today_str):
     avg_amount20 = df["amount"].tail(20).mean() if "amount" in df else None
     technical = get_technical_metrics(df)
     mainline = calc_mainline_metrics(df, BENCHMARK_DF)
+    downtrend_recovery = infer_downtrend_recovery(df)
 
     trend_score = 0
     trend_score += 25 if close > ma20 else 0
@@ -881,6 +884,7 @@ def get_history_metrics(code, today_str):
         "liquidity_score": liquidity_score,
         "mainline": mainline,
         "technical": technical,
+        "downtrend_recovery": downtrend_recovery,
     }
 
 
@@ -1872,6 +1876,168 @@ def save_csv(today_str, rows):
     return path
 
 
+def run_akshare_cache_fallback(top):
+    """Build a real technical selection when Baostock is unavailable.
+
+    The daily formula job maintains these adjusted K-line files. Reusing them
+    keeps the fallback deterministic and avoids another full-market request.
+    """
+    cache_dir = get_project_path(".cache/formula33_kline/akshare")
+    if not os.path.isdir(cache_dir):
+        return None, [], "AkShare K-line cache directory is missing"
+
+    samples = []
+    latest_dates = []
+    for filename in os.listdir(cache_dir):
+        if not filename.endswith(".csv"):
+            continue
+        path = os.path.join(cache_dir, filename)
+        try:
+            df = pd.read_csv(path)
+            if df.empty or "date" not in df.columns:
+                continue
+            date_values = pd.to_datetime(df["date"], errors="coerce").dropna()
+            if date_values.empty:
+                continue
+            latest_dates.append(date_values.max())
+            samples.append((filename, df))
+        except Exception:
+            continue
+    if not samples or not latest_dates:
+        return None, [], "AkShare K-line cache contains no usable data"
+
+    market_date = max(latest_dates)
+    name_map = {}
+    universe_cache = get_project_path(".cache/stock_universe.csv")
+    try:
+        universe_df = pd.read_csv(universe_cache, dtype={"code": str})
+        if not universe_df.empty and {"code", "code_name"}.issubset(universe_df.columns):
+            name_map.update(dict(zip(universe_df["code"].astype(str), universe_df["code_name"].astype(str))))
+    except Exception:
+        pass
+    board_dir = get_project_path("板块观察")
+    try:
+        workbooks = [
+            os.path.join(board_dir, name)
+            for name in os.listdir(board_dir)
+            if name.startswith("formula33_stats_") and name.endswith(".xlsx")
+        ]
+        if workbooks:
+            latest_book = max(workbooks, key=os.path.getmtime)
+            hit_df = pd.read_excel(latest_book, sheet_name="命中股票", dtype={"code": str})
+            if not hit_df.empty and {"code", "name"}.issubset(hit_df.columns):
+                name_map.update(dict(zip(hit_df["code"].astype(str), hit_df["name"].astype(str))))
+    except Exception:
+        name_map = {}
+
+    rows = []
+    for filename, df in samples:
+        try:
+            df = df.copy()
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            for col in ["close", "volume"]:
+                df[col] = pd.to_numeric(df.get(col), errors="coerce")
+            df = df.dropna(subset=["date", "close"]).sort_values("date").drop_duplicates("date")
+            if len(df) < 65 or df.iloc[-1]["date"] != market_date:
+                continue
+
+            close = df["close"]
+            volume = df["volume"].fillna(0)
+            ma20 = float(close.tail(20).mean())
+            ma60 = float(close.tail(60).mean())
+            last_close = float(close.iloc[-1])
+            ret20 = last_close / float(close.iloc[-21]) - 1
+            ret60 = last_close / float(close.iloc[-61]) - 1
+            volume5 = float(volume.tail(5).mean())
+            volume20 = float(volume.tail(20).mean())
+            volume_ratio = volume5 / volume20 if volume20 > 0 else 1.0
+            high20 = float(close.tail(20).max())
+            drawdown20 = last_close / high20 - 1 if high20 > 0 else 0
+            volatility20 = float(close.pct_change().tail(20).std() or 0)
+
+            deduct_periods = []
+            price_deduct_periods = []
+            volume_deduct_periods = []
+            available_periods = []
+            latest_volume = float(volume.iloc[-1])
+            for period in [5, 10, 20, 60, 120, 240]:
+                if len(df) < period + 2:
+                    continue
+                available_periods.append(period)
+                deduct_close = float(close.iloc[-(period + 1)])
+                deduct_volume = float(volume.iloc[-(period + 1)])
+                price_up = last_close > deduct_close
+                volume_up = latest_volume > deduct_volume
+                if price_up:
+                    price_deduct_periods.append(period)
+                if volume_up:
+                    volume_deduct_periods.append(period)
+                if price_up and volume_up:
+                    deduct_periods.append(period)
+
+            wave = infer_downtrend_recovery(df, lookback=240) or {}
+            wave_pct = wave.get("recovery_pct")
+            if wave_pct is None:
+                wave_zone = "波段不足"
+                wave_score = 0.0
+            elif wave_pct >= 75:
+                wave_zone = "75%以上：下跌波段强修复"
+                wave_score = 12.0
+            elif wave_pct >= 62.5:
+                wave_zone = "62.5%以上：右侧确认区"
+                wave_score = 20.0
+            elif wave_pct >= 50:
+                wave_zone = "50%-62.5%：右侧启动区"
+                wave_score = 16.0
+            else:
+                wave_zone = "50%以下：等待右侧确认"
+                wave_score = 0.0
+
+            trend_score = 25 if last_close > ma20 > ma60 else 16 if last_close > ma20 else 6
+            momentum_score = float(np.clip(ret20 * 110 + ret60 * 40 + 8, 0, 20))
+            liquidity_score = float(np.clip((volume_ratio - 0.7) * 16.67, 0, 10))
+            deduct_score = 25.0 * len(deduct_periods) / max(1, len(available_periods))
+            total_score = round(trend_score + momentum_score + liquidity_score + deduct_score + wave_score, 2)
+            code = filename[:-4].replace("_", ".", 1)
+            rows.append({
+                "date": market_date.strftime("%Y-%m-%d"),
+                "code": code,
+                "name": name_map.get(code, code),
+                "selection_bucket": "AkShare技术回退",
+                "method": "AK_TECH",
+                "total_score": total_score,
+                "close": round(last_close, 3),
+                "ma20": round(ma20, 3),
+                "ma60": round(ma60, 3),
+                "return_20d": round(ret20, 4),
+                "return_60d": round(ret60, 4),
+                "volume_ratio_5_20": round(volume_ratio, 3),
+                "drawdown_20d": round(drawdown20, 4),
+                "deduct_pass_count": len(deduct_periods),
+                "deduct_available_count": len(available_periods),
+                "deduct_periods": "/".join(map(str, deduct_periods)),
+                "price_deduct_periods": "/".join(map(str, price_deduct_periods)),
+                "volume_deduct_periods": "/".join(map(str, volume_deduct_periods)),
+                "wave_low": round(float(wave.get("downtrend_low")), 3) if wave.get("downtrend_low") is not None else None,
+                "wave_high": round(float(wave.get("downtrend_high")), 3) if wave.get("downtrend_high") is not None else None,
+                "wave_pct": round(float(wave_pct), 2) if wave_pct is not None else None,
+                "wave_level_50": wave.get("recovery_level_50"),
+                "wave_level_625": wave.get("recovery_level_625"),
+                "wave_level_75": level_price(wave["downtrend_low"], wave["downtrend_high"], 75) if wave else None,
+                "wave_zone": wave_zone,
+                "data_source": "akshare_qfq_cache",
+            })
+        except Exception:
+            continue
+
+    if not rows:
+        return None, [], "no stock passed the AkShare cache validation"
+    rows.sort(key=lambda row: row["total_score"], reverse=True)
+    selected = rows[:max(1, top)]
+    path = save_csv(market_date.strftime("%Y-%m-%d"), selected)
+    return path, selected, ""
+
+
 def save_diagnostic_csv(today_str, rows, skipped, top):
     if not rows and not skipped:
         return None
@@ -2086,6 +2252,7 @@ def parse_args():
     parser.add_argument("--value-watch-ratio", type=float, default=VALUE_WATCH_RATIO, help="价值线附近观察池最高现价/价值线")
     parser.add_argument("--value-watch-top", type=int, default=DEFAULT_VALUE_WATCH_TOP, help="价值线附近观察池展示数量；0表示全部")
     parser.add_argument("--allow-login-fail", action="store_true", help="Baostock登录失败时写入占位诊断并返回成功，避免每日流程中断")
+    parser.add_argument("--akshare-cache-only", action="store_true", help="直接使用持久化 AkShare 日线运行技术回退选股，不访问 Baostock")
     return parser.parse_args()
 
 
@@ -2210,17 +2377,31 @@ def print_daily_report(today_str, core_rows, low_value_rows, high_quality_rows, 
 def main():
     global BENCHMARK_DF
     args = parse_args()
+    if args.akshare_cache_only:
+        fallback_path, fallback_rows, fallback_error = run_akshare_cache_fallback(args.top)
+        if not fallback_path or not fallback_rows:
+            raise SystemExit(f"AkShare技术选股失败: {fallback_error}")
+        print(f"已生成 AkShare 技术选股: {fallback_path}")
+        print(f"数据截止日: {fallback_rows[0]['date']}，入选 {len(fallback_rows)} 只")
+        print(pd.DataFrame(fallback_rows).head(min(10, len(fallback_rows))).to_string(index=False))
+        return
     lg = bs.login()
     if lg.error_code != "0":
         print("登录失败:", lg.error_msg)
         if args.allow_login_fail:
+            fallback_path, fallback_rows, fallback_error = run_akshare_cache_fallback(args.top)
+            if fallback_path and fallback_rows:
+                print(f"Baostock不可用，已生成 AkShare 技术回退选股: {fallback_path}")
+                print(f"数据截止日: {fallback_rows[0]['date']}，入选 {len(fallback_rows)} 只")
+                print(pd.DataFrame(fallback_rows).head(min(10, len(fallback_rows))).to_string(index=False))
+                return
             today_str = pd.Timestamp.today().strftime("%Y-%m-%d")
             os.makedirs(OUTPUT_DIR, exist_ok=True)
             path = os.path.join(OUTPUT_DIR, f"factor_diagnostic_{today_str}_{datetime.now().strftime('%H%M%S')}.csv")
             pd.DataFrame([{
                 "date": today_str,
                 "status": "baostock_login_failed",
-                "skip_reason": lg.error_msg,
+                "skip_reason": f"{lg.error_msg}; AkShare fallback failed: {fallback_error}",
             }]).to_csv(path, index=False, encoding="utf-8-sig")
             print(f"已按 --allow-login-fail 写入占位诊断: {path}")
             return

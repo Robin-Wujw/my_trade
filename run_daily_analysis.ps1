@@ -51,23 +51,10 @@ $SectorSleep = if ($env:SECTOR_SLEEP) { $env:SECTOR_SLEEP } else { "0.3" }
 $SectorRetries = if ($env:SECTOR_RETRIES) { $env:SECTOR_RETRIES } else { "5" }
 $SectorRetryDelay = if ($env:SECTOR_RETRY_DELAY) { $env:SECTOR_RETRY_DELAY } else { "5" }
 
-Run-Step "factorStock daily selection" @(
-    "factorStock.py",
-    "--top", "30",
-    "--core-min-score", "80",
-    "--low-min-score", "75",
-    "--quality-min-score", "80",
-    "--value-min-mktcap", "100",
-    "--workers", $FactorWorkers,
-    "--value-watch-ratio", "1.08",
-    "--value-watch-top", "20",
-    "--allow-login-fail"
-) | Out-Null
-
 Run-Step "formula33 market structure" @(
     "formula33Stats.py",
     "--lookback", "21",
-    "--history-days", "90",
+    "--history-days", "420",
     "--workers", $Formula33Workers,
     "--sleep", $Formula33Sleep,
     "--retries", $Formula33Retries,
@@ -94,6 +81,7 @@ Run-Step "sector horizontal statistics" @(
 Run-Step "sector mainline watch" @(
     "sectorWatch.py",
     "--top", "30",
+    "--workers", "4",
     "--days", "80",
     "--limit-up-days", "5",
     "--sleep", $SectorSleep,
@@ -102,10 +90,39 @@ Run-Step "sector mainline watch" @(
     "--fallback-sample"
 ) | Out-Null
 
+Run-Step "factorStock daily selection" @(
+    "factorStock.py",
+    "--top", "200",
+    "--core-min-score", "80",
+    "--low-min-score", "75",
+    "--quality-min-score", "80",
+    "--value-min-mktcap", "100",
+    "--workers", $FactorWorkers,
+    "--value-watch-ratio", "1.08",
+    "--value-watch-top", "20",
+    "--akshare-cache-only",
+    "--allow-login-fail"
+) | Out-Null
+
+Run-Step "daily fundamental sections" @(
+    "dailyFundamentalSelect.py",
+    "--value-ratio", "1.08",
+    "--normal-top", "30"
+) | Out-Null
+
+Run-Step "daily consolidated PushPlus report" @(
+    "dailyReportPush.py",
+    "--top", "10",
+    "--selection-top", "30",
+    "--max-chars", "12000"
+) | Out-Null
+
 Add-LogLine ""
 Add-LogLine ("{0} daily analysis finished" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"))
 Add-LogLine "Outputs:"
-foreach ($dir in @("选股结果", "板块观察")) {
+$SelectionDir = -join (0x9009, 0x80A1, 0x7ED3, 0x679C | ForEach-Object { [char]$_ })
+$BoardDir = -join (0x677F, 0x5757, 0x89C2, 0x5BDF | ForEach-Object { [char]$_ })
+foreach ($dir in @($SelectionDir, $BoardDir)) {
     $path = Join-Path $ScriptDir $dir
     if (Test-Path $path) {
         Get-ChildItem -Path $path -File | Where-Object { $_.LastWriteTime -gt (Get-Date).AddDays(-2) } | Sort-Object FullName | ForEach-Object {

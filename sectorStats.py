@@ -13,7 +13,7 @@ import hashlib
 import os
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import akshare as ak
 import numpy as np
@@ -169,9 +169,17 @@ def load_board_names(retries=4, retry_delay=2.0):
 
 
 def load_board_history(board, days, retries=4, retry_delay=2.0):
+    end_date = datetime.now().strftime("%Y%m%d")
+    start_date = (datetime.now() - timedelta(days=max(days * 3, 180))).strftime("%Y%m%d")
     try:
         df = call_with_backoff(
-            lambda: ak.stock_board_industry_hist_em(symbol=board, period="日k", adjust=""),
+            lambda: ak.stock_board_industry_hist_em(
+                symbol=board,
+                start_date=start_date,
+                end_date=end_date,
+                period="日k",
+                adjust="",
+            ),
             f"{board} 板块K线",
             retries=retries,
             retry_delay=retry_delay,

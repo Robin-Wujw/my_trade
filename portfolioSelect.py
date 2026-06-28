@@ -105,6 +105,11 @@ PROFILE_CONFIGS = {
     },
 }
 
+# Walk-forward adjustment: keep the original candidate model intact and only
+# change the final portfolio convergence rule validated on 2025 Q1 -> H1.
+PROFILE_CONFIGS["walk_forward"] = {}
+PROFILE_CONFIGS["right_side"] = {}
+
 
 NUMERIC_COLUMNS = [
     "total_score",
@@ -120,6 +125,12 @@ NUMERIC_COLUMNS = [
     "relative_ret60",
     "volume_ratio_20_120",
     "qfq_return",
+    "downtrend_drawdown",
+    "recovery_level_50",
+    "recovery_level_625",
+    "recovery_pct",
+    "bars_since_recovery_50_cross",
+    "bars_since_recovery_625_cross",
 ]
 
 
@@ -265,8 +276,98 @@ def select_portfolio(df, size=30, profile="focused"):
         out["portfolio_profile"] = "all"
         return out
 
-    config = PROFILE_CONFIGS[profile]
     work = normalize_frame(df)
+    if profile == "right_side":
+        ptv = pd.to_numeric(work.get("price_to_value"), errors="coerce")
+        liquidity = pd.to_numeric(work.get("liquidity_score"), errors="coerce")
+        quality = pd.to_numeric(work.get("quality_score"), errors="coerce")
+        growth = pd.to_numeric(work.get("earnings_yoy"), errors="coerce")
+        mktcap = pd.to_numeric(work.get("mktcap"), errors="coerce")
+        recovery = pd.to_numeric(work.get("recovery_pct"), errors="coerce")
+        mainline_growth = (
+            work.get("theme", "").eq("AI算力/CPO")
+            & (growth >= 0.25)
+            & (quality >= 80)
+        )
+        selected = work[
+            ptv.notna()
+            & ((ptv <= 1.50) | mainline_growth)
+            & (quality >= 70)
+            & (liquidity >= 55)
+            & (mktcap >= 100)
+            & (recovery >= 50)
+        ].copy()
+        selected["portfolio_score"] = (
+            quality.loc[selected.index].fillna(0) * 0.40
+            + liquidity.loc[selected.index].fillna(0) * 0.20
+            + growth.loc[selected.index].fillna(0).clip(lower=0, upper=2.0) * 20
+            + (1 - ptv.loc[selected.index].clip(lower=0, upper=6) / 6) * 20
+        )
+        selected["walk_forward_layer"] = np.where(
+            recovery.loc[selected.index] >= 62.5,
+            "下跌波段62.5%右侧确认",
+            "下跌波段50%右侧启动",
+        )
+        selected = selected.sort_values(
+            ["portfolio_score", "quality_score", "liquidity_score", "code"],
+            ascending=[False, False, False, True],
+        )
+        core = selected[mainline_growth.loc[selected.index]].copy()
+        rest = selected[~mainline_growth.loc[selected.index]].copy().head(max(0, size - len(core)))
+        selected = pd.concat([core, rest], ignore_index=True, sort=False).head(size)
+        selected["final_selected"] = True
+        selected["final_rank"] = range(1, len(selected) + 1)
+        selected["portfolio_profile"] = profile
+        return selected
+    if profile == "walk_forward":
+        ptv = pd.to_numeric(work.get("price_to_value"), errors="coerce")
+        liquidity = pd.to_numeric(work.get("liquidity_score"), errors="coerce")
+        quality = pd.to_numeric(work.get("quality_score"), errors="coerce")
+        growth = pd.to_numeric(work.get("earnings_yoy"), errors="coerce")
+        mktcap = pd.to_numeric(work.get("mktcap"), errors="coerce")
+
+        # Keep up to five point-in-time financial mainline leaders even when
+        # their pre-buy momentum is weak or price is already above value line.
+        core = work[
+            work.get("theme", "").eq("AI算力/CPO")
+            & (growth >= 0.20)
+            & (quality >= 80)
+            & (liquidity >= 60)
+            & (mktcap >= 100)
+            & ptv.notna()
+            & (ptv <= 1.50)
+        ].copy()
+        core["portfolio_score"] = (
+            growth.loc[core.index].clip(upper=2.0) * 45
+            + quality.loc[core.index] * 0.25
+            + liquidity.loc[core.index] * 0.15
+            + (1.50 - ptv.loc[core.index]).clip(lower=0) / 1.50 * 15
+        )
+        core = core.sort_values(["portfolio_score", "total_score"], ascending=False).head(min(5, size))
+        core["walk_forward_layer"] = "财报主线核心保留"
+
+        rest = work[
+            ~work.get("code").isin(core.get("code", pd.Series(dtype=str)))
+            & ptv.notna()
+            & (ptv <= 1.0)
+            & (liquidity >= 60)
+        ].copy()
+        sort_cols = [
+            col for col in ["ret60_at_buy", "ret20_at_buy", "liquidity_score", "price_to_value", "code"]
+            if col in rest.columns
+        ]
+        ascending = [col in {"price_to_value", "code"} for col in sort_cols]
+        rest = rest.sort_values(sort_cols, ascending=ascending, na_position="last").head(size - len(core))
+        rest["walk_forward_layer"] = "价值动量补齐"
+        rest["portfolio_score"] = range(len(rest), 0, -1)
+
+        selected = pd.concat([core, rest], ignore_index=True, sort=False)
+        selected["final_selected"] = True
+        selected["final_rank"] = range(1, len(selected) + 1)
+        selected["portfolio_profile"] = profile
+        return selected
+
+    config = PROFILE_CONFIGS[profile]
     work = work[work.apply(lambda r: is_eligible(r, config), axis=1)].copy()
     if work.empty:
         return work

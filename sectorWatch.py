@@ -8,11 +8,12 @@ inside those sectors. The scoring favors repeated strength, amount expansion,
 weak-market resilience, and limit-up participation.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import os
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import akshare as ak
 import numpy as np
@@ -23,6 +24,7 @@ from trade_utils import get_project_path
 
 OUTPUT_DIR = get_project_path("板块观察")
 CACHE_DIR = get_project_path(".cache/sector_watch")
+BOARD_CONSTITUENT_FILE = get_project_path(".cache/sector_mainline_constituents.csv")
 BENCHMARK_SYMBOL = "000001"
 
 
@@ -35,6 +37,8 @@ def parse_args():
     parser.add_argument("--retry-delay", type=float, default=2.0, help="接口失败后的退避基准秒数")
     parser.add_argument("--limit-up-days", type=int, default=5, help="统计近N日涨停板块归属")
     parser.add_argument("--fallback-sample", action="store_true", help="真实板块接口失败时自动生成离线样例，避免每日流程中断")
+    parser.add_argument("--workers", type=int, default=4, help="板块历史请求并发数")
+    parser.add_argument("--as-of-date", default="", help="历史截止日YYYY-MM-DD；默认今天")
     return parser.parse_args()
 
 
@@ -126,10 +130,25 @@ def load_board_names(retries=4, retry_delay=2.0):
     return df
 
 
-def load_board_history(board_name, days, retries=4, retry_delay=2.0):
+def load_board_history(board_name, days, as_of_date=None, retries=4, retry_delay=2.0):
+    end_dt = pd.Timestamp(as_of_date) if as_of_date else pd.Timestamp.today()
+    end_date = end_dt.strftime("%Y%m%d")
+    start_date = (end_dt - pd.Timedelta(days=max(days * 3, 180))).strftime("%Y%m%d")
+    cached = read_cache("board_history", board_name, date_cols=["日期"])
+    if not cached.empty:
+        sliced = cached[cached["日期"] <= end_dt].sort_values("日期").tail(days)
+        cache_reaches_cutoff = cached["日期"].max() >= end_dt - pd.Timedelta(days=7)
+        if len(sliced) >= min(days, 60) and cache_reaches_cutoff:
+            return sliced.reset_index(drop=True)
     try:
         df = call_with_backoff(
-            lambda: ak.stock_board_industry_hist_em(symbol=board_name, period="日k", adjust=""),
+            lambda: ak.stock_board_industry_hist_em(
+                symbol=board_name,
+                start_date=start_date,
+                end_date=end_date,
+                period="日k",
+                adjust="",
+            ),
             f"{board_name} 板块K线",
             retries=retries,
             retry_delay=retry_delay,
@@ -152,14 +171,17 @@ def load_board_history(board_name, days, retries=4, retry_delay=2.0):
     return df.tail(days).reset_index(drop=True)
 
 
-def load_benchmark(days):
+def load_benchmark(days, as_of_date=None):
     df = ak.stock_zh_index_daily_em(symbol=BENCHMARK_SYMBOL)
     if df is None or df.empty:
         return pd.DataFrame()
     df = df.copy()
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df["close"] = pd.to_numeric(df["close"], errors="coerce")
-    return df.dropna(subset=["date", "close"]).sort_values("date").tail(days).reset_index(drop=True)
+    df = df.dropna(subset=["date", "close"]).sort_values("date")
+    if as_of_date:
+        df = df[df["date"] <= pd.Timestamp(as_of_date)]
+    return df.tail(days).reset_index(drop=True)
 
 
 def calc_board_metrics(board_name, hist, benchmark):
@@ -217,10 +239,10 @@ def calc_board_metrics(board_name, hist, benchmark):
     }
 
 
-def load_limit_up_counts(days):
+def load_limit_up_counts(days, as_of_date=None):
     counts = {}
     try:
-        dates = pd.bdate_range(end=pd.Timestamp.today(), periods=days * 2)
+        dates = pd.bdate_range(end=pd.Timestamp(as_of_date) if as_of_date else pd.Timestamp.today(), periods=days * 2)
         for day in reversed(dates):
             date_str = day.strftime("%Y%m%d")
             try:
@@ -241,6 +263,50 @@ def load_limit_up_counts(days):
     except Exception:
         return {}
     return counts
+
+
+def to_market_code(value):
+    code = str(value).strip().zfill(6)
+    if code.startswith(("6", "9")):
+        return f"sh.{code}"
+    if code.startswith(("0", "3")):
+        return f"sz.{code}"
+    return code
+
+
+def save_mainline_constituents(board_df, top=10, retries=4, retry_delay=2.0, sleep=0.1, output_path=None):
+    rows = []
+    for rank, (_, board_row) in enumerate(board_df.head(top).iterrows(), start=1):
+        board = str(board_row["board"])
+        try:
+            members = call_with_backoff(
+                lambda b=board: ak.stock_board_industry_cons_em(symbol=b),
+                f"{board} 成分股",
+                retries=retries,
+                retry_delay=retry_delay,
+            )
+            if members is None or members.empty or "代码" not in members.columns:
+                continue
+            for _, member in members.iterrows():
+                rows.append({
+                    "code": to_market_code(member.get("代码")),
+                    "name": member.get("名称", ""),
+                    "board": board,
+                    "board_rank": rank,
+                    "board_score": board_row.get("final_score"),
+                    "board_date": board_row.get("date"),
+                })
+        except Exception as exc:
+            print(f"跳过 {board} 成分股: {exc}")
+        if sleep > 0:
+            time.sleep(sleep)
+    if rows:
+        target = output_path or BOARD_CONSTITUENT_FILE
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        pd.DataFrame(rows).drop_duplicates(["code", "board"]).to_csv(
+            target, index=False, encoding="utf-8-sig"
+        )
+        print(f"主流板块成分映射已保存: {target}，{len(rows)} 条")
 
 
 def print_sector_report(df, path, top):
@@ -292,6 +358,7 @@ def sample_watch_rows():
 
 def main():
     args = parse_args()
+    as_of_date = args.as_of_date or pd.Timestamp.today().strftime("%Y-%m-%d")
     try:
         boards = load_board_names(retries=args.retries, retry_delay=args.retry_delay)
     except Exception as exc:
@@ -314,15 +381,17 @@ def main():
             print_sector_report(df, path, args.top)
             return
         raise SystemExit("无法获取行业板块列表")
-    benchmark = load_benchmark(args.days + 5)
-    limit_up_counts = load_limit_up_counts(args.limit_up_days)
+    benchmark = load_benchmark(args.days + 5, as_of_date)
+    limit_up_counts = load_limit_up_counts(args.limit_up_days, as_of_date)
 
-    rows = []
-    for idx, board_name in enumerate(boards["board_name"].tolist(), start=1):
+    board_names = boards["board_name"].tolist()
+
+    def process_board(board_name):
         try:
             hist = load_board_history(
                 board_name,
                 args.days,
+                as_of_date,
                 retries=args.retries,
                 retry_delay=args.retry_delay,
             )
@@ -330,13 +399,25 @@ def main():
                 row = calc_board_metrics(board_name, hist, benchmark)
                 row["limit_up_count"] = limit_up_counts.get(board_name, 0)
                 row["final_score"] = round(row["mainline_score"] + score_direct(row["limit_up_count"], 0, 8) * 0.15, 1)
-                rows.append(row)
+                return row
         except Exception as exc:
             print(f"跳过 {board_name}: {exc}")
-        if args.sleep > 0:
-            time.sleep(args.sleep)
-        if idx % 20 == 0:
-            print(f"进度 {idx}/{len(boards)}, 有效 {len(rows)}")
+        return None
+
+    rows = []
+    workers = max(1, args.workers)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {}
+        for board_name in board_names:
+            if args.sleep > 0:
+                time.sleep(args.sleep)
+            futures[executor.submit(process_board, board_name)] = board_name
+        for idx, future in enumerate(as_completed(futures), start=1):
+            row = future.result()
+            if row:
+                rows.append(row)
+            if idx % 20 == 0:
+                print(f"进度 {idx}/{len(board_names)}, 有效 {len(rows)}")
 
     df = pd.DataFrame(rows)
     if df.empty:
@@ -351,8 +432,18 @@ def main():
         raise SystemExit("无有效板块数据")
     df = df.sort_values(["final_score", "mainline_score", "ret5"], ascending=False)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    path = os.path.join(OUTPUT_DIR, f"sector_watch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+    as_of_stamp = pd.Timestamp(as_of_date).strftime("%Y%m%d")
+    path = os.path.join(OUTPUT_DIR, f"sector_watch_asof_{as_of_stamp}_{datetime.now().strftime('%H%M%S')}.csv")
     df.to_csv(path, index=False, encoding="utf-8-sig")
+    constituent_path = get_project_path(f".cache/sector_mainline_constituents_{as_of_stamp}.csv") if args.as_of_date else BOARD_CONSTITUENT_FILE
+    save_mainline_constituents(
+        df,
+        top=min(10, args.top),
+        retries=args.retries,
+        retry_delay=args.retry_delay,
+        sleep=args.sleep,
+        output_path=constituent_path,
+    )
     print_sector_report(df, path, args.top)
 
 
