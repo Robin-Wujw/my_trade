@@ -16,11 +16,9 @@ from point_in_time import audit_source, write_metadata
 
 
 VALUE_CACHE_DIR = get_project_path(".cache/q1_value")
-FIXED_POOL_DIR = get_project_path(".cache/fundamental_pools")
 KLINE_CACHE_DIR = get_project_path(".cache/formula33_kline/akshare")
 OUTPUT_DIR = get_project_path("选股结果")
 UNIVERSE_PATH = get_project_path(".cache/stock_universe.csv")
-BACKTEST_DIR = get_project_path("回测结果")
 VALUE_ROUTE_OVERRIDES = {
     "sz.002415": ("VALUE", "海康威视：大型安防龙头，产业与财务可外推，按用户验收口径纳入"),
 }
@@ -32,28 +30,7 @@ def parse_args():
     parser.add_argument("--value-ratio", type=float, default=1.08, help="价值线附近最高现价/价值线")
     parser.add_argument("--normal-top", type=int, default=30, help="正常基本面部分最多股票数")
     parser.add_argument("--output", default="")
-    parser.add_argument("--fixed-pool", default="", help="固定基本面候选池CSV；默认按财报期自动查找")
-    parser.add_argument(
-        "--selection-mode", choices=["dynamic", "fixed"], default="dynamic",
-        help="dynamic=每日按当时可见财报和行情重建；fixed=仅用于固定池对照研究",
-    )
     return parser.parse_args()
-
-
-def load_fixed_pool(report_period, explicit_path=""):
-    if explicit_path:
-        paths = [os.path.abspath(explicit_path)]
-    else:
-        suffix = report_period.replace("-", "")
-        paths = glob.glob(os.path.join(FIXED_POOL_DIR, f"fundamental_pool_{suffix}_*.csv"))
-    if not paths:
-        return pd.DataFrame(), "", {}
-    path = max(paths, key=os.path.getmtime)
-    frame = pd.read_csv(path, dtype={"code": str}, low_memory=False)
-    status, issues, metadata = audit_source(path, "fixed_fundamental_pool")
-    if status == "unsafe":
-        raise SystemExit(f"固定基本面池时点审计失败: {issues}")
-    return frame, path, metadata
 
 
 def latest_report_period():
@@ -152,41 +129,27 @@ def latest_fundamental_snapshot(report_period):
     if full_paths:
         path = max(full_paths, key=os.path.getmtime)
         return pd.read_csv(path, dtype={"code": str}, low_memory=False), path
-    year = report_period[:4]
-    paths = glob.glob(os.path.join(BACKTEST_DIR, f"q1_backtest_{year}-*.csv"))
-    paths = [p for p in paths if "portfolio_" not in p and "returns_fixed" not in p]
-    if not paths:
-        return pd.DataFrame(), ""
-    path = max(paths, key=lambda p: (os.path.getsize(p), os.path.getmtime(p)))
-    return pd.read_csv(path, dtype={"code": str}, low_memory=False), path
+    return pd.DataFrame(), ""
 
 
-def load_method_routes():
-    rows = []
-    for path in glob.glob(os.path.join(BACKTEST_DIR, "q1_backtest*.csv")):
-        try:
-            frame = pd.read_csv(
-                path,
-                dtype={"code": str},
-                usecols=lambda col: col in {"code", "method", "industry", "theme"},
-                low_memory=False,
-            )
-            rows.append(frame)
-        except Exception:
-            continue
+def method_routes_from_snapshot(snapshot):
     routes = {}
-    if rows:
-        merged = pd.concat(rows, ignore_index=True).dropna(subset=["code", "method"])
-        for _, row in merged.drop_duplicates("code", keep="last").iterrows():
+    if not snapshot.empty:
+        for _, row in snapshot.drop_duplicates("code").iterrows():
+            code = str(row["code"])
             industry = row.get("industry", "")
-            routes[str(row["code"])] = {
-                "method": classify_method(industry),
+            method = row.get("method")
+            if not method or pd.isna(method):
+                method = classify_method(industry) if industry else "UNKNOWN"
+            routes[code] = {
+                "method": method,
                 "industry": industry,
                 "theme": row.get("theme", ""),
-                "reason": "按行业经济特征初筛",
+                "reason": "按当日全市场截面行业规则",
             }
     for code, (method, reason) in VALUE_ROUTE_OVERRIDES.items():
-        routes[code] = {"method": method, "industry": "", "theme": "", "reason": reason}
+        existing = routes.get(code, {})
+        routes[code] = {**existing, "method": method, "reason": reason}
     return routes
 
 
@@ -459,28 +422,22 @@ def main():
     args = parse_args()
     report_period = args.report_period or latest_report_period()
     names = load_names()
-    method_routes = load_method_routes()
     mainline_boards = load_mainline_boards()
-    if args.selection_mode == "fixed":
-        snapshot, snapshot_path, pool_metadata = load_fixed_pool(report_period, args.fixed_pool)
-        if snapshot.empty:
-            raise SystemExit("fixed模式缺少固定基本面池，请先运行 fixedFundamentalPool.py")
-    else:
-        snapshot, snapshot_path = latest_fundamental_snapshot(report_period)
-        if snapshot.empty:
-            raise SystemExit(f"缺少财报期 {report_period} 的动态基本面截面")
-        source_status, source_issues, source_metadata = audit_source(snapshot_path)
-        if source_status == "unsafe":
-            raise SystemExit(f"动态全市场截面覆盖率不足或时点不安全: {source_issues or source_metadata}")
-        pool_metadata = {
-            "point_in_time_status": source_status,
-            "point_in_time_note": "dynamic selection; financial revision history is unavailable",
-            "formation_date": None,
-        }
+    snapshot, snapshot_path = latest_fundamental_snapshot(report_period)
+    if snapshot.empty:
+        raise SystemExit(f"缺少财报期 {report_period} 的动态基本面截面")
+    source_status, source_issues, source_metadata = audit_source(snapshot_path)
+    if source_status == "unsafe":
+        raise SystemExit(f"动态全市场截面覆盖率不足或时点不安全: {source_issues or source_metadata}")
+    pool_metadata = {
+        "point_in_time_status": source_status,
+        "point_in_time_note": "dynamic selection; financial revision history is unavailable",
+        "formation_date": None,
+    }
+    method_routes = method_routes_from_snapshot(snapshot)
     values = value_rows(report_period, names, snapshot, args.value_ratio, method_routes, mainline_boards)
     normal = normal_rows(report_period, snapshot, names, mainline_boards)
-    if args.selection_mode == "dynamic":
-        normal = normal.head(max(1, args.normal_top))
+    normal = normal.head(max(1, args.normal_top))
     combined = pd.concat([values, normal], ignore_index=True, sort=False)
     if combined.empty:
         raise SystemExit("没有生成每日基本面候选")
@@ -493,18 +450,15 @@ def main():
         "kind": "daily_fundamental_selection",
         "point_in_time_status": pool_metadata.get("point_in_time_status", "warning"),
         "report_period": report_period,
-        "selection_mode": args.selection_mode,
+        "selection_mode": "dynamic",
         "source_snapshot": snapshot_path,
-        "fixed_pool_path": snapshot_path if args.selection_mode == "fixed" else None,
-        "pool_formation_date": pool_metadata.get("formation_date"),
         "daily_technical_cutoff": report_date,
-        "fixed_pool_members": int(snapshot.get("pool_member", pd.Series(dtype=bool)).fillna(False).sum()) if "pool_member" in snapshot else 0,
         "dynamic_signal_members": int(normal.get("signal_eligible", pd.Series(dtype=bool)).fillna(False).sum()) if not normal.empty else 0,
     })
     print(f"每日基本面文件: {output}")
     print(f"财报期={report_period} 价值线或附近={len(values)} 正常基本面={len(normal)}")
     print(f"截面来源={snapshot_path or '缺失'}")
-    print(f"选股模式={args.selection_mode} 固定池形成日={pool_metadata.get('formation_date') or '不适用'} 时点状态={pool_metadata.get('point_in_time_status', 'unknown')}")
+    print(f"选股模式=dynamic 时点状态={pool_metadata.get('point_in_time_status', 'unknown')}")
     for code in ["sz.002415", "sz.002236"]:
         hit = values[values["code"] == code]
         if not hit.empty:

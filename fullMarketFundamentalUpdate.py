@@ -13,10 +13,10 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import akshare as ak
+import baostock as bs
 
-import q1Backtest
-from dailyFundamentalSelect import KLINE_CACHE_DIR, VALUE_CACHE_DIR, load_method_routes
-from factorStock import classify_method, score_direct
+from dailyFundamentalSelect import KLINE_CACHE_DIR, VALUE_CACHE_DIR
+from factorStock import classify_method, get_value_line_metrics_from_akshare_indicator, infer_theme, score_direct
 from point_in_time import write_metadata
 from trade_utils import get_project_path, send_pushplus
 
@@ -72,7 +72,7 @@ def save_json(path, value):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(value, handle, ensure_ascii=False, indent=2)
+        json.dump(value, handle, ensure_ascii=False, indent=2, default=lambda v: v.item() if hasattr(v, "item") else str(v))
     os.replace(tmp, path)
 
 
@@ -129,9 +129,10 @@ def fetch_one(code, close, report_period, retries):
     error = None
     for attempt in range(retries):
         try:
-            value = q1Backtest.get_value_line_asof_cached(symbol, close, report_period)
+            value = get_value_line_metrics_from_akshare_indicator(symbol, close, report_period)
             if value:
                 path = financial_path(code, report_period)
+                save_json(path, value)
                 enrich_cache_metadata(path, report_period)
                 return code, True, ""
         except Exception as exc:
@@ -271,10 +272,10 @@ def load_industry_map(as_of_date, offline=False):
         except Exception as exc:
             print(f"AkShare industry refresh failed, trying Baostock fallback: {exc}")
         try:
-            login = q1Backtest.bs.login()
+            login = bs.login()
             if login.error_code == "0":
                 try:
-                    result = q1Backtest.bs.query_stock_industry()
+                    result = bs.query_stock_industry()
                     frame = result.get_data()
                     if result.error_code == "0" and not frame.empty:
                         frame.columns = result.fields
@@ -291,7 +292,7 @@ def load_industry_map(as_of_date, offline=False):
                         })
                         return dict(zip(frame["code"], frame["industry"].fillna(""))), "baostock/query_stock_industry"
                 finally:
-                    q1Backtest.bs.logout()
+                    bs.logout()
         except Exception as exc:
             print(f"industry refresh failed, using cache: {exc}")
     if not os.path.exists(latest_path):
@@ -300,7 +301,7 @@ def load_industry_map(as_of_date, offline=False):
     return dict(zip(frame["code"], frame["industry"].fillna(""))), "local_cache"
 
 
-def build_snapshot(universe, markets, report_period, routes, industry_map):
+def build_snapshot(universe, markets, report_period, industry_map):
     rows = []
     for _, stock in universe.iterrows():
         code = str(stock["code"])
@@ -311,14 +312,13 @@ def build_snapshot(universe, markets, report_period, routes, industry_map):
         shares = pd.to_numeric(financial.get("total_share"), errors="coerce")
         value_line = pd.to_numeric(financial.get("value_line"), errors="coerce")
         mktcap = market["close"] * shares / 1e8 if pd.notna(shares) else np.nan
-        route = routes.get(code, {})
-        industry = industry_map.get(code) or route.get("industry", "")
+        industry = industry_map.get(code, "")
         rows.append({
             "code": code,
             "name": stock.get("code_name", code),
             "industry": industry,
-            "theme": route.get("theme", ""),
-            "method": route.get("method") or (classify_method(industry) if industry else "UNKNOWN"),
+            "theme": infer_theme(stock.get("code_name", code), industry) if industry else "",
+            "method": classify_method(industry) if industry else "UNKNOWN",
             "report_period": report_period,
             "market_date": market["market_date"],
             "close": market["close"],
@@ -364,9 +364,8 @@ def main():
         if market:
             markets[code] = market
     success, failed, attempted = update_missing(universe, markets, args)
-    routes = load_method_routes()
     industry_map, industry_source = load_industry_map(args.as_of_date, offline=args.offline)
-    snapshot = build_snapshot(universe, markets, args.report_period, routes, industry_map)
+    snapshot = build_snapshot(universe, markets, args.report_period, industry_map)
     output = args.output or os.path.join(
         SNAPSHOT_DIR,
         f"fundamental_snapshot_{args.report_period.replace('-', '')}_{args.as_of_date.replace('-', '')}.csv",
