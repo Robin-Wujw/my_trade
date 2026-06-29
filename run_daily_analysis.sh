@@ -10,13 +10,16 @@ cd "$SCRIPT_DIR" || exit 1
 
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=utf-8
-export HTTP_PROXY="${HTTP_PROXY:-http://127.0.0.1:7897}"
-export HTTPS_PROXY="${HTTPS_PROXY:-http://127.0.0.1:7897}"
-export ALL_PROXY="${ALL_PROXY:-http://127.0.0.1:7897}"
+if [ "${DISABLE_DEFAULT_PROXY:-0}" != "1" ]; then
+  export HTTP_PROXY="${HTTP_PROXY:-http://127.0.0.1:7897}"
+  export HTTPS_PROXY="${HTTPS_PROXY:-http://127.0.0.1:7897}"
+  export ALL_PROXY="${ALL_PROXY:-http://127.0.0.1:7897}"
+fi
 
 LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/daily_analysis_$(date '+%Y%m%d').log"
+FAILED_STEPS=()
 
 run_step() {
   local name="$1"
@@ -40,6 +43,10 @@ run_step() {
     echo "========== $(date '+%F %T') END $name status=$status =========="
   } >> "$LOG_FILE"
 
+  if [ "$status" -ne 0 ]; then
+    FAILED_STEPS+=("$name:$status")
+  fi
+
   return 0
 }
 
@@ -53,6 +60,7 @@ FORMULA33_CAPITAL_WORKERS="${FORMULA33_CAPITAL_WORKERS:-1}"
 SECTOR_SLEEP="${SECTOR_SLEEP:-0.3}"
 SECTOR_RETRIES="${SECTOR_RETRIES:-5}"
 SECTOR_RETRY_DELAY="${SECTOR_RETRY_DELAY:-5}"
+FINANCIAL_UPDATES="${FINANCIAL_UPDATES:-100}"
 
 run_step "formula33 market structure" 7200 \
   "$PYTHON_BIN" -u formula33Stats.py \
@@ -103,16 +111,25 @@ run_step "factorStock daily selection" 7200 \
   --akshare-cache-only \
   --allow-login-fail
 
+run_step "full market fundamental cache and snapshot" 7200 \
+  "$PYTHON_BIN" -u fullMarketFundamentalUpdate.py \
+  --max-updates "$FINANCIAL_UPDATES" \
+  --workers 2 \
+  --min-price-coverage 0.90 \
+  --min-financial-coverage 0.35 \
+  --target-financial-coverage 0.95 \
+  --alert
+
 run_step "daily fundamental sections" 600 \
   "$PYTHON_BIN" -u dailyFundamentalSelect.py \
   --value-ratio 1.08 \
   --normal-top 30
 
-run_step "daily consolidated PushPlus report" 300 \
-  "$PYTHON_BIN" -u dailyReportPush.py \
-  --top 10 \
-  --selection-top 30 \
-  --max-chars 12000
+REPORT_ARGS=(dailyReportPush.py --top 10 --selection-top 30 --max-chars 12000)
+if [ "${NO_PUSH:-0}" = "1" ]; then
+  REPORT_ARGS+=(--no-push)
+fi
+run_step "daily consolidated PushPlus report" 300 "$PYTHON_BIN" -u "${REPORT_ARGS[@]}"
 
 {
   echo
@@ -120,3 +137,10 @@ run_step "daily consolidated PushPlus report" 300 \
   echo "Outputs:"
   find "$SCRIPT_DIR/选股结果" "$SCRIPT_DIR/板块观察" -maxdepth 1 -type f -mtime -2 2>/dev/null | sort
 } >> "$LOG_FILE"
+
+if [ "${#FAILED_STEPS[@]}" -gt 0 ]; then
+  FAILURE_SUMMARY="FAILED STEPS: ${FAILED_STEPS[*]}"
+  echo "$FAILURE_SUMMARY" | tee -a "$LOG_FILE" >&2
+  "$PYTHON_BIN" -u pipelineAlert.py --title "Daily selection pipeline failed" --message "$FAILURE_SUMMARY" >> "$LOG_FILE" 2>&1 || true
+  exit 1
+fi

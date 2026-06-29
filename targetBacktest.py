@@ -178,11 +178,6 @@ def get_value_line_asof(symbol, close, report_period):
         ak_indicator_value["bvps"] = None
         return ak_indicator_value
 
-    adata_value = get_value_line_metrics_from_adata(symbol, close, report_period)
-    if adata_value:
-        adata_value["bvps"] = None
-        return adata_value
-
     df_q = ak.stock_financial_abstract_ths(symbol=symbol, indicator="按报告期")
     df_q = df_q[df_q["扣非净利润"] != False].copy()
     if df_q.empty:

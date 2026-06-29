@@ -20,6 +20,7 @@ from dailyFundamentalSelect import (
     technical_fields,
 )
 from wave_utils import infer_downtrend_recovery, level_price
+from point_in_time import audit_dates, audit_source, require_safe, write_metadata
 
 
 def parse_args():
@@ -31,6 +32,7 @@ def parse_args():
     parser.add_argument("--value-ratio", type=float, default=1.08)
     parser.add_argument("--output", required=True)
     parser.add_argument("--snapshot", default="", help="指定历史截面候选CSV")
+    parser.add_argument("--allow-unsafe", action="store_true", help="允许带明确标签的非严格时点研究运行")
     return parser.parse_args()
 
 
@@ -104,15 +106,33 @@ def load_value_cache(report_period):
 
 def main():
     args = parse_args()
+    date_audit = audit_dates(args.report_period, args.buy_date, args.buy_date)
     names = load_names()
     routes = load_method_routes()
     mainline_map = historical_mainline_map(args.buy_date)
+    mainline_path = os.path.join(
+        os.path.dirname(VALUE_CACHE_DIR),
+        f"sector_mainline_constituents_{pd.Timestamp(args.buy_date).strftime('%Y%m%d')}.csv",
+    )
+    mainline_status, mainline_issues, mainline_metadata = audit_source(
+        mainline_path, "sector_mainline_constituents"
+    )
+    if not mainline_metadata:
+        mainline_status = "unsafe"
+        mainline_issues.append("historical constituent membership has no point-in-time provenance")
     values = load_value_cache(args.report_period)
     if args.snapshot:
         snapshot_path = args.snapshot
         snapshot = pd.read_csv(snapshot_path, dtype={"code": str}, low_memory=False)
     else:
         snapshot, snapshot_path = latest_fundamental_snapshot(args.report_period)
+    snapshot_status, snapshot_issues, snapshot_metadata = audit_source(snapshot_path)
+    audits = [
+        {"name": "dates", "status": date_audit["date_status"], "issues": date_audit["date_issues"]},
+        {"name": "mainline constituents", "status": mainline_status, "issues": mainline_issues},
+        {"name": "fundamental snapshot", "status": snapshot_status, "issues": snapshot_issues},
+    ]
+    require_safe(audits, allow_unsafe=args.allow_unsafe)
 
     value_rows = []
     for _, row in values.iterrows():
@@ -216,6 +236,17 @@ def main():
     result = pd.concat([pd.DataFrame(value_rows), pd.DataFrame(normal_rows)], ignore_index=True, sort=False)
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     result.to_csv(args.output, index=False, encoding="utf-8-sig")
+    write_metadata(args.output, {
+        "kind": "quarterly_fundamental_backtest",
+        "point_in_time_status": "unsafe" if any(a["status"] == "unsafe" for a in audits) else "warning",
+        "audits": audits,
+        "mainline_metadata": mainline_metadata,
+        "snapshot_metadata": snapshot_metadata,
+        **date_audit,
+        "end_date": args.end_date,
+        "selection_uses_prices_through": args.buy_date,
+        "future_prices_used_only_for_return": True,
+    })
     print(f"source={snapshot_path}")
     for part, group in result.groupby("strategy_part"):
         returns = pd.to_numeric(group["return"], errors="coerce").dropna()

@@ -1297,28 +1297,6 @@ def get_value_line_metrics(symbol, close):
             })
             return ak_indicator_metrics
 
-        adata_metrics = get_value_line_metrics_from_adata(symbol, close)
-        if adata_metrics:
-            save_value_cache(symbol, {
-                "cache_version": VALUE_CACHE_VERSION,
-                "value_line": adata_metrics["value_line"],
-                "quality_score": adata_metrics["quality_score"],
-                "total_share": adata_metrics["total_share"],
-                "eps_excl": adata_metrics["eps_excl"],
-                "yoy": adata_metrics["yoy"],
-                "yoy_source": adata_metrics["yoy_source"],
-                "latest_excl_eps": adata_metrics.get("latest_excl_eps"),
-                "prev_excl_eps": adata_metrics.get("prev_excl_eps"),
-                "latest_report": adata_metrics.get("latest_report"),
-                "annual_report": adata_metrics.get("annual_report"),
-                "data_source": adata_metrics.get("data_source"),
-                "eps_excl_raw": adata_metrics.get("eps_excl_raw"),
-                "eps_adjustment_factor": adata_metrics.get("eps_adjustment_factor"),
-                "eps_excl_source": adata_metrics.get("eps_excl_source"),
-                "eps_bonus_detail": adata_metrics.get("eps_bonus_detail"),
-            })
-            return adata_metrics
-
         with time_limit(AK_TIMEOUT_SECONDS):
             df_q = ak.stock_financial_abstract_ths(symbol=symbol, indicator="按报告期")
         df_q = df_q[df_q["扣非净利润"] != False].copy()

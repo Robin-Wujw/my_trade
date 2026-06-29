@@ -657,51 +657,27 @@ def append_forward_return(rows, buy_date, end_date):
 
 
 def get_latest_quotes_for_rows(rows):
-    codes = [row["code"].replace("sh.", "").replace("sz.", "") for row in rows]
-    if not codes:
-        return {}
-    if ef is None:
+    needed = {row["code"] for row in rows}
+    if not needed:
         return {}
     quotes = {}
-    for start in range(0, len(codes), 80):
-        batch = codes[start:start + 80]
-        try:
-            df = ef.stock.get_latest_quote(batch)
-        except Exception:
-            continue
-        if df is None or df.empty:
-            continue
-        for _, quote in df.iterrows():
-            code = normalize_code(str(quote.get("代码")).zfill(6))
-            latest = pd.to_numeric(quote.get("最新价"), errors="coerce")
-            if pd.isna(latest) or latest <= 0:
-                continue
-            quotes[code] = {
-                "latest_price": float(latest),
-                "quote_time": str(quote.get("更新时间")),
-                "trade_date": str(quote.get("最新交易日")),
-            }
-    needed = {row["code"] for row in rows}
-    missing = needed - set(quotes)
-    if not missing:
-        return quotes
     try:
-        df = ak.stock_zh_a_spot()
+        df = ak.stock_zh_a_spot_em()
     except Exception:
         return quotes
     if df is None or df.empty:
         return quotes
     for _, quote in df.iterrows():
-        code = normalize_code(str(quote.get("代码")))
-        if code not in missing:
+        code = normalize_code(str(quote.get("代码")).zfill(6))
+        if code not in needed:
             continue
         latest = pd.to_numeric(quote.get("最新价"), errors="coerce")
         if pd.isna(latest) or latest <= 0:
             continue
         quotes[code] = {
             "latest_price": float(latest),
-            "quote_time": str(quote.get("时间戳")),
-            "trade_date": "",
+            "quote_time": datetime.now().isoformat(timespec="seconds"),
+            "trade_date": datetime.now().strftime("%Y-%m-%d"),
         }
     return quotes
 

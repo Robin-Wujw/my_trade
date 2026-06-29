@@ -10,13 +10,16 @@ $env:PYTHONUNBUFFERED = "1"
 $env:PYTHONIOENCODING = "utf-8"
 
 $DefaultProxy = "http://127.0.0.1:7897"
-if (-not $env:HTTP_PROXY) { $env:HTTP_PROXY = $DefaultProxy }
-if (-not $env:HTTPS_PROXY) { $env:HTTPS_PROXY = $DefaultProxy }
-if (-not $env:ALL_PROXY) { $env:ALL_PROXY = $DefaultProxy }
+if ($env:DISABLE_DEFAULT_PROXY -ne "1") {
+    if (-not $env:HTTP_PROXY) { $env:HTTP_PROXY = $DefaultProxy }
+    if (-not $env:HTTPS_PROXY) { $env:HTTPS_PROXY = $DefaultProxy }
+    if (-not $env:ALL_PROXY) { $env:ALL_PROXY = $DefaultProxy }
+}
 
 $LogDir = if ($env:LOG_DIR) { $env:LOG_DIR } else { Join-Path $ScriptDir "logs" }
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $LogFile = Join-Path $LogDir ("daily_analysis_{0}.log" -f (Get-Date -Format "yyyyMMdd"))
+$script:FailedSteps = @()
 
 function Add-LogLine {
     param([string]$Text)
@@ -38,6 +41,7 @@ function Run-Step {
     $status = $LASTEXITCODE
 
     Add-LogLine ("========== {0} END {1} status={2} ==========" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Name, $status)
+    if ($status -ne 0) { $script:FailedSteps += ("{0}:{1}" -f $Name, $status) }
     return $status
 }
 
@@ -50,6 +54,7 @@ $Formula33CapitalWorkers = if ($env:FORMULA33_CAPITAL_WORKERS) { $env:FORMULA33_
 $SectorSleep = if ($env:SECTOR_SLEEP) { $env:SECTOR_SLEEP } else { "0.3" }
 $SectorRetries = if ($env:SECTOR_RETRIES) { $env:SECTOR_RETRIES } else { "5" }
 $SectorRetryDelay = if ($env:SECTOR_RETRY_DELAY) { $env:SECTOR_RETRY_DELAY } else { "5" }
+$FinancialUpdates = if ($env:FINANCIAL_UPDATES) { $env:FINANCIAL_UPDATES } else { "100" }
 
 Run-Step "formula33 market structure" @(
     "formula33Stats.py",
@@ -104,18 +109,30 @@ Run-Step "factorStock daily selection" @(
     "--allow-login-fail"
 ) | Out-Null
 
+Run-Step "full market fundamental cache and snapshot" @(
+    "fullMarketFundamentalUpdate.py",
+    "--max-updates", $FinancialUpdates,
+    "--workers", "2",
+    "--min-price-coverage", "0.90",
+    "--min-financial-coverage", "0.35",
+    "--target-financial-coverage", "0.95",
+    "--alert"
+) | Out-Null
+
 Run-Step "daily fundamental sections" @(
     "dailyFundamentalSelect.py",
     "--value-ratio", "1.08",
     "--normal-top", "30"
 ) | Out-Null
 
-Run-Step "daily consolidated PushPlus report" @(
+$ReportArguments = @(
     "dailyReportPush.py",
     "--top", "10",
     "--selection-top", "30",
     "--max-chars", "12000"
-) | Out-Null
+)
+if ($env:NO_PUSH -eq "1") { $ReportArguments += "--no-push" }
+Run-Step "daily consolidated PushPlus report" $ReportArguments | Out-Null
 
 Add-LogLine ""
 Add-LogLine ("{0} daily analysis finished" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"))
@@ -132,3 +149,10 @@ foreach ($dir in @($SelectionDir, $BoardDir)) {
 }
 
 Write-Host "Daily analysis finished. Log: $LogFile"
+if ($script:FailedSteps.Count -gt 0) {
+    $summary = "FAILED STEPS: " + ($script:FailedSteps -join ", ")
+    Add-LogLine $summary
+    & $PythonBin -u "pipelineAlert.py" --title "Daily selection pipeline failed" --message $summary 2>&1 | ForEach-Object { Add-LogLine ([string]$_) }
+    Write-Error $summary
+    exit 1
+}

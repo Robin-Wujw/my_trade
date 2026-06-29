@@ -1,0 +1,6 @@
+akshare
+baostock
+numpy
+openpyxl
+pandas
+requests

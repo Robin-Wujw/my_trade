@@ -208,9 +208,10 @@ def load_quotes(rows, quote_start, quote_end, prefer_realtime=False):
     codes = [pure_code(code) for code in rows["code"].tolist()]
     quotes = {}
     if prefer_realtime:
-        quotes = load_quotes_from_efinance(codes)
         quotes = load_quotes_from_akshare(codes, quotes)
-    daily_quotes = load_quotes_from_baostock(rows, quote_start, quote_end)
+    missing_codes = {code for code in codes if code not in quotes}
+    fallback_rows = rows[rows["code"].map(pure_code).isin(missing_codes)] if missing_codes else rows.iloc[0:0]
+    daily_quotes = load_quotes_from_baostock(fallback_rows, quote_start, quote_end) if not fallback_rows.empty else {}
     daily_quotes.update(quotes)
     return daily_quotes
 

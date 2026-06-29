@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from trade_utils import get_project_path
+from point_in_time import write_metadata
 
 
 OUTPUT_DIR = get_project_path("板块观察")
@@ -306,6 +307,14 @@ def save_mainline_constituents(board_df, top=10, retries=4, retry_delay=2.0, sle
         pd.DataFrame(rows).drop_duplicates(["code", "board"]).to_csv(
             target, index=False, encoding="utf-8-sig"
         )
+        write_metadata(target, {
+            "kind": "sector_mainline_constituents",
+            "point_in_time_status": "unsafe" if output_path else "safe",
+            "point_in_time_note": (
+                "board ranks are historical, but constituent membership was retrieved from the current API"
+                if output_path else "current-date board ranks and constituents"
+            ),
+        })
         print(f"主流板块成分映射已保存: {target}，{len(rows)} 条")
 
 

@@ -1,0 +1,122 @@
+name: Stock Selection
+
+on:
+  schedule:
+    # GitHub cron cannot express a continuous 72-hour cadence across month boundaries.
+    # Trigger daily and let the gate below run selection once every three UTC days.
+    - cron: "30 8 * * *"
+  workflow_dispatch:
+    inputs:
+      report_period:
+        description: "Optional report period (YYYY-MM-DD); blank = latest legally visible"
+        required: false
+        type: string
+      financial_updates:
+        description: "Maximum missing financial records to fetch; 0 = all"
+        required: false
+        default: "100"
+        type: string
+      no_push:
+        description: "Skip PushPlus notification"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stock-selection
+  cancel-in-progress: false
+
+jobs:
+  select:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONIOENCODING: "utf-8"
+      DISABLE_DEFAULT_PROXY: "1"
+      PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+
+    steps:
+      - name: Three-day schedule gate
+        id: gate
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            epoch_day=$(( $(date -u +%s) / 86400 ))
+            if [ $(( epoch_day % 3 )) -eq 0 ]; then
+              echo "run=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "run=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Checkout
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-actions.txt
+
+      - name: Install dependencies
+        if: steps.gate.outputs.run == 'true'
+        run: python -m pip install --upgrade pip && pip install -r requirements-actions.txt
+
+      - name: Restore market and financial cache
+        if: steps.gate.outputs.run == 'true'
+        id: market-cache
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: trade-data-v1-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            trade-data-v1-${{ runner.os }}-
+
+      - name: Run full-market selection
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        env:
+          INPUT_REPORT_PERIOD: ${{ inputs.report_period }}
+          INPUT_FINANCIAL_UPDATES: ${{ inputs.financial_updates }}
+          INPUT_NO_PUSH: ${{ inputs.no_push }}
+          CACHE_HIT: ${{ steps.market-cache.outputs.cache-hit }}
+        run: |
+          if [ -n "$INPUT_REPORT_PERIOD" ]; then
+            export REPORT_PERIOD="$INPUT_REPORT_PERIOD"
+          fi
+
+          if [ "$CACHE_HIT" = "true" ]; then
+            export FINANCIAL_UPDATES="${INPUT_FINANCIAL_UPDATES:-100}"
+          else
+            # First cloud run has no local cache: build the report-period cache completely.
+            export FINANCIAL_UPDATES=0
+          fi
+
+          if [ "$INPUT_NO_PUSH" = "true" ] || [ -z "$PUSHPLUS_TOKEN" ]; then
+            export NO_PUSH=1
+          fi
+
+          bash run_daily_analysis.sh
+
+      - name: Upload reports and logs
+        if: always() && steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-selection-${{ github.run_number }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            logs/
+            选股结果/
+            板块观察/
+            .cache/fundamental_snapshots/latest_coverage.json
+            .cache/fundamental_snapshots/*.meta.json
