@@ -37,6 +37,7 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
       PYTHONIOENCODING: "utf-8"
+      PSExecutionPolicyPreference: Bypass
       PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
       LOCAL_PROJECT_ROOT: 'D:\MyCodes\my_trade'
 
