@@ -2,8 +2,7 @@ name: Stock Selection
 
 on:
   schedule:
-    # GitHub cron cannot express a continuous 72-hour cadence across month boundaries.
-    # Trigger daily and let the gate below run selection once every three UTC days.
+    # Wake at 16:30 Beijing time and let the gate run once every three UTC days.
     - cron: "30 8 * * *"
   workflow_dispatch:
     inputs:
@@ -31,33 +30,35 @@ concurrency:
 
 jobs:
   select:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
+    # Chinese market-data endpoints reset connections from GitHub-hosted runners.
+    # Keep this job on the registered Windows machine and its persistent workspace.
+    runs-on: [self-hosted, Windows, X64, my-trade]
+    timeout-minutes: 720
     env:
       PYTHONUNBUFFERED: "1"
       PYTHONIOENCODING: "utf-8"
-      DISABLE_DEFAULT_PROXY: "1"
       PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+      LOCAL_PROJECT_ROOT: 'D:\MyCodes\my_trade'
 
     steps:
       - name: Three-day schedule gate
         id: gate
-        shell: bash
+        shell: powershell
         run: |
-          if [ "${{ github.event_name }}" != "schedule" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            epoch_day=$(( $(date -u +%s) / 86400 ))
-            if [ $(( epoch_day % 3 )) -eq 0 ]; then
-              echo "run=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "run=false" >> "$GITHUB_OUTPUT"
-            fi
-          fi
+          if ("${{ github.event_name }}" -ne "schedule") {
+            "run=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          } else {
+            $epochDay = [math]::Floor(([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) / 86400)
+            $shouldRun = (($epochDay % 3) -eq 0).ToString().ToLowerInvariant()
+            "run=$shouldRun" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
 
       - name: Checkout
         if: steps.gate.outputs.run == 'true'
         uses: actions/checkout@v4
+        with:
+          # Preserve ignored .cache data between jobs on this persistent runner.
+          clean: false
 
       - name: Set up Python
         if: steps.gate.outputs.run == 'true'
@@ -69,44 +70,46 @@ jobs:
 
       - name: Install dependencies
         if: steps.gate.outputs.run == 'true'
-        run: python -m pip install --upgrade pip && pip install -r requirements-actions.txt
+        shell: powershell
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-actions.txt
 
-      - name: Restore market and financial cache
+      - name: Seed persistent cache
         if: steps.gate.outputs.run == 'true'
-        id: market-cache
-        uses: actions/cache@v4
-        with:
-          path: .cache
-          key: trade-data-v1-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: |
-            trade-data-v1-${{ runner.os }}-
+        shell: powershell
+        run: |
+          $source = Join-Path $env:LOCAL_PROJECT_ROOT ".cache"
+          $target = Join-Path $env:GITHUB_WORKSPACE ".cache"
+          $marker = Join-Path $target "stock_universe.csv"
+          if (-not (Test-Path $marker) -and (Test-Path $source)) {
+            New-Item -ItemType Directory -Force -Path $target | Out-Null
+            Copy-Item -Path (Join-Path $source "*") -Destination $target -Recurse -Force
+            Write-Host "Seeded runner cache from $source"
+          } else {
+            Write-Host "Using persistent runner cache at $target"
+          }
 
       - name: Run full-market selection
         if: steps.gate.outputs.run == 'true'
-        shell: bash
+        shell: powershell
         env:
           INPUT_REPORT_PERIOD: ${{ inputs.report_period }}
           INPUT_FINANCIAL_UPDATES: ${{ inputs.financial_updates }}
           INPUT_NO_PUSH: ${{ inputs.no_push }}
-          # cache-hit is "false" for a restore-key match and empty only on a total miss.
-          CACHE_RESTORED: ${{ steps.market-cache.outputs.cache-hit != '' }}
         run: |
-          if [ -n "$INPUT_REPORT_PERIOD" ]; then
-            export REPORT_PERIOD="$INPUT_REPORT_PERIOD"
-          fi
-
-          if [ "$CACHE_RESTORED" = "true" ]; then
-            export FINANCIAL_UPDATES="${INPUT_FINANCIAL_UPDATES:-100}"
-          else
-            # A genuine first cloud run has no cache: build the report-period cache completely.
-            export FINANCIAL_UPDATES=0
-          fi
-
-          if [ "$INPUT_NO_PUSH" = "true" ] || [ -z "$PUSHPLUS_TOKEN" ]; then
-            export NO_PUSH=1
-          fi
-
-          bash run_daily_analysis.sh
+          if ($env:INPUT_REPORT_PERIOD) {
+            $env:REPORT_PERIOD = $env:INPUT_REPORT_PERIOD
+          }
+          $env:FINANCIAL_UPDATES = if ($env:INPUT_FINANCIAL_UPDATES) {
+            $env:INPUT_FINANCIAL_UPDATES
+          } else {
+            "100"
+          }
+          if ($env:INPUT_NO_PUSH -eq "true" -or -not $env:PUSHPLUS_TOKEN) {
+            $env:NO_PUSH = "1"
+          }
+          .\run_daily_analysis.ps1
 
       - name: Upload reports and logs
         if: always() && steps.gate.outputs.run == 'true'

@@ -5,6 +5,7 @@ __pycache__/
 .claude/
 logs/
 .factorStock_last.json
+.actions-runner/
 选股结果/
 板块观察/
 回测结果/
