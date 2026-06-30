@@ -40,6 +40,7 @@ jobs:
       PSExecutionPolicyPreference: Bypass
       PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
       LOCAL_PROJECT_ROOT: 'D:\MyCodes\my_trade'
+      PYTHON_BIN: 'D:\ActionsRunner\my-trade\python\python.exe'
 
     steps:
       - name: Three-day schedule gate
@@ -61,20 +62,12 @@ jobs:
           # Preserve ignored .cache data between jobs on this persistent runner.
           clean: false
 
-      - name: Set up Python
-        if: steps.gate.outputs.run == 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-          cache-dependency-path: requirements-actions.txt
-
-      - name: Install dependencies
+      - name: Verify Python runtime
         if: steps.gate.outputs.run == 'true'
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-actions.txt
+          & $env:PYTHON_BIN -c "import akshare, baostock, numpy, openpyxl, pandas, requests; print('Python runtime ready')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Seed persistent cache
         if: steps.gate.outputs.run == 'true'

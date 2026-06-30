@@ -1,7 +1,8 @@
 param(
     [string]$Repository = "Robin-Wujw/my_trade",
     [string]$InstallDir = "D:\ActionsRunner\my-trade",
-    [string]$Proxy = "http://127.0.0.1:7897"
+    [string]$Proxy = "http://127.0.0.1:7897",
+    [string]$PythonSource = "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python"
 )
 
 $ErrorActionPreference = "Stop"
@@ -54,6 +55,14 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Runner configuration failed with exit code $LASTEXITCODE" }
 } finally {
     Pop-Location
+}
+
+if (-not (Test-Path (Join-Path $InstallDir "python\python.exe"))) {
+    if (-not (Test-Path (Join-Path $PythonSource "python.exe"))) {
+        throw "Bundled Python runtime not found: $PythonSource"
+    }
+    Write-Host "Copying the project Python runtime into the runner directory..."
+    Copy-Item -Path $PythonSource -Destination (Join-Path $InstallDir "python") -Recurse -Force
 }
 
 Write-Host "GitHub Actions runner installed as a Windows service."
