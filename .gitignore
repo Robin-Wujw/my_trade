@@ -1,5 +1,4 @@
 .pushplus_token
-.pushplus_token
 *.log
 __pycache__/
 .cache/

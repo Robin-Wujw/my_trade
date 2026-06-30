@@ -20,6 +20,8 @@ LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/daily_analysis_$(date '+%Y%m%d').log"
 FAILED_STEPS=()
+SKIPPED_STEPS=()
+declare -A STEP_STATUS=()
 
 run_step() {
   local name="$1"
@@ -39,6 +41,7 @@ run_step() {
   fi
 
   local status=$?
+  STEP_STATUS["$name"]="$status"
   {
     echo "========== $(date '+%F %T') END $name status=$status =========="
   } >> "$LOG_FILE"
@@ -48,6 +51,21 @@ run_step() {
   fi
 
   return 0
+}
+
+step_succeeded() {
+  [ "${STEP_STATUS[$1]:-999}" -eq 0 ]
+}
+
+skip_step() {
+  local name="$1"
+  local reason="$2"
+  SKIPPED_STEPS+=("$name")
+  {
+    echo
+    echo "========== $(date '+%F %T') SKIP $name =========="
+    echo "REASON: $reason"
+  } >> "$LOG_FILE"
 }
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
@@ -84,8 +102,7 @@ run_step "sector horizontal statistics" 3600 \
   --top-amount 50 \
   --sleep "$SECTOR_SLEEP" \
   --retries "$SECTOR_RETRIES" \
-  --retry-delay "$SECTOR_RETRY_DELAY" \
-  --fallback-sample
+  --retry-delay "$SECTOR_RETRY_DELAY"
 
 run_step "sector mainline watch" 3600 \
   "$PYTHON_BIN" -u sectorWatch.py \
@@ -95,8 +112,7 @@ run_step "sector mainline watch" 3600 \
   --limit-up-days 5 \
   --sleep "$SECTOR_SLEEP" \
   --retries "$SECTOR_RETRIES" \
-  --retry-delay "$SECTOR_RETRY_DELAY" \
-  --fallback-sample
+  --retry-delay "$SECTOR_RETRY_DELAY"
 
 run_step "factorStock daily selection" 7200 \
   "$PYTHON_BIN" -u factorStock.py \
@@ -120,16 +136,26 @@ run_step "full market fundamental cache and snapshot" 7200 \
   --target-financial-coverage 0.95 \
   --alert
 
-run_step "daily fundamental sections" 600 \
-  "$PYTHON_BIN" -u dailyFundamentalSelect.py \
-  --value-ratio 1.08 \
-  --normal-top 30
+if step_succeeded "full market fundamental cache and snapshot"; then
+  run_step "daily fundamental sections" 600 \
+    "$PYTHON_BIN" -u dailyFundamentalSelect.py \
+    --value-ratio 1.08 \
+    --normal-top 30
+else
+  skip_step "daily fundamental sections" "full market fundamental cache and snapshot failed"
+fi
 
 REPORT_ARGS=(dailyReportPush.py --top 10 --selection-top 30 --max-chars 12000)
 if [ "${NO_PUSH:-0}" = "1" ]; then
   REPORT_ARGS+=(--no-push)
 fi
-run_step "daily consolidated PushPlus report" 300 "$PYTHON_BIN" -u "${REPORT_ARGS[@]}"
+if step_succeeded "formula33 market structure" \
+  && step_succeeded "sector mainline watch" \
+  && step_succeeded "daily fundamental sections"; then
+  run_step "daily consolidated PushPlus report" 300 "$PYTHON_BIN" -u "${REPORT_ARGS[@]}"
+else
+  skip_step "daily consolidated PushPlus report" "one or more required report inputs failed or were skipped"
+fi
 
 {
   echo
@@ -137,6 +163,10 @@ run_step "daily consolidated PushPlus report" 300 "$PYTHON_BIN" -u "${REPORT_ARG
   echo "Outputs:"
   find "$SCRIPT_DIR/选股结果" "$SCRIPT_DIR/板块观察" -maxdepth 1 -type f -mtime -2 2>/dev/null | sort
 } >> "$LOG_FILE"
+
+if [ "${#SKIPPED_STEPS[@]}" -gt 0 ]; then
+  echo "SKIPPED STEPS: ${SKIPPED_STEPS[*]}" >> "$LOG_FILE"
+fi
 
 if [ "${#FAILED_STEPS[@]}" -gt 0 ]; then
   FAILURE_SUMMARY="FAILED STEPS: ${FAILED_STEPS[*]}"

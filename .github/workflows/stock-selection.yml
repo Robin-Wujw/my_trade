@@ -88,16 +88,17 @@ jobs:
           INPUT_REPORT_PERIOD: ${{ inputs.report_period }}
           INPUT_FINANCIAL_UPDATES: ${{ inputs.financial_updates }}
           INPUT_NO_PUSH: ${{ inputs.no_push }}
-          CACHE_HIT: ${{ steps.market-cache.outputs.cache-hit }}
+          # cache-hit is "false" for a restore-key match and empty only on a total miss.
+          CACHE_RESTORED: ${{ steps.market-cache.outputs.cache-hit != '' }}
         run: |
           if [ -n "$INPUT_REPORT_PERIOD" ]; then
             export REPORT_PERIOD="$INPUT_REPORT_PERIOD"
           fi
 
-          if [ "$CACHE_HIT" = "true" ]; then
+          if [ "$CACHE_RESTORED" = "true" ]; then
             export FINANCIAL_UPDATES="${INPUT_FINANCIAL_UPDATES:-100}"
           else
-            # First cloud run has no local cache: build the report-period cache completely.
+            # A genuine first cloud run has no cache: build the report-period cache completely.
             export FINANCIAL_UPDATES=0
           fi
 

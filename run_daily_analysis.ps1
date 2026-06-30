@@ -20,6 +20,8 @@ $LogDir = if ($env:LOG_DIR) { $env:LOG_DIR } else { Join-Path $ScriptDir "logs" 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $LogFile = Join-Path $LogDir ("daily_analysis_{0}.log" -f (Get-Date -Format "yyyyMMdd"))
 $script:FailedSteps = @()
+$script:SkippedSteps = @()
+$script:StepStatus = @{}
 
 function Add-LogLine {
     param([string]$Text)
@@ -39,10 +41,24 @@ function Run-Step {
         Add-LogLine ([string]$_)
     }
     $status = $LASTEXITCODE
+    $script:StepStatus[$Name] = $status
 
     Add-LogLine ("========== {0} END {1} status={2} ==========" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Name, $status)
     if ($status -ne 0) { $script:FailedSteps += ("{0}:{1}" -f $Name, $status) }
     return $status
+}
+
+function Test-StepSucceeded {
+    param([string]$Name)
+    return $script:StepStatus.ContainsKey($Name) -and $script:StepStatus[$Name] -eq 0
+}
+
+function Skip-Step {
+    param([string]$Name, [string]$Reason)
+    $script:SkippedSteps += $Name
+    Add-LogLine ""
+    Add-LogLine ("========== {0} SKIP {1} ==========" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Name)
+    Add-LogLine ("REASON: {0}" -f $Reason)
 }
 
 $FactorWorkers = if ($env:FACTOR_WORKERS) { $env:FACTOR_WORKERS } else { "1" }
@@ -79,8 +95,7 @@ Run-Step "sector horizontal statistics" @(
     "--top-amount", "50",
     "--sleep", $SectorSleep,
     "--retries", $SectorRetries,
-    "--retry-delay", $SectorRetryDelay,
-    "--fallback-sample"
+    "--retry-delay", $SectorRetryDelay
 ) | Out-Null
 
 Run-Step "sector mainline watch" @(
@@ -91,8 +106,7 @@ Run-Step "sector mainline watch" @(
     "--limit-up-days", "5",
     "--sleep", $SectorSleep,
     "--retries", $SectorRetries,
-    "--retry-delay", $SectorRetryDelay,
-    "--fallback-sample"
+    "--retry-delay", $SectorRetryDelay
 ) | Out-Null
 
 Run-Step "factorStock daily selection" @(
@@ -119,11 +133,15 @@ Run-Step "full market fundamental cache and snapshot" @(
     "--alert"
 ) | Out-Null
 
-Run-Step "daily fundamental sections" @(
-    "dailyFundamentalSelect.py",
-    "--value-ratio", "1.08",
-    "--normal-top", "30"
-) | Out-Null
+if (Test-StepSucceeded "full market fundamental cache and snapshot") {
+    Run-Step "daily fundamental sections" @(
+        "dailyFundamentalSelect.py",
+        "--value-ratio", "1.08",
+        "--normal-top", "30"
+    ) | Out-Null
+} else {
+    Skip-Step "daily fundamental sections" "full market fundamental cache and snapshot failed"
+}
 
 $ReportArguments = @(
     "dailyReportPush.py",
@@ -132,7 +150,13 @@ $ReportArguments = @(
     "--max-chars", "12000"
 )
 if ($env:NO_PUSH -eq "1") { $ReportArguments += "--no-push" }
-Run-Step "daily consolidated PushPlus report" $ReportArguments | Out-Null
+if ((Test-StepSucceeded "formula33 market structure") -and
+    (Test-StepSucceeded "sector mainline watch") -and
+    (Test-StepSucceeded "daily fundamental sections")) {
+    Run-Step "daily consolidated PushPlus report" $ReportArguments | Out-Null
+} else {
+    Skip-Step "daily consolidated PushPlus report" "one or more required report inputs failed or were skipped"
+}
 
 Add-LogLine ""
 Add-LogLine ("{0} daily analysis finished" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"))
@@ -149,6 +173,9 @@ foreach ($dir in @($SelectionDir, $BoardDir)) {
 }
 
 Write-Host "Daily analysis finished. Log: $LogFile"
+if ($script:SkippedSteps.Count -gt 0) {
+    Add-LogLine ("SKIPPED STEPS: " + ($script:SkippedSteps -join ", "))
+}
 if ($script:FailedSteps.Count -gt 0) {
     $summary = "FAILED STEPS: " + ($script:FailedSteps -join ", ")
     Add-LogLine $summary
