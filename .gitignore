@@ -2,6 +2,8 @@
 *.log
 __pycache__/
 .cache/
+.data/
+.test-deps/
 .claude/
 logs/
 .factorStock_last.json

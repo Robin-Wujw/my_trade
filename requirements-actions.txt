@@ -1,6 +1,9 @@
 akshare
 baostock
+duckdb>=1.5,<2
 numpy
 openpyxl
 pandas
+pytest>=8,<10
+pytz>=2024,<2027
 requests

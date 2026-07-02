@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "root": "../..",
+  "entries": [
+    {
+      "path": "板块观察/formula33_stats_20260630_235623.csv",
+      "kind": "formula33",
+      "row_count": 21,
+      "file_sha256": "f979ab47d23dcf6597ada2d3a420cc13e8a2bff59f4067a76feceeaca93e3123",
+      "semantic_sha256": "891024f9953927f83cf0886eeed09d35900f7aaa4b37be396492e54ad76801b7"
+    },
+    {
+      "path": "板块观察/formula33_stats_20260628_114828.csv",
+      "kind": "formula33",
+      "row_count": 21,
+      "file_sha256": "797beb48d26c56009264525845d80431fb1e0da26b05dd32b05f6e38a059e163",
+      "semantic_sha256": "3d2f425af5aa8ea8e8828a6afc511eb84f1cdbf47feaf2fb410fd2b6299dc050"
+    },
+    {
+      "path": "板块观察/formula33_stats_20260626_013200.csv",
+      "kind": "formula33",
+      "row_count": 21,
+      "file_sha256": "d7f1af494a5ada54ef49768aefd492ccdacff8f65e86139c315314b9f25246d9",
+      "semantic_sha256": "eb0c8ab5986fda7ffb802991ee4517e76b96076c10c77eb53b54c63630dba5c0"
+    },
+    {
+      "path": "选股结果/daily_consolidated_selection_2026-06-26_181827.csv",
+      "kind": "daily_selection",
+      "row_count": 96,
+      "file_sha256": "5008fc0381c4b162d0ec996a9ef7d1b841d461851ae9a8ed2ffe35278c349a0c",
+      "semantic_sha256": "9edf1063c48b2983330ed2bd474e5f8f642f1f7585236bdc0646ba20731239d5"
+    },
+    {
+      "path": "选股结果/daily_consolidated_selection_2026-06-26_174939.csv",
+      "kind": "daily_selection",
+      "row_count": 96,
+      "file_sha256": "8bcfce5556d22acc80e68543937461de4bc62175138cea786338c9c42b430e49",
+      "semantic_sha256": "fe600337e62faf8657752f502b7db5b30c6becc7a4f0645d57fab614c370c212"
+    },
+    {
+      "path": "选股结果/factor_selection_2026-06-26_165743.csv",
+      "kind": "factor_selection",
+      "row_count": 10,
+      "file_sha256": "7bebfd9b68a0d14c5a51b2a91bdda8b647d4f47ce0818b5bd7363d4c9fd30e99",
+      "semantic_sha256": "ef38e1ff063d61fbcee122245bc4b01663924a282f139be09cb3774d38e89dbd"
+    }
+  ]
+}

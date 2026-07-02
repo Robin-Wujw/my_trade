@@ -169,8 +169,16 @@ def load_board_names(retries=4, retry_delay=2.0):
 
 
 def load_board_history(board, days, retries=4, retry_delay=2.0):
-    end_date = datetime.now().strftime("%Y%m%d")
+    end_dt = pd.Timestamp.today().normalize()
+    end_date = end_dt.strftime("%Y%m%d")
     start_date = (datetime.now() - timedelta(days=max(days * 3, 180))).strftime("%Y%m%d")
+    cached = read_cache("board_history", board, date_cols=["date"])
+    if not cached.empty:
+        cached = cached.sort_values("date")
+        sliced = cached[cached["date"] <= end_dt].tail(days)
+        cache_reaches_cutoff = cached["date"].max() >= end_dt - pd.Timedelta(days=7)
+        if len(sliced) >= min(days, 60) and cache_reaches_cutoff:
+            return sliced.reset_index(drop=True)
     try:
         df = call_with_backoff(
             lambda: ak.stock_board_industry_hist_em(
