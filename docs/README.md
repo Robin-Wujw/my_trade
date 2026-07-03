@@ -5,6 +5,7 @@
 ## 设计规范
 
 - [数据基础与工程分层重构设计](superpowers/specs/2026-07-01-data-architecture-refactor-design.md)：本轮已经确认的完整设计、边界、迁移顺序和验收条件。
+- [最小每日推送链路与停牌状态重构设计](superpowers/specs/2026-07-03-minimal-daily-pipeline-cleanup-design.md)：停牌逐日重判、最小生产文件、清理范围和 SQL 验收标准。
 - [阶段一基础边界实施计划](superpowers/plans/2026-07-02-phase-one-foundation.md)：包骨架、运行上下文、DuckDB 迁移、运行记录和历史回归门的实施与验证步骤。
 
 ## 知识文档
