@@ -40,6 +40,7 @@ from openpyxl.utils import get_column_letter
 from stock_research.core.paths import PATHS
 from stock_research.indicators.formula33 import calc_kdj_k, calc_rsi, calc_wr
 from stock_research.strategies.formula33 import (
+    build_window_trend,
     classify_observation_status,
     select_window_unique_hits,
 )
@@ -875,6 +876,51 @@ def calc_streaks(counts):
     return pd.DataFrame(rows)
 
 
+def build_formula_summary(hits, trade_dates, output_days=21):
+    """Combine compatibility daily counts with rolling breadth statistics."""
+    dates = [str(value) for value in trade_dates]
+    if hits is None or hits.empty or "signal_type" not in hits.columns:
+        xg_hits = pd.DataFrame(columns=["date", "code"])
+        base_counts = {}
+        xg_counts = {}
+    else:
+        xg_hits = hits[hits["signal_type"] == "XG"].copy()
+        base_hits = hits[hits["signal_type"] == "BASE"].copy()
+        xg_counts = xg_hits.groupby("date").size().to_dict()
+        base_counts = base_hits.groupby("date").size().to_dict()
+
+    compatibility = calc_streaks(
+        [(date, int(xg_counts.get(date, 0))) for date in dates]
+    )
+    compatibility["base_count"] = compatibility["date"].map(
+        lambda date: int(base_counts.get(date, 0))
+    )
+    compatibility = compatibility.tail(output_days).reset_index(drop=True)
+    rolling = build_window_trend(
+        xg_hits,
+        dates,
+        window=21,
+        output_days=output_days,
+    )
+    summary = compatibility.merge(rolling, on="date", how="left")
+    return summary[
+        [
+            "date",
+            "base_count",
+            "count",
+            "change",
+            "up_streak",
+            "down_streak",
+            "signal",
+            "window_unique_count",
+            "window_trend_slope",
+            "trend_up_streak",
+            "trend_down_streak",
+            "trend_signal",
+        ]
+    ]
+
+
 def save_workbook(
     summary,
     hits,
@@ -898,6 +944,10 @@ def save_workbook(
         column
         for column in [
             "window_unique_count",
+            "window_trend_slope",
+            "trend_up_streak",
+            "trend_down_streak",
+            "trend_signal",
             "tradable_unique_count",
             "suspended_count",
             "unavailable_count",
@@ -916,6 +966,11 @@ def save_workbook(
     ws2.append(["连续上升"] + summary["up_streak"].tolist())
     ws2.append(["连续下降"] + summary["down_streak"].tolist())
     ws2.append(["结构信号"] + summary["signal"].tolist())
+    if "window_unique_count" in summary.columns:
+        ws2.append(["21日XG技术去重"] + summary["window_unique_count"].tolist())
+        ws2.append(["21日去重趋势斜率"] + summary["window_trend_slope"].tolist())
+        ws2.append(["连续正趋势"] + summary["trend_up_streak"].tolist())
+        ws2.append(["连续负趋势"] + summary["trend_down_streak"].tolist())
 
     ws3 = wb.create_sheet("命中股票")
     if hits.empty:
@@ -1013,21 +1068,36 @@ def main(argv=None):
             if args.price_source == "baostock":
                 raise SystemExit("Baostock不可用时不能使用 --price-source baostock，请改用 --price-source akshare")
     try:
+        calculation_days = args.lookback * 3 - 2
         raw_trade_dates = (
-            get_trade_dates(args.lookback + 5, args.history_days + 45)
+            get_trade_dates(calculation_days + 5, args.history_days + 90)
             if bs_available and args.metadata_source in ("baostock", "auto")
             else []
         )
-        if len(raw_trade_dates) < args.lookback:
-            raw_trade_dates = get_trade_dates_akshare(args.lookback + 5, args.history_days + 45)
-        if not raw_trade_dates or (not args.start_date and len(raw_trade_dates) < args.lookback):
+        if len(raw_trade_dates) < calculation_days:
+            raw_trade_dates = get_trade_dates_akshare(
+                calculation_days + 5, args.history_days + 90
+            )
+        if not raw_trade_dates or (
+            not args.start_date and len(raw_trade_dates) < calculation_days
+        ):
             raise SystemExit("交易日不足，无法统计")
         effective_end_date = resolve_auto_end_date(args.end_date, args.data_ready_time)
         if not args.end_date:
             print(f"未指定 --end-date，按数据可用时间 {args.data_ready_time} 使用截止日: {effective_end_date}")
-        trade_dates = select_trade_dates(raw_trade_dates, args.start_date, effective_end_date, args.lookback)
-        if not trade_dates or (not args.start_date and len(trade_dates) < args.lookback):
-            raise SystemExit(f"交易日不足，无法统计最近 {args.lookback} 个交易日")
+        trade_dates = select_trade_dates(
+            raw_trade_dates,
+            args.start_date,
+            effective_end_date,
+            calculation_days,
+        )
+        if not trade_dates or (
+            not args.start_date and len(trade_dates) < calculation_days
+        ):
+            raise SystemExit(
+                f"交易日不足，无法计算最近 {args.lookback} 个交易日的滚动趋势"
+            )
+        output_dates = trade_dates[-args.lookback:]
         latest_date = trade_dates[-1]
         if bs_available and args.metadata_source == "baostock":
             universe_date, universe = get_universe_with_fallback(trade_dates)
@@ -1037,9 +1107,19 @@ def main(argv=None):
             raise SystemExit("无法获取沪深A股股票池")
         if universe_date != latest_date:
             print(f"股票池使用 {universe_date}，统计交易日仍使用 {latest_date} 之前最近 {len(trade_dates)} 个交易日")
-            trade_dates = select_trade_dates(raw_trade_dates, args.start_date, universe_date, args.lookback)
-            if not trade_dates or (not args.start_date and len(trade_dates) < args.lookback):
-                raise SystemExit(f"股票池最新日期为 {universe_date}，但交易日不足")
+            trade_dates = select_trade_dates(
+                raw_trade_dates,
+                args.start_date,
+                universe_date,
+                calculation_days,
+            )
+            if not trade_dates or (
+                not args.start_date and len(trade_dates) < calculation_days
+            ):
+                raise SystemExit(
+                    f"股票池最新日期为 {universe_date}，但滚动趋势交易日不足"
+                )
+            output_dates = trade_dates[-args.lookback:]
             latest_date = trade_dates[-1]
             print(f"已按股票池最新日期裁剪统计窗口，最新统计日: {latest_date}")
         print(f"本次统计区间: {trade_dates[0]} ~ {trade_dates[-1]}，共 {len(trade_dates)} 个交易日")
@@ -1145,8 +1225,6 @@ def main(argv=None):
                         print(f"{col}: {int(latest_debug[col].fillna(False).sum())}")
                 hits_df = hits_df[hits_df["signal_type"] != "DEBUG"].copy()
         if hits_df.empty:
-            counts = [(date, 0) for date in trade_dates]
-            base_counts_by_date = {}
             window_base_unique = 0
             window_xg_unique = 0
             window_xg_technical_unique = 0
@@ -1159,11 +1237,10 @@ def main(argv=None):
         else:
             xg_hits = hits_df[hits_df["signal_type"] == "XG"]
             base_hits = hits_df[hits_df["signal_type"] == "BASE"]
-            counts_by_date = xg_hits.groupby("date").size().to_dict()
-            base_counts_by_date = base_hits.groupby("date").size().to_dict()
-            counts = [(date, int(counts_by_date.get(date, 0))) for date in trade_dates]
-            window_base_unique = int(base_hits[base_hits["date"].isin(trade_dates)]["code"].nunique())
-            window_xg_hits = xg_hits[xg_hits["date"].isin(trade_dates)].copy()
+            window_base_unique = int(
+                base_hits[base_hits["date"].isin(output_dates)]["code"].nunique()
+            )
+            window_xg_hits = xg_hits[xg_hits["date"].isin(output_dates)].copy()
             technical_unique_xg_hits, eligible_unique_xg_hits = select_window_unique_hits(
                 window_xg_hits,
                 statuses_df,
@@ -1188,9 +1265,11 @@ def main(argv=None):
                 .sum()
             )
             unavailable_count = int(status_by_code.eq("data_unavailable").sum())
-        summary = calc_streaks(counts)
-        summary["base_count"] = summary["date"].map(lambda d: int(base_counts_by_date.get(d, 0)))
-        summary = summary[["date", "base_count", "count", "change", "up_streak", "down_streak", "signal"]]
+        summary = build_formula_summary(
+            hits_df,
+            trade_dates,
+            output_days=args.lookback,
+        )
         if not summary.empty:
             latest_idx = summary.index[-1]
             summary.loc[latest_idx, "window_unique_count"] = window_xg_technical_unique
@@ -1207,10 +1286,10 @@ def main(argv=None):
         print(f"Excel已保存: {xlsx_path}")
         print(f"CSV已保存: {csv_path}")
         print(summary.to_string(index=False))
-        print(f"最近{len(trade_dates)}个交易日BASE去重股票数: {window_base_unique}")
-        print(f"最近{len(trade_dates)}个交易日XG技术去重股票数: {window_xg_technical_unique}")
+        print(f"最近{len(output_dates)}个交易日BASE去重股票数: {window_base_unique}")
+        print(f"最近{len(output_dates)}个交易日XG技术去重股票数: {window_xg_technical_unique}")
         print(
-            f"最近{len(trade_dates)}个交易日XG正式去重股票数: {window_xg_unique} | "
+            f"最近{len(output_dates)}个交易日XG正式去重股票数: {window_xg_unique} | "
             f"观察日无交易排除: {suspended_count} | 数据不可用: {unavailable_count}"
         )
     finally:

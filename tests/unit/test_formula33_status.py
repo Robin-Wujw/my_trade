@@ -60,6 +60,26 @@ def test_build_window_trend_counts_consecutive_negative_slopes():
     assert result.iloc[-1]["trend_down_streak"] == 21
 
 
+def test_formula_summary_populates_all_21_rolling_rows():
+    dates = pd.bdate_range("2026-01-01", periods=61).strftime("%Y-%m-%d").tolist()
+    hits = pd.DataFrame(
+        [
+            {
+                "signal_type": "XG",
+                "date": date,
+                "code": f"sz.{index:06d}",
+            }
+            for index, date in enumerate(dates)
+        ]
+    )
+
+    summary = formula33.build_formula_summary(hits, dates, output_days=21)
+
+    assert len(summary) == 21
+    assert summary["window_unique_count"].notna().all()
+    assert summary["window_trend_slope"].notna().all()
+
+
 def test_status_distinguishes_traded_suspended_and_unavailable():
     assert classify_observation_status("2026-07-02", "2026-07-02") == "traded"
     assert (
