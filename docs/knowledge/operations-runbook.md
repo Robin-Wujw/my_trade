@@ -10,7 +10,7 @@
 ## 2. 历史回填流程
 
 1. 生成固定股票池和任务清单。
-2. 初始化或迁移 `.data/my_trade.duckdb` schema。
+2. 初始化或迁移 `var/data/my_trade.duckdb` schema。
 3. 以低并发处理股票与报表类型，遵守数据源限速。
 4. 工作线程获取原始响应并计算规范化内容哈希，将批次交给主进程写入协调器。
 5. 在同一 DuckDB 事务中写入原始载荷、版本元数据、财务事实和任务状态。
@@ -72,22 +72,25 @@
 
 分别核对收盘价、总股本版本和代码映射。缺失股票保持在诊断名单，不得通过 `missing_mktcap_policy=pass` 放入正式结果。
 
+### 三浪三停牌与数据不可用
+
+- `traded`：观察日存在有效日线，可以进入本次正式 21 日去重集合；
+- `suspended_or_no_trade`：保留窗口内历史技术命中，但本次正式集合排除；下一观察日重新判断；
+- `data_unavailable`：所有行情源失败，失败关闭并进入诊断，不得标记为停牌。
+
+日报同时显示 21 日技术去重数、正式去重数、观察日无交易排除数和数据不可用数。任何状态只属于本次观察日，不形成永久黑名单。
+
 ## 6. 断点与重试
 
 `ops.ingestion_tasks` 至少区分 `pending`、`running`、`succeeded`、`retryable_failed`、`permanent_missing` 和 `normalization_failed`。进程启动时把超时的 `running` 任务恢复为可重试状态。重试采用有上限的指数退避；永久缺失只有在源端明确确认或多来源均确认无数据时使用。
 
-## 7. 新旧系统并行期
+## 7. 生产入口
 
-1. 旧流水线继续生产日报。
-2. 新系统在同一观察日生成影子结果，不推送。
-3. 自动比较候选集、财务指标、波段锚点、市值和数据日期。
-4. 差异分类为预期规则修正、数据源差异或未知回归。
-5. 未知回归清零并连续稳定运行后才切换。
-6. 切换后保留旧入口一个稳定周期，出现严重回归时可恢复旧路径。
+正式入口为 `python -m apps.daily_pipeline`，`scripts/run_daily_analysis.ps1` 只设置解释器、编码和代理后调用该入口。根目录旧脚本已经移除。单步补跑使用对应的 `apps.*` 模块，不能重新拼接第二套生产顺序。
 
 ## 8. 备份与恢复
 
-需要备份 `.data/my_trade.duckdb`。备份必须通过受控检查点或一致性导出生成，不能在活跃写事务中直接复制数据库文件。数据库备份包含原始载荷、标准化事实、运行记录和报告；派生表仍可从原始层重建，但不能代替数据库备份策略。
+需要备份 `var/data/my_trade.duckdb`。备份必须通过受控检查点或一致性导出生成，不能在活跃写事务中直接复制数据库文件。持久化增量缓存位于 `var/cache`，在数据库尚未成为全部生产数据唯一来源前也必须纳入受控备份。
 
 ## 9. 日常检查清单
 
@@ -102,9 +105,9 @@
 
 ## 10. 导出原则
 
-生产链不自动生成 Excel/CSV，也不读取 Excel/CSV。HTML 正文保存在 `ops.reports`，可按需导出用于浏览；PushPlus 使用同一报告记录的摘要。研究人员需要临时分析文件时，通过显式导出命令从 DuckDB 生成，并把导出目录视为可删除产物。
+当前生产链仍生成 CSV、Excel 和 HTML，统一保存到 `var/exports/selection`、`var/exports/market` 和 `var/exports/reports`。导出文件是可再生产物，不作为测试夹具；六份回归样本独立保存在 `tests/fixtures/regression`。后续完成 DuckDB 生产切换后，再将自动导出改为显式导出。
 
-## 11. 阶段一运行记录接入顺序
+## 11. 运行记录接入顺序
 
 迁移中的顶层入口按以下顺序使用基础模块：
 
@@ -114,14 +117,18 @@
 4. 步骤结束时调用 `finish_step()`，明确写入成功或失败、行数和覆盖率；
 5. 全部门控通过后调用 `finish_run(..., gate_status="passed")`，任何关键失败都写入 `failed`，不得让运行长期停留在 `running`。
 
-当前生产脚本还没有切换到这条路径；这部分基础设施只建立边界，不改变现有选股结果。
+`stock_research.storage` 已提供上述基础设施；尚未接入运行记录的策略流水线必须按此顺序迁移，不得自行维护第二套运行状态。
 
 ## 12. 历史结果回归审计
 
 基线清单 `tests/regression/legacy-output-v1.json` 固定了 3 次三浪三统计、2 次合并选股和 1 次因子选股。每次迁移算法、指标、日期截断或数据读取路径后执行：
 
 ```powershell
-python -m my_trade.regression.output_baseline verify tests/regression/legacy-output-v1.json
+python -m stock_research.regression.output_baseline verify tests/regression/legacy-output-v1.json
 ```
 
-输出必须为 `6 baselines verified`。`file_sha256 changed` 表示文件字节发生变化；`semantic_sha256 changed` 表示排序后的日期、股票代码或关键业务指标发生变化，必须解释并获得批准后才能更新基线。基线引用本地历史产物，清理 `板块观察` 或 `选股结果` 前应先迁移基线样本或保留受控备份。
+输出必须为 `6 baselines verified`。`file_sha256 changed` 表示文件字节发生变化；`semantic_sha256 changed` 表示排序后的日期、股票代码或关键业务指标发生变化，必须解释并获得批准后才能更新基线。基线位于 `tests/fixtures/regression`，不依赖 `var/exports`。
+
+## 13. SQL 验收状态
+
+`var/data/my_trade.duckdb` 已验证 schema 迁移幂等、约束、只读连接、运行步骤生命周期和事务回滚。生产流水线尚未全部改为只读 DuckDB，因此运维时必须区分“SQL 基础层可用”和“生产唯一事实源已经切换”；后者仍需后续迁移与并行回归。

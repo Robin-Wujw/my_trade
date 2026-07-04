@@ -3,7 +3,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from my_trade.domain import RunContext, RunMode
+from stock_research.core import RunContext, RunMode
 
 
 def make_context(**overrides):

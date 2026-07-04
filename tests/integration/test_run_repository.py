@@ -2,8 +2,8 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from my_trade.domain import RunContext, RunMode
-from my_trade.storage import Database, RunRepository
+from stock_research.core import RunContext, RunMode
+from stock_research.storage import Database, RunRepository
 
 
 def make_context():
@@ -82,3 +82,40 @@ def test_run_cannot_pass_with_incomplete_step(tmp_path, step_status):
 
     with pytest.raises(ValueError, match="cannot pass run"):
         repository.finish_run(context.run_id, gate_status="passed")
+
+
+def test_invalid_coverage_rolls_back_step_update(tmp_path):
+    database = Database(tmp_path / "my_trade.duckdb")
+    database.initialize()
+    context = make_context()
+    repository = RunRepository(database)
+    repository.start_run(context)
+    repository.start_step(context.run_id, "market", context.market_cutoff)
+
+    with pytest.raises(Exception, match="CHECK constraint"):
+        repository.finish_step(
+            context.run_id,
+            "market",
+            status="succeeded",
+            row_count=42,
+            coverage=1.2,
+        )
+
+    run = repository.get_run(context.run_id)
+    assert run["steps"][0]["status"] == "running"
+    assert run["steps"][0]["coverage"] is None
+
+
+def test_duplicate_step_is_rejected_without_overwrite(tmp_path):
+    database = Database(tmp_path / "my_trade.duckdb")
+    database.initialize()
+    context = make_context()
+    repository = RunRepository(database)
+    repository.start_run(context)
+    repository.start_step(context.run_id, "market", context.market_cutoff)
+
+    with pytest.raises(Exception, match="Duplicate key"):
+        repository.start_step(context.run_id, "market", context.market_cutoff)
+
+    run = repository.get_run(context.run_id)
+    assert [step["step_name"] for step in run["steps"]] == ["market"]

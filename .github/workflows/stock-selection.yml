@@ -59,22 +59,29 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         uses: actions/checkout@v4
         with:
-          # Preserve ignored .cache data between jobs on this persistent runner.
+          # Preserve ignored var/cache data between jobs on this persistent runner.
           clean: false
 
       - name: Verify Python runtime
         if: steps.gate.outputs.run == 'true'
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
-          & $env:PYTHON_BIN -c "import akshare, baostock, numpy, openpyxl, pandas, requests; print('Python runtime ready')"
+          & $env:PYTHON_BIN -c "import akshare, baostock, duckdb, numpy, openpyxl, pandas, pytest, pytz, requests; print('Python runtime ready')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run tests
+        if: steps.gate.outputs.run == 'true'
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          & $env:PYTHON_BIN -m pytest -q
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Seed persistent cache
         if: steps.gate.outputs.run == 'true'
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
-          $source = Join-Path $env:LOCAL_PROJECT_ROOT ".cache"
-          $target = Join-Path $env:GITHUB_WORKSPACE ".cache"
+          $source = Join-Path $env:LOCAL_PROJECT_ROOT "var\cache"
+          $target = Join-Path $env:GITHUB_WORKSPACE "var\cache"
           $marker = Join-Path $target "stock_universe.csv"
           if (-not (Test-Path $marker) -and (Test-Path $source)) {
             New-Item -ItemType Directory -Force -Path $target | Out-Null
@@ -103,7 +110,7 @@ jobs:
           if ($env:INPUT_NO_PUSH -eq "true" -or -not $env:PUSHPLUS_TOKEN) {
             $env:NO_PUSH = "1"
           }
-          .\run_daily_analysis.ps1
+          .\scripts\run_daily_analysis.ps1
 
       - name: Upload reports and logs
         if: always() && steps.gate.outputs.run == 'true'
@@ -113,8 +120,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
           path: |
-            logs/
-            选股结果/
-            板块观察/
-            .cache/fundamental_snapshots/latest_coverage.json
-            .cache/fundamental_snapshots/*.meta.json
+            var/logs/
+            var/exports/
+            var/cache/fundamental_snapshots/latest_coverage.json
+            var/cache/fundamental_snapshots/*.meta.json

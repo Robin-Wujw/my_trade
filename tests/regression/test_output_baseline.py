@@ -1,10 +1,11 @@
 import csv
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
-from my_trade.regression.output_baseline import build_entry, compare_entry
+from stock_research.regression.output_baseline import build_entry, compare_entry
 
 
 def write_csv(path, rows):
@@ -97,13 +98,25 @@ def test_module_cli_verifies_without_import_warning(tmp_path):
         [
             sys.executable,
             "-m",
-            "my_trade.regression.output_baseline",
+            "stock_research.regression.output_baseline",
             "verify",
             str(manifest_path),
         ],
         text=True,
         capture_output=True,
         check=False,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                filter(
+                    None,
+                    [
+                        str(Path(__file__).parents[2]),
+                        os.environ.get("PYTHONPATH", ""),
+                    ],
+                )
+            ),
+        },
     )
 
     assert result.returncode == 0

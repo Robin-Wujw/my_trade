@@ -1,70 +1,65 @@
 # my_trade
 
-沪深A股收盘后全市场动态选股系统。生产链只使用当时可见的财报和行情，数据源顺序固定为：
+沪深 A 股收盘后研究与选股系统。系统依次完成三浪三市场结构、板块主线、因子选股、基本面截面、基本面筛选和日报推送；不连接券商，也不自动下单。策略口径见 [STRATEGY.md](STRATEGY.md)。
+
+## 目录
 
 ```text
-AkShare → Baostock兜底 → 本地缓存
+apps/             命令行入口
+stock_research/   核心 Python 包
+config/           流水线与运行依赖配置
+scripts/          生产和运维脚本
+tests/            单元、集成、架构与回归测试
+docs/             架构和运维文档
+var/              缓存、数据库、日志、导出和本地凭证（不提交）
 ```
 
-策略规则见 [STRATEGY.md](STRATEGY.md)。
+`stock_research` 内部按 `api`、`core`、`storage`、`market`、`indicators`、`strategies`、`pipelines`、`reporting` 和 `regression` 分层。仓库根目录不放业务 Python 脚本。
 
-## 每日流程
+## 每日运行
 
 ```powershell
-.\run_daily_analysis.ps1
+.\scripts\run_daily_analysis.ps1
 ```
 
-```bash
-bash run_daily_analysis.sh
-```
-
-流水线依次执行：
-
-1. `formula33Stats.py`：更新全市场行情缓存和三浪三市场结构。
-2. `sectorStats.py`、`sectorWatch.py`：更新板块趋势、量能和主流板块。
-3. `factorStock.py`：更新全市场技术因子。
-4. `fullMarketFundamentalUpdate.py`：增量补齐财务缓存并生成全市场动态截面。
-5. `dailyFundamentalSelect.py`：动态生成基本价值线池和正常基本面池。
-6. `dailyReportPush.py`：生成CSV、HTML并按配置推送PushPlus。
-
-缓存全部保存在 `.cache`，每日仅做增量更新。运行失败会写入 `logs` 并由 `pipelineAlert.py` 尝试告警。
-
-## GitHub Actions
-
-工作流：[stock-selection.yml](.github/workflows/stock-selection.yml)
-
-- 每天北京时间16:30唤醒，由门控保证每连续3天实际选股一次。
-- 在GitHub仓库 `Actions → Stock Selection → Run workflow` 可手动执行当天选股。
-- 首次云端运行自动冷启动缓存，后续通过Actions Cache增量更新。
-- 报告、CSV、覆盖率和日志以Artifact保留14天。
-- 如需推送，在仓库Actions Secrets中添加 `PUSHPLUS_TOKEN`；未配置时自动跳过推送。
-
-工作流提交并推送到GitHub默认分支后生效。
-
-## 本地定时任务
+也可以直接运行唯一生产入口：
 
 ```powershell
-.\install_daily_task.ps1 -Time "16:30"
+& 'D:\ActionsRunner\my-trade\python\python.exe' -m apps.daily_pipeline --no-push
 ```
 
-## 当前运行文件
+只检查配置、导入和七步顺序而不访问网络：
 
-- `dailyFundamentalSelect.py`
-- `dailyReportPush.py`
-- `factorStock.py`
-- `formula33Stats.py`
-- `fullMarketFundamentalUpdate.py`
-- `pipelineAlert.py`
-- `point_in_time.py`
-- `sectorStats.py`
-- `sectorWatch.py`
-- `trade_utils.py`
-- `wave_utils.py`
+```powershell
+& 'D:\ActionsRunner\my-trade\python\python.exe' -m apps.daily_pipeline --dry-run --no-push
+```
+
+单步调试入口位于 `apps/`。例如：
+
+```powershell
+python -m apps.formula33 --help
+python -m apps.sector_analysis stats --help
+python -m apps.factor_selection --help
+```
+
+## 运行数据
+
+- `var/cache/`：行情、财务和板块增量缓存；
+- `var/data/my_trade.duckdb`：DuckDB 数据库；
+- `var/exports/`：选股、市场和日报导出；
+- `var/logs/`：运行日志；
+- `var/state/`：断点和上次结果；
+- `var/secrets/`：本地凭证，GitHub Actions 优先使用 Secrets；
+- `var/tmp/`：测试临时数据。
 
 ## 验证
 
 ```powershell
-python -m py_compile dailyFundamentalSelect.py dailyReportPush.py factorStock.py `
-  formula33Stats.py fullMarketFundamentalUpdate.py pipelineAlert.py point_in_time.py `
-  sectorStats.py sectorWatch.py trade_utils.py wave_utils.py
+& 'D:\ActionsRunner\my-trade\python\python.exe' -m compileall -q apps stock_research tests
+& 'D:\ActionsRunner\my-trade\python\python.exe' -m pytest -q
+& 'D:\ActionsRunner\my-trade\python\python.exe' -m stock_research.regression.output_baseline verify tests/regression/legacy-output-v1.json
 ```
+
+## GitHub Actions
+
+[stock-selection.yml](.github/workflows/stock-selection.yml) 在自托管 Windows runner 上先执行完整测试，再调用 `scripts/run_daily_analysis.ps1`。缓存保留在 `var/cache/`，Artifact 上传 `var/logs/`、`var/exports/` 和覆盖率元数据。runner 重建脚本位于 `scripts/admin/install_github_runner.ps1`。

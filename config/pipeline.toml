@@ -1,0 +1,14 @@
+[factor]
+workers = 1
+
+[formula33]
+workers = 1
+sleep = 0.2
+retries = 5
+
+[sector]
+sleep = 0.3
+retries = 5
+
+[fundamental]
+max_updates = 100

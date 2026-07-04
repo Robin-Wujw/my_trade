@@ -1,0 +1,1 @@
+"""Deterministic stock-selection rules."""

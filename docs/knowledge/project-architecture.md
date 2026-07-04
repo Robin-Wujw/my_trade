@@ -2,115 +2,77 @@
 
 ## 1. 系统定位
 
-`my_trade` 是沪深 A 股收盘后研究与选股系统。它的职责是收集可见数据、判断市场结构和板块主线、生成基本面与技术候选、输出日报并推送摘要。它目前不是券商交易系统，不维护真实持仓，也不自动下单。
+`my_trade` 是沪深 A 股收盘后研究与选股系统，负责数据采集、市场结构、板块主线、因子与基本面候选、日报和 PushPlus 摘要。它不维护真实持仓，不连接券商，也不自动下单。
 
-## 2. 当前运行链路
+## 2. 一级目录
 
 ```text
-AkShare / Baostock / 本地缓存
-              │
-              ├─ formula33Stats.py ─────────────── 三浪三市场结构
-              ├─ sectorStats.py / sectorWatch.py ─ 板块统计与主线
-              ├─ factorStock.py ────────────────── 技术因子与旧选股链
-              └─ fullMarketFundamentalUpdate.py ── 基本面截面
-                                      │
-                           dailyFundamentalSelect.py
-                                      │
-                              dailyReportPush.py
-                                      │
-                                  PushPlus
+apps/             可执行入口，只负责参数和退出码
+stock_research/   唯一可导入核心包
+config/           可提交配置和运行依赖
+scripts/          PowerShell 生产与运维脚本
+tests/            自动测试与受控回归夹具
+docs/             当前架构、运维和历史设计
+var/              唯一运行数据根目录，整体忽略提交
 ```
 
-`run_daily_analysis.ps1` 和 `run_daily_analysis.sh` 负责编排，`.github/workflows/stock-selection.yml` 在自托管 Windows runner 上触发。当前 `.cache` 保存大量持久化行情和财务数据，`选股结果`、`板块观察` 与 `logs` 保存运行产物；目标架构将这些结构化数据迁入 `.data/my_trade.duckdb`。
+## 3. 调用方向
 
-## 3. 当前文件职责
+```text
+scripts/run_daily_analysis.ps1
+              ↓
+      apps.daily_pipeline
+              ↓
+ stock_research.pipelines.daily
+              ↓
+ formula33 → sector_stats → sector_watch → factor_selection
+           → fundamental_update → fundamental_selection → daily_report
+```
 
-- `formula33Stats.py`：股票池、交易日、行情缓存、三浪三公式及统计输出。
-- `sectorStats.py`：行业板块横向统计与 Excel/Markdown 输出。
-- `sectorWatch.py`：板块趋势、量能、涨停扩散和主线成分。
-- `factorStock.py`：财务、估值、技术、评分、筛选、诊断和推送等多项职责。
-- `fullMarketFundamentalUpdate.py`：补齐财务缓存并建立全市场基本面截面。
-- `dailyFundamentalSelect.py`：从截面和行情缓存生成价值线与正常基本面候选。
-- `dailyReportPush.py`：组合四部分日报并推送。
-- `point_in_time.py`：已有的基础时点审计工具。
-- `wave_utils.py`：下跌波段恢复位置等纯计算。
-- `trade_utils.py`：路径、推送、重试和历史结果辅助。
+模块依赖方向固定为：
 
-## 4. 已识别的架构问题
+```text
+apps
+  → pipelines
+      → market / indicators / strategies / reporting
+          → api / storage / core
+```
 
-1. 顶层脚本之间通过目录和“最新文件”隐式通信，缺少统一运行身份。
-2. 一些技术计算直接使用缓存最后一行，历史观察日容易读到未来行情。
-3. 财务缓存偏向当前策略字段，缺少完整三表、公告时间和修订版本。
-4. 大文件同时负责网络、计算、筛选和输出，难以隔离测试。
-5. 相似的缓存、重试和数据标准化逻辑在多个脚本重复。
-6. 当前没有自动化测试目录和稳定的回归数据集。
+- `api`：外部接口、PushPlus 和重试；
+- `core`：路径、配置、运行上下文和时点规则；
+- `storage`：DuckDB、迁移和运行仓储；
+- `market`：行情、股票池、板块和基本面访问；
+- `indicators`：可离线验证的纯计算；
+- `strategies`：三浪三、板块、因子和基本面规则；
+- `pipelines`：执行顺序、并发、门控和诊断；
+- `reporting`：日报、导出、差异和告警；
+- `regression`：历史输出原始与语义哈希。
 
-## 5. 目标模块职责
+## 4. 入口边界
 
-### `domain`
+正式生产入口只有 `apps.daily_pipeline`。`apps.formula33`、`apps.sector_analysis`、`apps.factor_selection`、`apps.fundamental_update`、`apps.fundamental_selection`、`apps.daily_report` 和 `apps.pipeline_alert` 只供单步调试、回放和故障恢复。根目录没有兼容脚本。
 
-保存无外部副作用的核心类型和规则，例如 `RunContext`、`FinancialVersion`、`DataProvenance`、`CoverageReport`。领域类型不依赖 pandas 网络接口或具体文件路径。
+## 5. 运行数据
 
-### `data`
+`ProjectPaths` 是路径唯一来源：缓存位于 `var/cache`，DuckDB 位于 `var/data/my_trade.duckdb`，导出位于 `var/exports`，日志位于 `var/logs`，状态位于 `var/state`，本地凭证位于 `var/secrets`。生产模块不得自行推断仓库根目录或恢复旧路径。
 
-封装外部数据源。每个适配器实现统一接口，负责请求、源字段映射和原始响应，不负责策略评分。适配器必须返回来源、抓取时间和可用的公告/修订时间，并把写入批次交给数据库协调器。
+当前生产策略仍读取增量文件缓存并输出 CSV/HTML；DuckDB 的 schema、事务、运行记录和回归基础已可用，但尚未承诺所有策略数据都只从 DuckDB 读取。文档必须保持这一区分。
 
-### `storage`
+## 6. 架构不变量
 
-负责 DuckDB schema、事务、哈希、断点状态、备份和时点查询。策略不能绕过这一层直接挑选文件或调用数据源。
+- 任何历史计算必须有观察日；
+- 数据源失败与停牌状态不得混淆；
+- 报告必需输入失败时不得推送；
+- 指标模块不联网、不写文件；
+- 敏感值只来自环境变量或 `var/secrets`；
+- 测试夹具位于 `tests/fixtures`，不依赖运行输出；
+- 外部接口波动不作为结构验收依据；
+- 新代码不得导入已删除的旧根模块名。
 
-### `market`
+## 7. 添加能力
 
-提供截至观察日的行情、股票池、行业板块、总股本和市值。所有返回对象必须携带实际截止日和来源。
+新数据源加入 `api` 并提供字段映射、来源和失败分类测试；新指标先加入 `indicators` 并使用固定输入测试；新筛选规则加入 `strategies`；执行顺序只在 `pipelines` 中修改；新增命令只在 `apps` 中提供薄入口。
 
-### `indicators`
+## 8. 三浪三观察日状态
 
-放置纯计算函数。输入是已经截断和标准化的数据，输出是确定结果；禁止联网、写文件或读取全局缓存。
-
-### `strategies`
-
-实现价值线适用性、基本面门槛、主线分层和三浪三筛选。策略通过接口获取数据，不知道外部数据最初来自 AkShare 还是 Baostock，也不直接管理 DuckDB 连接。
-
-### `pipelines`
-
-创建运行上下文、调用各模块、写 `ops` 运行记录、执行覆盖率和日期门控。历史回填、每日增量、生产日报和离线验证分别有明确入口。
-
-### `reporting`
-
-只格式化已经通过门控的数据库结果。报告模块不重新选股、不自行寻找最新数据，也不修改策略结论。HTML 正文存入 `ops.reports` 后可导出展示；Excel/CSV 仅按需导出。
-
-## 6. 核心架构不变量
-
-- 任何计算都必须有观察日。
-- 任何数据都必须有实际截止日和来源。
-- 报告只能消费同一 `run_id` 的产物。
-- 原始财务版本只追加，不覆盖。
-- DuckDB 是结构化数据和结果的唯一事实源。
-- Excel/CSV 不得作为生产模块之间的接口。
-- 派生数据必须可追溯到原始版本哈希和算法版本。
-- 数据缺失不能自动变成策略通过。
-- 数据源回退必须可见。
-- 指标模块必须可在无网络环境下测试。
-
-## 7. 添加新数据源
-
-新数据源应实现适配器契约，返回标准股票代码、源记录标识、原始内容、公告/修订时间和抓取时间。必须提供字段映射测试、错误分类、限速策略和至少一个本地固定样本。适配器不直接持有全局 DuckDB 连接，写入由流水线单进程协调；不得在策略模块中直接调用第三方接口。
-
-## 8. 添加新指标或策略
-
-新指标先作为纯函数加入 `indicators`，使用固定输入测试。新策略加入 `strategies`，显式声明所需数据、观察日规则、硬门槛、缺失处理和输出字段。策略结果必须写入指定 `run_id` 后才能被报告消费。
-
-## 9. 兼容原则
-
-迁移期保留现有顶层脚本名称和命令行参数，让本地任务与 GitHub Actions 无需立即改变。脚本内部逐步改为调用新包；每次迁移只改变一个清晰边界，并与旧结果做回归比较。
-
-## 10. 阶段一已落地边界
-
-`src/my_trade` 已建立第一批无生产切换风险的基础模块：
-
-- `domain.RunContext` 固化 `run_id`、观察日、行情截止日、财务截止时间、报告期、代码版本和运行模式，并在创建时拒绝未来数据边界；
-- `storage.Database` 使用独立 DuckDB 连接和有序事务迁移，首次迁移创建四个 schema 以及 `ops.schema_migrations`、`ops.runs`、`ops.run_steps`；
-- `storage.RunRepository` 记录运行与步骤的开始、成功、失败、覆盖率、行数和耗时；
-- `regression.output_baseline` 对历史三浪三和选股 CSV 同时计算原文件哈希与关键业务列语义哈希。
-
-现有顶层脚本尚未调用这些模块，生产入口和选股算法没有改变。下一步接入任一入口时，必须先创建 `RunContext`，再初始化数据库、登记运行和步骤，最后写入明确终态；接入前后均需通过历史结果回归审计。
+最近 21 个交易日的技术命中与观察日资格分开。停牌或无交易股票保留历史技术命中，但不进入本次正式集合；复牌后重新判断，不保存永久黑名单。所有行情源失败记录为 `data_unavailable`，不得伪装为停牌。
