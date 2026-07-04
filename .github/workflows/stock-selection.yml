@@ -2,7 +2,7 @@ name: Stock Selection
 
 on:
   schedule:
-    # Wake at 16:30 Beijing time and let the gate run once every three UTC days.
+    # Run the full pipeline every day at 16:30 Beijing time.
     - cron: "30 8 * * *"
   workflow_dispatch:
     inputs:
@@ -43,41 +43,25 @@ jobs:
       PYTHON_BIN: 'D:\ActionsRunner\my-trade\python\python.exe'
 
     steps:
-      - name: Three-day schedule gate
-        id: gate
-        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
-        run: |
-          if ("${{ github.event_name }}" -ne "schedule") {
-            "run=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          } else {
-            $epochDay = [math]::Floor(([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) / 86400)
-            $shouldRun = (($epochDay % 3) -eq 0).ToString().ToLowerInvariant()
-            "run=$shouldRun" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          }
-
       - name: Checkout
-        if: steps.gate.outputs.run == 'true'
         uses: actions/checkout@v4
         with:
           # Preserve ignored var/cache data between jobs on this persistent runner.
           clean: false
 
       - name: Verify Python runtime
-        if: steps.gate.outputs.run == 'true'
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
           & $env:PYTHON_BIN -c "import akshare, baostock, duckdb, numpy, openpyxl, pandas, pytest, pytz, requests; print('Python runtime ready')"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run tests
-        if: steps.gate.outputs.run == 'true'
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
           & $env:PYTHON_BIN -m pytest -q
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Seed persistent cache
-        if: steps.gate.outputs.run == 'true'
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
           $source = Join-Path $env:LOCAL_PROJECT_ROOT "var\cache"
@@ -92,7 +76,6 @@ jobs:
           }
 
       - name: Run full-market selection
-        if: steps.gate.outputs.run == 'true'
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         env:
           INPUT_REPORT_PERIOD: ${{ inputs.report_period }}
@@ -113,7 +96,7 @@ jobs:
           .\scripts\run_daily_analysis.ps1
 
       - name: Upload reports and logs
-        if: always() && steps.gate.outputs.run == 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: stock-selection-${{ github.run_number }}
