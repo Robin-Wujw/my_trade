@@ -95,6 +95,7 @@ def test_default_steps_only_allow_final_report_to_push(monkeypatch):
 
     assert "--no-push" in captured["factor"]
     assert "--no-push" not in captured["report"]
+    assert captured["report"][captured["report"].index("--max-chars") + 1] == "18000"
 
 
 def test_default_steps_forward_actions_report_period(monkeypatch):

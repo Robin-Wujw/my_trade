@@ -97,7 +97,7 @@ def build_default_steps(
         "--value-watch-top", "20", "--akshare-cache-only", "--allow-login-fail",
         "--no-push",
     ]
-    report_args = ["--top", "10", "--selection-top", "30", "--max-chars", "12000"]
+    report_args = ["--top", "10", "--selection-top", "30", "--max-chars", "18000"]
     if no_push:
         report_args.append("--no-push")
     update_args = [

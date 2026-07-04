@@ -33,7 +33,7 @@ def send_pushplus(
     if not token:
         print("PushPlus token 未配置，跳过推送。")
         return False
-    max_chars = int(os.environ.get("PUSHPLUS_MAX_CONTENT_CHARS", "12000"))
+    max_chars = int(os.environ.get("PUSHPLUS_MAX_CONTENT_CHARS", "18000"))
     title = str(title)[:100]
     content = str(content)
     if len(content) > max_chars:
