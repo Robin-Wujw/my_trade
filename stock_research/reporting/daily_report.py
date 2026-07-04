@@ -73,7 +73,7 @@ def esc(value, fallback="未提供"):
 
 
 def render_formula_status(latest_formula):
-    """Render daily and 21-day Formula 33 counts with observation diagnostics."""
+    """Render only rolling 21-day Formula33 breadth and trend diagnostics."""
     def integer(name, default=0):
         value = latest_formula.get(name, default)
         try:
@@ -81,19 +81,26 @@ def render_formula_status(latest_formula):
         except (TypeError, ValueError):
             return default
 
-    result = (
-        f"当日XG {integer('count')}只，较前一交易日{integer('change'):+d}只；"
-        f"连续上行{integer('up_streak')}日，连续下行{integer('down_streak')}日。"
-    )
     window_count = latest_formula.get("window_unique_count")
-    if window_count is not None and not pd.isna(window_count):
-        result += (
-            f"近21日技术去重{integer('window_unique_count')}只，"
-            f"正式{integer('tradable_unique_count')}只；"
-            f"观察日无交易排除{integer('suspended_count')}只，"
-            f"数据不可用{integer('unavailable_count')}只。"
-        )
-    return result
+    slope = latest_formula.get("window_trend_slope")
+    if window_count is None or pd.isna(window_count):
+        return "近21个交易日三浪三数据不足，右侧趋势暂不判断。"
+    slope_text = "数据不足" if slope is None or pd.isna(slope) else f"{float(slope):+.2f}"
+    up_streak = integer("trend_up_streak")
+    down_streak = integer("trend_down_streak")
+    if up_streak:
+        streak_text = f"连续正趋势{up_streak}日"
+    elif down_streak:
+        streak_text = f"连续负趋势{down_streak}日"
+    else:
+        streak_text = "趋势连续性未确认"
+    return (
+        f"近21个交易日三浪三技术去重{integer('window_unique_count')}只，"
+        f"趋势斜率{slope_text}，{streak_text}；"
+        f"正式{integer('tradable_unique_count')}只；"
+        f"观察日无交易排除{integer('suspended_count')}只，"
+        f"数据不可用{integer('unavailable_count')}只。"
+    )
 
 
 def wave_position(row):
@@ -112,21 +119,20 @@ def wave_position(row):
 
 
 def right_side_conclusion(row):
-    up = int(row.get("up_streak", 0) or 0)
-    down = int(row.get("down_streak", 0) or 0)
-    change = int(row.get("change", 0) or 0)
-    signal = str(row.get("signal", "观察"))
+    up = int(row.get("trend_up_streak", 0) or 0)
+    down = int(row.get("trend_down_streak", 0) or 0)
+    slope = pd.to_numeric(row.get("window_trend_slope"), errors="coerce")
     if down >= 5:
-        return "暂停右侧交易", "33结构连续收缩5日，右侧成功率明显下降"
+        return "暂停右侧交易", "21日三浪三去重趋势连续5日为负"
     if down >= 3:
-        return "谨慎或暂停右侧", "33结构连续收缩3日，等待重新扩张"
+        return "谨慎或暂停右侧", "21日三浪三去重趋势连续3日为负"
     if up >= 5:
-        return "可以右侧交易", "33结构连续扩张5日，右侧环境确认"
+        return "可以右侧交易", "21日三浪三去重趋势连续5日为正"
     if up >= 3:
-        return "可以谨慎右侧", "33结构连续扩张3日，环境初步转好"
-    if change > 0:
-        return "轻仓观察右侧", "当日扩张但连续性不足"
-    return "等待右侧确认", f"当日变化{change:+d}，连续性不足，信号为{signal}"
+        return "可以谨慎右侧", "21日三浪三去重趋势连续3日为正"
+    if pd.notna(slope) and float(slope) > 0:
+        return "轻仓观察右侧", "21日三浪三去重趋势为正但连续不足3日"
+    return "等待右侧确认", "21日三浪三去重趋势尚未形成连续正向确认"
 
 
 def stock_line(row, include_value=True):
