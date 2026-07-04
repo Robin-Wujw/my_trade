@@ -1,9 +1,63 @@
 import pandas as pd
 from stock_research.pipelines import formula33
 from stock_research.strategies.formula33 import (
+    build_window_trend,
     classify_observation_status,
     select_window_unique_hits,
 )
+
+
+def test_build_window_trend_uses_distinct_codes_in_each_21_day_window():
+    dates = pd.bdate_range("2026-01-01", periods=61).strftime("%Y-%m-%d").tolist()
+    hits = pd.DataFrame(
+        [
+            {"date": date, "code": f"sz.{index:06d}"}
+            for index, date in enumerate(dates)
+        ]
+        + [{"date": dates[-1], "code": "sz.000060"}]
+    )
+
+    result = build_window_trend(hits, dates, window=21, output_days=21)
+
+    assert len(result) == 21
+    assert result["window_unique_count"].tolist() == [21] * 21
+    assert result["window_trend_slope"].abs().max() < 1e-12
+    assert result.iloc[-1]["trend_up_streak"] == 0
+    assert result.iloc[-1]["trend_down_streak"] == 0
+
+
+def test_build_window_trend_counts_consecutive_positive_slopes():
+    dates = pd.bdate_range("2026-01-01", periods=61).strftime("%Y-%m-%d").tolist()
+    hits = pd.DataFrame(
+        [
+            {"date": date, "code": f"sz.{code_index:06d}"}
+            for index, date in enumerate(dates)
+            for code_index in range(index + 1)
+        ]
+    )
+
+    result = build_window_trend(hits, dates, window=21, output_days=21)
+
+    assert result.iloc[-1]["window_trend_slope"] > 0
+    assert result.iloc[-1]["trend_up_streak"] == 21
+    assert result.iloc[-1]["trend_down_streak"] == 0
+
+
+def test_build_window_trend_counts_consecutive_negative_slopes():
+    dates = pd.bdate_range("2026-01-01", periods=61).strftime("%Y-%m-%d").tolist()
+    hits = pd.DataFrame(
+        [
+            {"date": date, "code": f"sz.{code_index:06d}"}
+            for index, date in enumerate(dates)
+            for code_index in range(index, len(dates))
+        ]
+    )
+
+    result = build_window_trend(hits, dates, window=21, output_days=21)
+
+    assert result.iloc[-1]["window_trend_slope"] < 0
+    assert result.iloc[-1]["trend_up_streak"] == 0
+    assert result.iloc[-1]["trend_down_streak"] == 21
 
 
 def test_status_distinguishes_traded_suspended_and_unavailable():
