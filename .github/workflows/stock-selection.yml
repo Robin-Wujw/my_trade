@@ -2,8 +2,8 @@ name: Stock Selection
 
 on:
   schedule:
-    # Run the full pipeline every day at 16:30 Beijing time.
-    - cron: "30 8 * * *"
+    # Run the full pipeline every day at 20:30 Beijing time.
+    - cron: "30 12 * * *"
   workflow_dispatch:
     inputs:
       report_period:
