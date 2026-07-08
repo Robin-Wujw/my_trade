@@ -20,14 +20,6 @@ if (-not $env:DISABLE_DEFAULT_PROXY) {
     $env:DISABLE_DEFAULT_PROXY = "1"
 }
 
-# Clear any existing proxy environment variables
-if ($env:DISABLE_DEFAULT_PROXY -eq "1") {
-    $env:HTTP_PROXY = $null
-    $env:HTTPS_PROXY = $null
-    $env:ALL_PROXY = $null
-    Write-Host "Proxy disabled - cleared HTTP_PROXY, HTTPS_PROXY, ALL_PROXY"
-}
-
 # Auto-select latest available financial report period
 if (-not $env:REPORT_PERIOD) {
     $Today = Get-Date
@@ -57,5 +49,28 @@ if ($env:DISABLE_DEFAULT_PROXY -ne "1") {
     if (-not $env:ALL_PROXY) { $env:ALL_PROXY = $DefaultProxy }
 }
 
-& $PythonBin -u -m apps.daily_pipeline @args
-exit $LASTEXITCODE
+# Save current proxy settings to restore later
+$SavedHTTP = $env:HTTP_PROXY
+$SavedHTTPS = $env:HTTPS_PROXY
+$SavedALL = $env:ALL_PROXY
+
+# Temporarily clear proxy for Python subprocess
+if ($env:DISABLE_DEFAULT_PROXY -eq "1") {
+    $env:HTTP_PROXY = $null
+    $env:HTTPS_PROXY = $null
+    $env:ALL_PROXY = $null
+}
+
+try {
+    & $PythonBin -u -m apps.daily_pipeline @args
+    $ExitCode = $LASTEXITCODE
+} finally {
+    # Restore original proxy settings for this PowerShell session
+    if ($env:DISABLE_DEFAULT_PROXY -eq "1") {
+        $env:HTTP_PROXY = $SavedHTTP
+        $env:HTTPS_PROXY = $SavedHTTPS
+        $env:ALL_PROXY = $SavedALL
+    }
+}
+
+exit $ExitCode
