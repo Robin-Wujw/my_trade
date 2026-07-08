@@ -15,6 +15,11 @@ $PythonBin = if ($env:PYTHON_BIN) {
 $env:PYTHONUNBUFFERED = "1"
 $env:PYTHONIOENCODING = "utf-8"
 
+# Disable proxy by default (stock data APIs are accessible without proxy)
+if (-not $env:DISABLE_DEFAULT_PROXY) {
+    $env:DISABLE_DEFAULT_PROXY = "1"
+}
+
 # Auto-select latest available financial report period
 if (-not $env:REPORT_PERIOD) {
     $Today = Get-Date
