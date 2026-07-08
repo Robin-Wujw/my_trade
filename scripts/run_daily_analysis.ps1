@@ -20,6 +20,14 @@ if (-not $env:DISABLE_DEFAULT_PROXY) {
     $env:DISABLE_DEFAULT_PROXY = "1"
 }
 
+# Clear any existing proxy environment variables
+if ($env:DISABLE_DEFAULT_PROXY -eq "1") {
+    $env:HTTP_PROXY = $null
+    $env:HTTPS_PROXY = $null
+    $env:ALL_PROXY = $null
+    Write-Host "Proxy disabled - cleared HTTP_PROXY, HTTPS_PROXY, ALL_PROXY"
+}
+
 # Auto-select latest available financial report period
 if (-not $env:REPORT_PERIOD) {
     $Today = Get-Date
