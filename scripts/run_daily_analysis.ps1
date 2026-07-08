@@ -15,6 +15,28 @@ $PythonBin = if ($env:PYTHON_BIN) {
 $env:PYTHONUNBUFFERED = "1"
 $env:PYTHONIOENCODING = "utf-8"
 
+# Auto-select latest available financial report period
+if (-not $env:REPORT_PERIOD) {
+    $Today = Get-Date
+    $Year = $Today.Year
+    $Month = $Today.Month
+
+    if ($Month -ge 1 -and $Month -le 4) {
+        # Jan-Apr: Use previous year's annual report (Q4)
+        $env:REPORT_PERIOD = "{0}-12-31" -f ($Year - 1)
+    } elseif ($Month -ge 5 -and $Month -le 8) {
+        # May-Aug: Use current year Q1 report
+        $env:REPORT_PERIOD = "{0}-03-31" -f $Year
+    } elseif ($Month -ge 9 -and $Month -le 10) {
+        # Sep-Oct: Use current year Q2 report
+        $env:REPORT_PERIOD = "{0}-06-30" -f $Year
+    } else {
+        # Nov-Dec: Use current year Q3 report
+        $env:REPORT_PERIOD = "{0}-09-30" -f $Year
+    }
+    Write-Host "Auto-selected report period: $env:REPORT_PERIOD"
+}
+
 $DefaultProxy = "http://127.0.0.1:7897"
 if ($env:DISABLE_DEFAULT_PROXY -ne "1") {
     if (-not $env:HTTP_PROXY) { $env:HTTP_PROXY = $DefaultProxy }

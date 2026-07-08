@@ -2,7 +2,7 @@
 workers = 1
 
 [formula33]
-workers = 1
+workers = 2
 sleep = 0.2
 retries = 5
 
