@@ -285,10 +285,25 @@ def wave_position(row):
     if pd.isna(value):
         return "波段位置数据不足"
     if value > 100:
-        return "已突破该下跌波段前高"
+        return f"波段分位{value:.1f}%（已突破前高100%）"
     if value < 0:
-        return "仍低于该下跌波段后低"
-    return f"当前修复至{value:.1f}%"
+        return f"波段分位{value:.1f}%（低于本轮低点0%）"
+    return f"波段分位{value:.1f}%（低点=0%，下跌前高=100%）"
+
+
+def wave_position_compact(row):
+    value = pd.to_numeric(row.get("wave_pct"), errors="coerce")
+    if pd.isna(value):
+        return "分位不足 · 位置待确认"
+    return f"{float(value):.1f}% · {_action_label(row)}"
+
+
+def valuation_percentile_text(row):
+    value = pd.to_numeric(row.get("valuation_percentile"), errors="coerce")
+    if pd.isna(value):
+        return ""
+    pct_value = float(value) * 100 if abs(float(value)) <= 1 else float(value)
+    return f"估值历史分位{pct_value:.1f}%"
 
 
 def stock_line(row, include_value=True):
@@ -301,12 +316,16 @@ def stock_line(row, include_value=True):
         base += f"价值线{num(row.get('value_line'))}，现价/价值线{num(row.get('price_to_value'), 3)}；"
     else:
         base += f"估值方法{esc(row.get('method_name') or row.get('method') or '待核验')}；"
+        valuation_text = valuation_percentile_text(row)
+        if valuation_text:
+            base += f"{valuation_text}；"
     base += (
         f"行业：{esc(row.get('industry'), '待核验')}；"
         f"当前主流板块：{esc(row.get('mainline_boards'), '未命中')}；"
-        f"50%/62.5%/75%={num(row.get('wave_level_50'))}/"
+        f"{wave_position(row)}；"
+        f"本轮低点/前高={num(row.get('wave_low'))}/{num(row.get('wave_high'))}；"
+        f"50%/62.5%/75%价位={num(row.get('wave_level_50'))}/"
         f"{num(row.get('wave_level_625'))}/{num(row.get('wave_level_75'))}；"
-        f"{wave_position(row)}，{esc(row.get('wave_zone'), '波段不足')}；"
         f"扣非同比{pct(row.get('earnings_yoy'))}，质量{num(row.get('quality_score'), 1)}"
     )
     return base
@@ -397,6 +416,16 @@ def _risk_label(row):
 
 
 def _action_label(row):
+    percentile = pd.to_numeric(row.get("wave_pct"), errors="coerce")
+    if pd.notna(percentile):
+        percentile = float(percentile)
+        if percentile >= 75:
+            return "强修复"
+        if percentile >= 62.5:
+            return "右侧确认"
+        if percentile >= 50:
+            return "右侧启动"
+        return "左侧观察"
     zone = text(row.get("wave_zone"), "")
     if "62.5%以上" in zone:
         return "右侧确认"
@@ -430,11 +459,28 @@ def _push_style():
     )
 
 
-def _compact_stock_table(frame, kind):
+def _compact_stock_table(frame, kind, minimal=False):
+    if minimal:
+        headers = ("股票/代码", "价值比", "质量", "波段分位")
+        parts = [
+            "<table><thead><tr>",
+            "".join(f"<th>{header}</th>" for header in headers),
+            "</tr></thead><tbody>",
+        ]
+        for _, row in frame.iterrows():
+            cells = (
+                f"{esc(row.get('name', row.get('code')))}<br>{esc(row.get('code'))}",
+                num(row.get("price_to_value"), 3),
+                num(row.get("quality_score"), 0),
+                esc(wave_position_compact(row)),
+            )
+            parts.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
+        parts.append("</tbody></table>")
+        return "".join(parts)
     if kind == "value":
-        headers = ("股票/代码", "现价÷价值线", "质量/100", "当前阶段", "主要风险")
+        headers = ("股票/代码", "现价÷价值线", "质量/100", "波段分位", "主要风险")
     else:
-        headers = ("股票/代码", "质量/100", "命中主线", "当前阶段", "主要风险")
+        headers = ("股票/代码", "质量/100", "命中主线/估值", "波段分位", "主要风险")
     parts = [
         "<table border='1' cellspacing='0' cellpadding='4'><thead><tr>",
         "".join(f"<th>{header}</th>" for header in headers),
@@ -447,15 +493,22 @@ def _compact_stock_table(frame, kind):
                 stock,
                 num(row.get("price_to_value"), 3),
                 num(row.get("quality_score"), 1),
-                esc(_action_label(row)),
+                esc(wave_position_compact(row)),
                 esc(_risk_label(row)),
             )
         else:
             cells = (
                 stock,
                 num(row.get("quality_score"), 1),
-                esc(row.get("mainline_boards"), "未命中"),
-                esc(_action_label(row)),
+                (
+                    esc(row.get("mainline_boards"), "未命中")
+                    + (
+                        f"<br>{esc(valuation_percentile_text(row))}"
+                        if valuation_percentile_text(row)
+                        else ""
+                    )
+                ),
+                esc(wave_position_compact(row)),
                 esc(_risk_label(row)),
             )
         parts.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
@@ -526,7 +579,7 @@ def build_push_reports(
     def zone_count(counts, name):
         return int(counts.get(name, 0))
 
-    def make_parts(detail_count):
+    def make_parts(detail_count, minimal_tables=False):
         part1 = "".join(
             [
                 _push_style(),
@@ -543,12 +596,14 @@ def build_push_reports(
                 f"右侧启动 {zone_count(value_zones, '50%-62.5%右侧启动')}只；"
                 f"左侧观察 {zone_count(value_zones, '50%以下未确认')}只；"
                 f"质量分≥80有 {value_quality}只。</p>",
-                "<p><b>阅读方法：</b>现价÷价值线低不等于可以买；优先顺序是右侧确认 → "
+                "<p><b>波段分位口径：</b>本轮下跌低点=0%，下跌前高=100%；50%/62.5%/75%"
+                "是从低点向前高修复的价格位置，不是全市场排名。</p>",
+                "<p><b>阅读方法：</b>现价÷价值线低不等于可以买；优先顺序是强修复/右侧确认 → "
                 "右侧启动 → 左侧观察，再核验质量与风险。</p>",
                 render_selection_changes(selection_diff, "1.基本价值线或附近"),
                 _priority_details(values, True, detail_count),
                 "<h3>完整名单（代码不会省略）</h3>",
-                _compact_stock_table(values, "value"),
+                _compact_stock_table(values, "value", minimal=minimal_tables),
                 "<div class='warning'><b>边界：</b>价值线适用性仍需核验行业方法和财务口径；"
                 "左侧观察只表示价格位置较低，不是买入信号。</div>",
             ]
@@ -569,8 +624,10 @@ def build_push_reports(
                 render_selection_changes(selection_diff, "2.正常基本面选股"),
                 _priority_details(normal, "auto", detail_count),
                 "<h3>完整名单（代码不会省略）</h3>",
-                _compact_stock_table(normal, "normal"),
+                _compact_stock_table(normal, "normal", minimal=minimal_tables),
                 "<h2>4. 主流板块</h2>",
+                "<p><b>分位说明：</b>股票表中的波段分位为精确数值；若显示估值历史分位，"
+                "它表示当前PE/PB在自身历史中的位置，两种分位不可混用。</p>",
                 "<p><b>怎么看：</b>先看3/5/20日是否同向，再看5日成交额相对20日是否放大，"
                 "最后看涨停是否扩散；单项高分不代表主线成立。</p>",
                 _sector_summary(top_sectors),
@@ -587,9 +644,15 @@ def build_push_reports(
         return rich_parts
     except ValueError:
         compact_parts = make_parts(0)
-        validate_push_report(compact_parts[0], values["code"], max_chars)
-        validate_push_report(compact_parts[1], normal["code"], max_chars)
-        return compact_parts
+        try:
+            validate_push_report(compact_parts[0], values["code"], max_chars)
+            validate_push_report(compact_parts[1], normal["code"], max_chars)
+            return compact_parts
+        except ValueError:
+            minimal_parts = make_parts(0, minimal_tables=True)
+            validate_push_report(minimal_parts[0], values["code"], max_chars)
+            validate_push_report(minimal_parts[1], normal["code"], max_chars)
+            return minimal_parts
 
 
 def build_reports(

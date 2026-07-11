@@ -249,8 +249,28 @@ def test_build_push_reports_keeps_every_stock_and_bounds_each_part():
     assert "结论" in part2 and "风险" in part2
     assert "30秒结论" in part1 and "今天怎么用" in part1
     assert "数据是否可用" in part1 and "现价÷价值线" in part1
+    assert "70.0% · 右侧确认" in part1 and "低点=0%" in part1
     assert "30秒结论" in part2 and "核验顺序" in part2
-    assert "当前阶段" in part1 and "当前阶段" in part2
+    assert "70.0% · 右侧确认" in part2 and "两种分位不可混用" in part2
+
+
+def test_large_value_pool_keeps_codes_and_exact_wave_percentile_in_minimal_table():
+    values = make_stocks("V", 180, "1.基本价值线或附近")
+    normal = make_stocks("N", 30, "2.正常基本面选股")
+
+    part1, _part2 = build_push_reports(
+        "2026-07-03",
+        values,
+        normal,
+        pd.Series({"window_unique_count": 188, "unavailable_count": 0}),
+        pd.DataFrame(),
+        SelectionDiff((), (), ()),
+        18000,
+    )
+
+    assert len(part1) <= 18000
+    assert all(code in part1 for code in values["code"])
+    assert part1.count("70.0% · 右侧确认") == len(values)
 
 
 def test_selection_changes_are_separated_by_strategy_part():
