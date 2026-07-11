@@ -8,7 +8,7 @@ retries = 5
 
 [sector]
 sleep = 0.3
-retries = 5
+retries = 2
 
 [fundamental]
 max_updates = 100

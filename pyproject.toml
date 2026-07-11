@@ -28,4 +28,4 @@ exclude = ["tests*"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
-addopts = "--basetemp=var/tmp/pytest -p no:cacheprovider"
+addopts = "--basetemp=.pytest-tmp -p no:cacheprovider"

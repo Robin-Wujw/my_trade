@@ -27,12 +27,6 @@ from stock_research.reporting.diff import (
     save_current_result,
 )
 
-try:
-    import adata
-except ImportError:
-    adata = None
-
-
 LAST_RESULT_FILE = str(PATHS.state / "factor_selection_last.json")
 OUTPUT_DIR = str(PATHS.selection_exports)
 VALUE_CACHE_DIR = str(PATHS.cache / "factor_value")
@@ -123,7 +117,7 @@ def time_limit(seconds):
         yield
         return
 
-    def handle_timeout(signum, frame):
+    def handle_timeout(_signum, _frame):
         raise DataFetchTimeout(f"数据请求超过 {seconds} 秒")
 
     previous_handler = signal.signal(signal.SIGALRM, handle_timeout)
@@ -925,101 +919,6 @@ def get_profit_metrics(code, year, quarter):
     if pd.notna(eps) and eps <= 0:
         score = 0
     return {"roe": roe, "eps": eps, "eps_yoy": eps_yoy, "score": clamp(score)}
-
-
-def get_value_line_metrics_from_adata(symbol, close, report_period=None):
-    if adata is None:
-        return None
-    try:
-        df = adata.stock.finance.get_core_index(symbol)
-        if df is None or df.empty:
-            return None
-
-        df = df.copy()
-        df["报告期_dt"] = pd.to_datetime(df["report_date"], errors="coerce")
-        df = df.dropna(subset=["报告期_dt"]).sort_values("报告期_dt")
-        if report_period:
-            df = df[df["报告期_dt"] <= pd.Timestamp(report_period)]
-        if df.empty:
-            return None
-
-        latest = df.iloc[-1]
-        bvps = parse_float(latest.get("net_asset_ps"))
-        yoy_pct = parse_float(latest.get("non_gaap_net_profit_yoy_gr"))
-        if bvps is None or yoy_pct is None:
-            return None
-        yoy = yoy_pct / 100
-
-        df_annual = df[(df["report_type"] == "年报") | (df["report_date"].astype(str).str.endswith("12-31"))]
-        if df_annual.empty:
-            return None
-        annual = df_annual.iloc[-1]
-
-        # adata exposes the Eastmoney non-recurring EPS in diluted_eps. For Q1
-        # nodes after an annual stock bonus/conversion plan, convert it to the
-        # recap-comparable EPS used by the value-line examples.
-        raw_eps_excl = parse_float(annual.get("diluted_eps"))
-        if raw_eps_excl is None:
-            raw_eps_excl = parse_float(annual.get("non_gaap_eps"))
-        eps_excl, eps_detail = comparable_excl_eps(
-            symbol,
-            annual.get("report_date"),
-            latest.get("report_date"),
-            raw_eps_excl,
-        )
-        if eps_excl is None or eps_excl <= 0:
-            return None
-
-        annual_excl_profit = parse_float(annual.get("non_gaap_net_profit"))
-        total_share = annual_excl_profit / raw_eps_excl if annual_excl_profit and raw_eps_excl else None
-        if not total_share or total_share <= 0:
-            annual_net_profit = parse_float(annual.get("net_profit_attr_sh"))
-            annual_basic_eps = parse_float(annual.get("basic_eps"))
-            if not annual_net_profit or annual_basic_eps is None or annual_basic_eps <= 0:
-                return None
-            total_share = annual_net_profit / annual_basic_eps
-        if total_share <= 0:
-            return None
-
-        value_line = bvps + eps_excl * (1 + yoy) * 10
-        if value_line <= 0:
-            return None
-
-        annual_excl = [parse_float(r.get("non_gaap_net_profit")) for _, r in df_annual.tail(3).iterrows()]
-        annual_excl = [v for v in annual_excl if v is not None]
-        positive_years = sum(1 for v in annual_excl if v > 0)
-        growth_steps = sum(1 for i in range(len(annual_excl) - 1) if annual_excl[i + 1] > annual_excl[i])
-
-        quality_yoy = min(max(yoy, -0.5), 1.0)
-        price_to_value = close / value_line
-        valuation_score = score_inverse(price_to_value, best=0.55, worst=1.25)
-        quality_score = (
-            score_direct(eps_excl, 0.10, 1.50) * 0.35
-            + score_direct(quality_yoy, -0.10, 0.50) * 0.35
-            + score_direct(positive_years, 1, 3) * 0.15
-            + score_direct(growth_steps, 0, 2) * 0.15
-        )
-        mktcap = close * total_share / 1e8
-
-        return {
-            "value_line": value_line,
-            "price_to_value": price_to_value,
-            "valuation_score": valuation_score,
-            "quality_score": clamp(quality_score),
-            "mktcap": mktcap,
-            "eps_excl": eps_excl,
-            "yoy": yoy,
-            "yoy_source": "adata东方财富扣非净利润同比",
-            "latest_excl_eps": parse_float(latest.get("diluted_eps")),
-            "prev_excl_eps": None,
-            "latest_report": str(latest["report_date"]),
-            "annual_report": str(annual["report_date"]),
-            "data_source": "adata/eastmoney",
-            "total_share": total_share,
-            **(eps_detail or {}),
-        }
-    except Exception:
-        return None
 
 
 def to_em_symbol(symbol):
@@ -1937,8 +1836,6 @@ def run_akshare_cache_fallback(top):
             volume_ratio = volume5 / volume20 if volume20 > 0 else 1.0
             high20 = float(close.tail(20).max())
             drawdown20 = last_close / high20 - 1 if high20 > 0 else 0
-            volatility20 = float(close.pct_change().tail(20).std() or 0)
-
             deduct_periods = []
             price_deduct_periods = []
             volume_deduct_periods = []
@@ -2180,21 +2077,6 @@ def build_daily_risk_notes(core_rows, low_value_rows, high_quality_rows, value_w
     return notes
 
 
-def build_push_list(rows, top):
-    if not rows:
-        return "<p>无</p>"
-    items = "".join(
-        "<li>"
-        f"{r['name']}({r['code']}) | 分={r['total_score']} | {r.get('theme', '-')} | "
-        f"主线={r.get('mainline_score', 0)}/{r.get('mainline_label', '-')} | "
-        f"{short_text(build_valuation_detail(r), 70)} | "
-        f"{short_text(r['risk_flags'], 70)}"
-        "</li>"
-        for r in rows[:top]
-    )
-    return f"<ol>{items}</ol>"
-
-
 def build_push_table(rows, top):
     return build_html_table(rows[:top])
 
@@ -2240,25 +2122,6 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def print_result_section(title, rows, top):
-    print(f"\n--- {title}({len(rows)}只，显示前{min(top, len(rows))}只) ---")
-    if not rows:
-        print("无")
-        return
-    display_rows = []
-    for row in rows[:top]:
-        display = row.copy()
-        display["valuation_detail"] = build_valuation_detail(row)
-        display_rows.append(display)
-    cols = [
-        "code", "name", "theme", "selection_bucket", "valuation_state", "method_name", "selection_mode", "close",
-        "total_score", "core_score", "low_value_score", "high_quality_score", "valuation_score", "raw_valuation_score",
-        "quality_score", "trend_score", "liquidity_score", "mainline_score", "mainline_label", "valuation_detail",
-        "mainline_ref", "technical_ref", "risk_flags",
-    ]
-    print(pd.DataFrame(display_rows)[cols].to_string(index=False))
-
-
 def print_theme_summary(rows):
     if not rows:
         print("\n--- 主线观察：无入选样本 ---")
@@ -2285,27 +2148,6 @@ def print_theme_summary(rows):
         "avg_mainline": lambda v: f"{v:.1f}",
         "avg_ret20": lambda v: fmt_pct(v, 0),
         "avg_ret60": lambda v: fmt_pct(v, 0),
-    }))
-
-
-def print_value_watch_summary(rows, top):
-    print(f"\n--- 价值线附近观察({len(rows)}只，显示前{min(top, len(rows))}只) ---")
-    if not rows:
-        print("无")
-        return
-    display_rows = []
-    for row in rows[:top]:
-        display = row.copy()
-        display["valuation_detail"] = build_valuation_detail(row)
-        display_rows.append(display)
-    cols = [
-        "code", "name", "theme", "close", "price_to_value", "value_line", "total_score",
-        "quality_score", "trend_score", "liquidity_score", "selection_bucket", "block_reason",
-        "valuation_detail", "risk_flags",
-    ]
-    print(pd.DataFrame(display_rows)[cols].to_string(index=False, formatters={
-        "price_to_value": lambda v: fmt_num(v, 2),
-        "value_line": lambda v: fmt_num(v, 2),
     }))
 
 
@@ -2544,7 +2386,3 @@ def main(argv=None):
 
     content = build_push_content(diff_html, core_rows, low_value_rows, high_quality_rows, value_watch_rows, args.quality_min_score, args.low_min_score, args.core_min_score, args.top)
     send_pushplus(f"{today_str} 因子选股({len(top_rows)}/{len(rows)}只)", content)
-
-
-if __name__ == "__main__":
-    main()

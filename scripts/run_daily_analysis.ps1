@@ -1,7 +1,22 @@
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
+try { chcp 65001 | Out-Null } catch {}
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $ProjectRoot
+
+$LogDir = Join-Path $ProjectRoot "var\logs"
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+$LogPath = Join-Path $LogDir ("daily_analysis_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+$TranscriptStarted = $false
+try {
+    Start-Transcript -Path $LogPath -Force | Out-Null
+    $TranscriptStarted = $true
+    Write-Host "Log file: $LogPath"
+} catch {
+    Write-Host "Unable to start transcript log: $_"
+}
 
 $DefaultPython = "D:\ActionsRunner\my-trade\python\python.exe"
 $PythonBin = if ($env:PYTHON_BIN) {
@@ -70,6 +85,9 @@ try {
         $env:HTTP_PROXY = $SavedHTTP
         $env:HTTPS_PROXY = $SavedHTTPS
         $env:ALL_PROXY = $SavedALL
+    }
+    if ($TranscriptStarted) {
+        Stop-Transcript | Out-Null
     }
 }
 

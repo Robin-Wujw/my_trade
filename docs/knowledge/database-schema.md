@@ -1,144 +1,105 @@
-# DuckDB 数据库结构
+# DuckDB 实际结构
 
-## 1. 定位
+## 1. 当前边界
 
-目标数据库固定为 `var/data/my_trade.duckdb`。当前已落地 schema、事务、运行记录与回归基础；生产策略仍在迁移期使用 `var/cache` 文件缓存并导出 CSV/HTML，因此尚未宣称 DuckDB 已是全部生产数据的唯一事实源。
+数据库文件固定为 `var/data/my_trade.duckdb`。迁移代码当前只创建 4 个 schema 和 7 张应用表；其中 `core`、`derived` schema 目前没有表。
 
-系统使用 DuckDB 的单进程写入模型：网络抓取可以多线程，但数据库写入集中到流水线主进程，按批次和事务提交。生产运行期间不允许第二个读写进程连接同一数据库文件。
+生产仍使用 `var/cache` 的增量文件缓存，并输出 CSV、Excel 和 HTML。DuckDB 当前只覆盖运行基础、板块和股票日线持久化，不是全部业务数据的唯一事实源。
 
-## 2. Schema 分层
+## 2. 实际 7 张表
 
-### `raw`
+| 表 | 用途 | 主键 |
+|---|---|---|
+| `ops.schema_migrations` | 已应用迁移版本 | `version` |
+| `ops.runs` | 可选的运行生命周期基础记录 | `run_id` |
+| `ops.run_steps` | 可选的单次运行步骤基础记录 | `run_id, step_name` |
+| `ops.pipeline_events` | 板块等分步事件和进度日志 | 无 |
+| `raw.sector_boards` | 板块名称、代码、分组和来源 | `board_name` |
+| `raw.sector_board_history` | 按来源保存的板块日线 | `board_name, trade_date, source` |
+| `raw.stock_kline_daily` | 按来源保存的股票日线 | `source, code, trade_date` |
 
-保存不可变的数据源原始载荷。该层只追加，除依法清理错误或敏感数据外不更新历史行。
+除这 7 张表外，文档不约定任何尚未落地的表或视图。
 
-### `core`
-
-保存标准化、可连接、可执行时点查询的事实和维度数据。
-
-### `derived`
-
-保存带观察日、算法版本和运行身份的指标、截面和策略结果，可从 `raw` 与 `core` 重建。
-
-### `ops`
-
-保存 schema 版本、采集任务、运行步骤、覆盖率、诊断、报告和导出审计。
-
-## 3. 核心表
-
-### `core.stocks`
-
-股票主数据：`stock_code`、名称、交易所、上市日、退市日、证券状态、来源、实际有效区间。股票代码使用 `sh.600000`、`sz.000001` 形式作为系统统一键。
-
-### `core.trading_calendar`
-
-交易所、自然日、是否交易日、前后交易日。观察日到市场截止日的转换只能通过该表完成。
-
-### `core.daily_bars`
-
-前复权日线，联合键为股票、交易日、复权口径和数据源。字段包含开高低收、成交量、成交额、复权因子、抓取时间、源记录标识和数据质量状态。
-
-### `core.share_capital_versions`
-
-总股本版本，记录生效时间、公告时间、来源和版本哈希。历史市值必须使用观察日有效股本，不能使用今天的总股本。
-
-### `core.sectors`、`core.sector_bars`、`core.sector_memberships`
-
-分别保存板块主数据、板块行情和带有效区间的历史成分。成分表必须能回答任意观察日股票属于哪些板块。
-
-### `raw.financial_payloads`
-
-完整保存数据源财报响应：股票、报表类型、报告期、公告时间、修订时间、生效时间、来源、源记录标识、抓取时间、规范化内容哈希、`payload_json`、解析状态和错误信息。`version_hash` 唯一，内容相同不重复保存。
-
-### `core.financial_reports`
-
-财报版本目录，每行对应一份原版或修订版，引用 `raw.financial_payloads.version_hash`。它是时点版本选择的入口。
-
-### `core.financial_facts`
-
-完整标准化报表字段，至少包含版本哈希、字段代码、源字段名、标准字段名、数值、文本值、单位、币种和报告口径。未知字段也保存源字段名和值，避免因映射不完整丢失原始信息。
-
-## 4. 派生表
-
-### `derived.financial_snapshots`
-
-每个观察日、股票和报告期一行，保存当时可见版本计算出的每股净资产、扣非 EPS、扣非同比、股本、市值、质量分、流动性分、价值线及输入版本哈希集合。
-
-### `derived.indicator_values`
-
-保存三浪三、均线、均量、扣抵、波段和主题动量等指标。主键维度至少包括 `run_id`、股票、指标名、观察日和算法版本。
-
-### `derived.market_structure`
-
-保存三浪三每日技术命中数、市值有效数、100 亿元过滤后数量、变化和连续扩张/收缩状态。
-
-### `derived.sector_watch`
-
-保存板块收益、量能、强弱、涨停扩散、主线分和实际数据日期。
-
-### `derived.strategy_results`
-
-保存每次运行的候选股票、策略分区、排名、是否可执行、理由和关键指标引用。报告只读取指定 `run_id` 的结果。
-
-### `derived.diagnostics`
-
-保存缺失市值、财报不完整、来源回退、过滤原因和其他不会进入正式结果但必须可审计的信息。
-
-## 5. 运维表
+## 3. 表字段
 
 ### `ops.schema_migrations`
 
-记录数据库 schema 版本、应用时间和代码版本。所有结构变化通过有序迁移完成。
+```text
+version, name, applied_at, code_version
+```
 
-### `ops.ingestion_tasks`
-
-记录历史回填和每日增量任务的状态、尝试次数、错误类别、下次重试时间和最后成功版本。
+`Database.initialize()` 在一个事务中按版本顺序执行迁移。已经记录的版本不会重复执行；任一语句失败时整批回滚。
 
 ### `ops.runs`
 
-每次运行一行：`run_id`、观察日、市场截止日、财务截止日、报告期、模式、代码版本、开始/结束时间和最终门控状态。
+```text
+run_id, observation_date, market_cutoff, financial_cutoff, report_period,
+mode, code_version, started_at, finished_at, status, gate_status, error_message
+```
+
+约束包括：
+
+- `market_cutoff <= observation_date`；
+- `report_period <= observation_date`；
+- `mode` 只能是 `production/backtest/offline`；
+- `status` 只能是 `running/succeeded/failed`；
+- `gate_status` 只能是 `pending/passed/failed`。
+
+这张表和 `ops.run_steps` 是已落地的基础设施，但当前顶层七步流水线尚未承诺每次运行都有完整记录。运维判断仍以进程退出码、完成清单、产物门禁和日志为准。
 
 ### `ops.run_steps`
 
-记录各步骤输入截止日、状态、行数、覆盖率、耗时、错误和重试信息。
+```text
+run_id, step_name, input_cutoff, status, started_at, finished_at,
+row_count, coverage, elapsed_seconds, error_message, retry_count
+```
 
-### `ops.coverage_metrics`
+`run_id` 外键引用 `ops.runs`。行数、覆盖率、耗时和重试次数均有非负约束。
 
-保存每次运行的行情、财务、行业、股本、市值和板块覆盖率。
+### `ops.pipeline_events`
 
-### `ops.reports`
+```text
+created_at, run_id, step_name, part_name, event_type, status,
+message, rows, elapsed_seconds, context_json
+```
 
-保存报告标题、完整 HTML 正文、PushPlus 摘要、生成时间、推送状态和对应 `run_id`。HTML 文件只是该表记录的可选导出。
+用于记录分步开始、完成、失败、覆盖率和进度事件。它不是完整运行事实表，也不能替代完成清单和输出门禁。
 
-### `ops.exports`
+### `raw.sector_boards`
 
-审计人工触发的 HTML、CSV 或 Excel 导出：导出人、时间、查询范围、目标路径和文件哈希。导出文件不得被生产流水线读取。
+```text
+board_name, group_name, source, updated_at, board_code
+```
 
-## 6. 关键约束
+板块名称是当前主键，`board_code` 用于真实提供方的历史和成分请求。
 
-- 原始财报哈希唯一，旧版本不可覆盖。
-- 日线、股本和板块成分都必须有数据来源与有效时间。
-- 每条派生记录必须带 `run_id`、观察日和算法版本。
-- 正式策略结果引用的输入截止日不得晚于运行观察日。
-- 市值缺失的三浪三技术命中只能进入诊断表。
-- 报告必须引用已经门控通过的运行。
-- 生产代码禁止从 Excel/CSV/JSON 导出文件回读数据。
+### `raw.sector_board_history`
 
-## 7. 查询视图
+```text
+board_name, trade_date, open, close, high, low,
+amount, volume, pct_chg, source, updated_at
+```
 
-建立稳定视图隐藏版本选择细节，例如：
+同一板块、交易日允许保存不同来源，读取时必须携带或明确选择 `source`。
 
-- `core.v_financial_reports_asof`：按观察日选择有效财报版本；
-- `core.v_share_capital_asof`：按观察日选择有效股本；
-- `derived.v_latest_successful_run`：最新门控通过运行，仅用于展示，不用于拼接不同运行的数据；
-- `ops.v_run_health`：汇总步骤状态、覆盖率和诊断数量。
+### `raw.stock_kline_daily`
 
-时点视图或仓储方法必须显式接收观察日，禁止使用数据库当前时间替代。
+```text
+source, code, trade_date, open, high, low, close,
+volume, tradestatus, updated_at
+```
 
-## 8. 索引与物理组织
+Formula33 将前复权日线按股票和交易日增量写入该表。复权和提供方口径必须由 `source` 明确区分，不能把未复权数据写成同一来源覆盖。
 
-优先按常见过滤和连接键组织数据：股票与交易日、报告期与生效时间、`run_id` 与策略名。大批量导入使用 DataFrame 或 Arrow 批次注册后一次写入，避免逐行提交。定期执行统计信息更新和受控检查点，数据库维护期间暂停生产写入。
+## 4. 写入规则
 
-## 9. 备份
+- 网络抓取可以并发，DuckDB 写入通过仓储集中提交；
+- 日线和板块历史按主键增量 upsert，不因一次接口失败删除已有数据；
+- 板块读取必须检查实际最后交易日、最少历史行数和来源；
+- Formula33 文件缓存与 DuckDB 日线必须保持相同前复权口径；
+- 测试使用独立临时数据库，不能写入生产库；
+- 一个写事务失败时必须回滚，不能留下半次迁移。
 
-数据库放在本机持久磁盘，不放网络共享目录。每日成功生产运行后生成一致性备份，保留最近若干日及月度归档；备份完成后记录文件大小、时间和校验哈希。恢复演练必须验证 schema 版本、行数、最新成功运行和随机财报版本哈希。
+## 5. 检查
+
+可通过 DuckDB 的 `information_schema.tables` 核对应用表数量和名称。结构变更必须保持迁移幂等、事务回滚和既有数据兼容测试通过，不能直接手工修改生产数据库代替迁移。

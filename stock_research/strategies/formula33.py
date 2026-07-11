@@ -5,12 +5,98 @@ import numpy as np
 import pandas as pd
 
 
-def build_window_trend(xg_hits, trade_dates, window=21, output_days=21):
+def build_count_direction_streaks(values):
+    """Build changes and directional streaks for consecutive rolling nodes."""
+    rows = []
+    previous = None
+    up_streak = 0
+    down_streak = 0
+    for value in values:
+        current = int(value)
+        change = 0 if previous is None else current - previous
+        if change > 0:
+            up_streak += 1
+            down_streak = 0
+        elif change < 0:
+            up_streak = 0
+            down_streak += 1
+        else:
+            up_streak = 0
+            down_streak = 0
+        rows.append(
+            {
+                "window_change": change,
+                "window_up_streak": up_streak,
+                "window_down_streak": down_streak,
+            }
+        )
+        previous = current
+    return pd.DataFrame(rows)
+
+
+def _build_trade_coverage(trade_coverage):
+    if trade_coverage is None:
+        return None
+    if isinstance(trade_coverage, dict):
+        records = trade_coverage.items()
+    elif isinstance(trade_coverage, pd.DataFrame):
+        if not {"code", "covered_dates"}.issubset(trade_coverage.columns):
+            return {}
+        records = trade_coverage[["code", "covered_dates"]].itertuples(
+            index=False,
+            name=None,
+        )
+    else:
+        records = trade_coverage
+
+    coverage = {}
+    for code, covered_dates in records:
+        if covered_dates is None:
+            dates = set()
+        elif isinstance(covered_dates, str):
+            dates = {covered_dates}
+        else:
+            dates = {str(value) for value in covered_dates if pd.notna(value)}
+        coverage[str(code)] = dates
+    return coverage
+
+
+def _build_current_statuses(current_statuses):
+    if current_statuses is None:
+        return None
+    if isinstance(current_statuses, dict):
+        records = current_statuses.items()
+    elif isinstance(current_statuses, pd.DataFrame):
+        if not {"code", "observation_status"}.issubset(current_statuses.columns):
+            return {}
+        records = (
+            current_statuses.drop_duplicates("code", keep="last")
+            [["code", "observation_status"]]
+            .itertuples(index=False, name=None)
+        )
+    else:
+        records = current_statuses
+    return {str(code): str(status) for code, status in records}
+
+
+def build_window_trend(
+    xg_hits,
+    trade_dates,
+    window=21,
+    output_days=21,
+    trade_coverage=None,
+    current_statuses=None,
+):
     """Build rolling unique-XG breadth and its rolling linear trend."""
     dates = [str(value) for value in trade_dates]
     columns = [
         "date",
         "window_unique_count",
+        "technical_unique_count",
+        "tradable_unique_count",
+        "window_change",
+        "window_up_streak",
+        "window_down_streak",
         "window_trend_slope",
         "trend_up_streak",
         "trend_down_streak",
@@ -27,17 +113,41 @@ def build_window_trend(xg_hits, trade_dates, window=21, output_days=21):
         for date, group in normalized.groupby("date"):
             hit_codes[date] = set(group["code"].astype(str))
 
+    coverage_by_code = _build_trade_coverage(trade_coverage)
+    status_by_code = _build_current_statuses(current_statuses)
+    latest_date = dates[-1]
     unique_rows = []
     for end_index in range(window - 1, len(dates)):
         codes = set()
         for date in dates[end_index - window + 1 : end_index + 1]:
             codes.update(hit_codes.get(date, set()))
+        observation_date = dates[end_index]
+        technical_count = len(codes)
+        if coverage_by_code is not None:
+            codes = {
+                code
+                for code in codes
+                if observation_date in coverage_by_code.get(code, set())
+            }
+        if observation_date == latest_date and status_by_code is not None:
+            codes = {
+                code for code in codes if status_by_code.get(code) == "traded"
+            }
+        formal_count = len(codes)
         unique_rows.append(
-            {"date": dates[end_index], "window_unique_count": len(codes)}
+            {
+                "date": observation_date,
+                "window_unique_count": formal_count,
+                "technical_unique_count": technical_count,
+                "tradable_unique_count": formal_count,
+            }
         )
 
     rolling = pd.DataFrame(unique_rows)
     values = rolling["window_unique_count"].astype(float)
+    directions = build_count_direction_streaks(values)
+    for column in directions.columns:
+        rolling[column] = directions[column].to_numpy()
     x_axis = np.arange(window, dtype=float)
     rolling["window_trend_slope"] = values.rolling(window).apply(
         lambda sample: float(np.polyfit(x_axis, sample, 1)[0]), raw=True

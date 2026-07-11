@@ -1,23 +1,22 @@
 # my_trade 文档索引
 
-本目录记录系统当前结构、目标架构、数据时点规则和运行维护方式。策略业务口径仍以仓库根目录的 `STRATEGY.md` 为准。
+本目录只保留与当前代码一致的知识文档。业务口径以仓库根目录的 [STRATEGY.md](../STRATEGY.md) 为准；历史设计稿、实施计划和未落地目标不再作为现行文档保存。
 
-## 设计规范
+## 当前文档
 
-- [数据基础与工程分层重构设计](superpowers/specs/2026-07-01-data-architecture-refactor-design.md)：本轮已经确认的完整设计、边界、迁移顺序和验收条件。
-- [最小每日推送链路与停牌状态重构设计](superpowers/specs/2026-07-03-minimal-daily-pipeline-cleanup-design.md)：停牌逐日重判、最小生产文件、清理范围和 SQL 验收标准。
-- [项目目录与模块边界重构设计](superpowers/specs/2026-07-04-project-layout-reorganization-design.md)：当前一级目录、核心包、运行数据和删除边界。
-- [阶段一基础边界实施计划](superpowers/plans/2026-07-02-phase-one-foundation.md)：包骨架、运行上下文、DuckDB 迁移、运行记录和历史回归门的实施与验证步骤。
-- [最小每日推送链路实施计划](superpowers/plans/2026-07-03-minimal-daily-pipeline-cleanup.md)：停牌状态、生产入口精简、产物清理和 SQL 双层验收步骤。
-- [项目目录重构实施计划](superpowers/plans/2026-07-04-project-layout-reorganization.md)：本次模块迁移、数据整理和验收步骤。
+- [项目架构](knowledge/project-architecture.md)：目录、模块职责、七步调用链和运行数据边界。
+- [DuckDB 实际结构](knowledge/database-schema.md)：当前迁移真正创建的 7 张表及使用限制。
+- [观察日与时点规则](knowledge/point-in-time-data.md)：行情截断、观察日交易资格、财报和板块时点边界。
+- [每日流水线运维](knowledge/operations-runbook.md)：完整运行、增量续跑、结果验收、故障处理和正式推送门禁。
 
-## 知识文档
+## 已验证基准
 
-- [项目架构知识库](knowledge/project-architecture.md)：当前系统、目标模块、模块职责和扩展规则。
-- [DuckDB 数据库结构](knowledge/database-schema.md)：数据库分层、核心表、约束、索引和备份边界。
-- [时点数据与财报版本规范](knowledge/point-in-time-data.md)：观察日、披露、修订、行情截断和版本选择的统一语义。
-- [数据回填与每日流水线运维手册](knowledge/operations-runbook.md)：历史回填、每日运行、故障处理、覆盖率和切换流程。
+Formula33 固定回归区间为 2026-06-11 至 2026-07-10：
 
-## 本轮范围
+- 上市超过 300 天后的技术全量 191 只；
+- 观察日无交易排除 3 只；
+- 正式结果 188 只；
+- 总市值大于 100 亿元的独立池 145 只；
+- `001331` 在 2026-05-27 的前复权收盘价为 `48.08`。
 
-本轮处理数据日期一致性、观察日截断、完整历史财务数据、DuckDB 单一事实源、三浪三市值过滤和工程模块化。持仓、止盈止损及券商执行明确留到后续独立设计。
+观察日无交易股票只进入诊断，不进入正式结果。这是后续 Formula33 修改必须保持的回归标准。

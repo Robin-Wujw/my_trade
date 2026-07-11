@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 from stock_research.api import akshare as ak
-from stock_research.api import baostock as bs
 
 from stock_research.api.pushplus import send_pushplus
 from stock_research.core.as_of import write_metadata
@@ -27,6 +26,7 @@ from stock_research.pipelines.factor_selection import (
 from stock_research.pipelines.fundamental_selection import (
     KLINE_CACHE_DIR,
     VALUE_CACHE_DIR,
+    VALUE_MIN_MARKET_CAP,
 )
 
 
@@ -277,33 +277,12 @@ def load_industry_map(as_of_date, offline=False):
                     "data_source": "akshare/eastmoney_industry_boards",
                 })
                 return mapping, "akshare/eastmoney_industry_boards"
-            print(f"AkShare industry coverage too low ({len(mapping)}), trying Baostock fallback")
+            print(
+                f"AkShare industry coverage too low ({len(mapping)}), "
+                "using the last local AkShare cache"
+            )
         except Exception as exc:
-            print(f"AkShare industry refresh failed, trying Baostock fallback: {exc}")
-        try:
-            login = bs.login()
-            if login.error_code == "0":
-                try:
-                    result = bs.query_stock_industry()
-                    frame = result.get_data()
-                    if result.error_code == "0" and not frame.empty:
-                        frame.columns = result.fields
-                        frame = frame[["code", "industry"]].drop_duplicates("code")
-                        os.makedirs(INDUSTRY_DIR, exist_ok=True)
-                        dated = os.path.join(INDUSTRY_DIR, f"industry_map_{as_of_date.replace('-', '')}.csv")
-                        frame.to_csv(dated, index=False, encoding="utf-8-sig")
-                        frame.to_csv(latest_path, index=False, encoding="utf-8-sig")
-                        write_metadata(dated, {
-                            "kind": "industry_map",
-                            "point_in_time_status": "safe",
-                            "as_of_date": as_of_date,
-                            "data_source": "baostock/query_stock_industry",
-                        })
-                        return dict(zip(frame["code"], frame["industry"].fillna(""))), "baostock/query_stock_industry"
-                finally:
-                    bs.logout()
-        except Exception as exc:
-            print(f"industry refresh failed, using cache: {exc}")
+            print(f"AkShare industry refresh failed, using local cache: {exc}")
     if not os.path.exists(latest_path):
         return {}, "missing"
     frame = pd.read_csv(latest_path, dtype={"code": str})
@@ -348,18 +327,6 @@ def build_snapshot(universe, markets, report_period, industry_map):
     if result.empty:
         return result
     result["industry_known"] = result["industry"].fillna("").astype(str).str.strip().ne("")
-    result["industry_peer_count"] = result.groupby("industry")["code"].transform("count")
-    result["industry_mktcap_percentile"] = result.groupby("industry")["mktcap"].rank(pct=True)
-    result["industry_leader_proxy"] = (
-        result["industry_known"]
-        & (result["industry_peer_count"] >= 5)
-        & (result["industry_mktcap_percentile"] >= 0.80)
-    )
-    result["value_applicability_status"] = np.where(
-        (result["method"] == "VALUE") & result["industry_leader_proxy"],
-        "rule_eligible",
-        "not_proven",
-    )
     return result
 
 
@@ -404,11 +371,16 @@ def main(argv=None):
         "financial_updates_success": success,
         "financial_updates_failed": failed,
         "financial_revision_history_available": False,
-        "source_priority": ["akshare", "baostock", "local_cache"],
+        "source_priority": ["akshare", "local_cache"],
         "universe_source": universe_source,
         "industry_source": industry_source,
         "industry_known_count": int(snapshot.get("industry_known", pd.Series(dtype=bool)).sum()),
-        "industry_leader_proxy_count": int(snapshot.get("industry_leader_proxy", pd.Series(dtype=bool)).sum()),
+        "value_market_cap_eligible_count": int(
+            (
+                snapshot.get("method", pd.Series(dtype=str)).eq("VALUE")
+                & pd.to_numeric(snapshot.get("mktcap"), errors="coerce").ge(VALUE_MIN_MARKET_CAP)
+            ).sum()
+        ),
     }
     write_metadata(output, metadata)
     coverage_path = os.path.join(SNAPSHOT_DIR, "latest_coverage.json")
@@ -427,7 +399,3 @@ def main(argv=None):
         )
     if status == "unsafe":
         raise SystemExit(2)
-
-
-if __name__ == "__main__":
-    main()

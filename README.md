@@ -1,56 +1,79 @@
 # my_trade
 
-沪深 A 股收盘后研究与选股系统。系统依次完成三浪三市场结构、板块主线、因子选股、基本面截面、基本面筛选和日报推送；不连接券商，也不自动下单。策略口径见 [STRATEGY.md](STRATEGY.md)。
+沪深 A 股收盘后研究与选股系统。它负责行情与财务增量更新、Formula33 市场结构、板块主线、因子和基本面筛选、日报生成与 PushPlus 摘要推送；不连接券商，也不自动下单。选股口径见 [STRATEGY.md](STRATEGY.md)，架构和运维索引见 [docs/README.md](docs/README.md)。
 
-## 目录
+## 项目结构
 
 ```text
 apps/             命令行入口
 stock_research/   核心 Python 包
-config/           流水线与运行依赖配置
-scripts/          生产和运维脚本
-tests/            单元、集成、架构与回归测试
-docs/             架构和运维文档
-var/              缓存、数据库、日志、导出和本地凭证（不提交）
+config/           生产参数
+scripts/          Windows 生产与计划任务脚本
+tests/            单元、集成、架构和回归测试
+docs/             当前架构、数据和运维文档
+var/              缓存、数据库、状态、日志和导出（不提交）
 ```
 
-`stock_research` 内部按 `api`、`core`、`storage`、`market`、`indicators`、`strategies`、`pipelines`、`reporting` 和 `regression` 分层。仓库根目录不放业务 Python 脚本。
+## 生产流水线
 
-## 每日运行
+唯一完整生产入口是：
 
 ```powershell
 .\scripts\run_daily_analysis.ps1
 ```
 
-也可以直接运行唯一生产入口：
+也可以直接调用 Python：
 
 ```powershell
 & 'D:\ActionsRunner\my-trade\python\python.exe' -m apps.daily_pipeline --no-push
 ```
 
-只检查配置、导入和七步顺序而不访问网络：
+七步顺序固定为：
+
+```text
+1. formula33
+2. sector_stats
+3. sector_watch
+4. factor_selection
+5. fundamental_update
+6. fundamental_selection
+7. daily_report
+```
+
+`--no-push` 会完整生成结果但不发送 PushPlus，适合生产前复核。正式运行不带该参数；只有六个上游步骤全部成功、日报输入属于同一观察日且必需产物有效时，才允许生成并发送最终两部分摘要。任一必需步骤失败都不得推送。
+
+只检查配置、导入和步骤顺序，不访问行情接口：
 
 ```powershell
 & 'D:\ActionsRunner\my-trade\python\python.exe' -m apps.daily_pipeline --dry-run --no-push
 ```
 
-单步调试入口位于 `apps/`。例如：
+单步入口位于 `apps/`，只用于调试和故障恢复，不能另行拼接一套生产顺序。
 
-```powershell
-python -m apps.formula33 --help
-python -m apps.sector_analysis stats --help
-python -m apps.factor_selection --help
-```
+## Formula33 缓存与断点
+
+生产固定使用 AkShare 股票清单、交易日和前复权日线。日线同时持久化到本地 QFQ 缓存和 DuckDB，缓存版本为 `qfq-cache-v2`。
+
+- 已缓存股票只补抓缺少的交易日，不重复下载完整历史。
+- 中途取消后重跑，已完成股票直接复用缓存，从未完成位置继续。
+- 同一观察日和同一有效参数已完整成功时，完成清单直接命中。
+- 周末复跑最近交易日结果时输出 `network_fetch=0`，不访问网络。
+- 数据源失败不能伪装成停牌；存在可重试的数据不可用股票时，不写完成清单。
+
+2026-06-11 至 2026-07-10 的 21 个交易日是固定回归锚点：上市超过 300 天后的技术全量 191 只，观察日无交易排除 3 只，正式结果 188 只；总市值大于 100 亿元的独立池为 145 只。股票 `001331` 的 2026-05-27 前复权收盘价固定为 `48.08`。
 
 ## 运行数据
 
-- `var/cache/`：行情、财务和板块增量缓存；
-- `var/data/my_trade.duckdb`：DuckDB 数据库；
-- `var/exports/`：选股、市场和日报导出；
-- `var/logs/`：运行日志；
-- `var/state/`：断点和上次结果；
-- `var/secrets/`：本地凭证，GitHub Actions 优先使用 Secrets；
-- `var/tmp/`：测试临时数据。
+- `var/cache/`：AkShare 行情、财务、板块缓存和 Formula33 快照。
+- `var/data/my_trade.duckdb`：当前已落地的迁移、运行基础表、板块和日线持久化。
+- `var/state/`：完成清单、断点和上一交易日结果。
+- `var/exports/market/`：Formula33 与市场结构结果。
+- `var/exports/selection/`：因子和基本面选股结果。
+- `var/exports/reports/`：完整 HTML 日报。
+- `var/logs/`：生产运行日志。
+- `var/secrets/`：本地凭证；生产优先读取环境变量。
+
+DuckDB 当前只有文档列出的 7 张实际表，生产仍同时使用文件缓存和 CSV/Excel/HTML 产物；不能把尚未落地的目标表或查询服务当成现状。
 
 ## 验证
 
@@ -60,6 +83,8 @@ python -m apps.factor_selection --help
 & 'D:\ActionsRunner\my-trade\python\python.exe' -m stock_research.regression.output_baseline verify tests/regression/legacy-output-v1.json
 ```
 
-## GitHub Actions
+Formula33 的 188 只截图清单另有逐代码回归夹具，修改指标、复权、观察日资格或缓存逻辑后必须一并运行全量测试。
 
-[stock-selection.yml](.github/workflows/stock-selection.yml) 在自托管 Windows runner 上先执行完整测试，再调用 `scripts/run_daily_analysis.ps1`。缓存保留在 `var/cache/`，Artifact 上传 `var/logs/`、`var/exports/` 和覆盖率元数据。runner 重建脚本位于 `scripts/admin/install_github_runner.ps1`。
+## Windows 计划任务
+
+`scripts/setup_scheduled_task.bat` 创建每天 20:30 的 Windows 计划任务，调用 `scripts/run_daily_analysis.ps1`。运行脚本优先使用 `PYTHON_BIN`，否则使用项目固定解释器；它会设置 UTF-8、自动选择财报期，并在 Python 子进程运行期间按配置处理代理环境变量。

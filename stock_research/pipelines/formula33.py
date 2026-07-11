@@ -11,10 +11,12 @@ KD80 := K > 80;
 WR3 := WR1 < 20 AND WR2 < 20;
 RSI70 := SMA(MAX(CLOSE - REF(CLOSE, 1), 0), 9, 1)
     / SMA(ABS(CLOSE - REF(CLOSE, 1)), 9, 1) * 100 > 70;
-MKT_CAP := FINANCE(40) / 10000 > 100;
 LIST_DAYS := FINANCE(42) > 300;
-BASE := KD80 AND WR3 AND RSI70 AND MKT_CAP AND LIST_DAYS;
+BASE := KD80 AND WR3 AND RSI70 AND LIST_DAYS;
 XG: COUNT(BASE, 5) = 5;
+
+Market capitalization above CNY 10 billion is exported as a separate
+reference pool. It does not filter the formal technical-XG result.
 
 The script records the number of Shanghai/Shenzhen A shares matching XG on
 the latest N trading days. Rising for 3/5 days means initial/confirmed
@@ -37,8 +39,10 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from stock_research.core.completion_manifest import CompletionManifest
 from stock_research.core.paths import PATHS
 from stock_research.indicators.formula33 import calc_kdj_k, calc_rsi, calc_wr
+from stock_research.storage import Database, KlineRepository
 from stock_research.strategies.formula33 import (
     build_window_trend,
     classify_observation_status,
@@ -57,8 +61,19 @@ OUTPUT_DIR = str(PATHS.market_exports)
 ADJUST_FLAG_QFQ = "2"
 SHARE_CACHE_FILE = str(PATHS.cache / "formula33_share_capital.json")
 KLINE_CACHE_DIR = str(PATHS.cache / "formula33_kline")
+OBSERVATION_SPOT_CACHE_DIR = str(PATHS.cache / "formula33_observation_spot")
+FORMULA33_SNAPSHOT_DIR = str(PATHS.cache / "formula33_snapshots")
+TRADE_CALENDAR_CACHE_FILE = os.path.join(
+    FORMULA33_SNAPSHOT_DIR, "trade_calendar.json"
+)
 UNIVERSE_CACHE_FILE = str(PATHS.cache / "stock_universe.csv")
+FORMULA33_MANIFEST_FILE = str(PATHS.state / "formula33_completion.json")
+FORMULA33_CODE_VERSION = "formula33-v6"
+KLINE_QFQ_CACHE_VERSION = "qfq-cache-v2"
 REQUEST_RETRY_ERRORS = (BrokenPipeError, ConnectionError, TimeoutError, OSError)
+MIN_LIST_DATE_COVERAGE = 0.98
+MIN_MARKET_CAP_COVERAGE = 0.98
+MIN_OBSERVATION_STATUS_COVERAGE = 0.98
 
 
 def parse_args(argv=None):
@@ -115,6 +130,65 @@ def call_with_backoff(func, label, retries=4, retry_delay=1.5):
     raise last_exc
 
 
+def _atomic_write_csv(frame, path):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    temporary = f"{path}.{os.getpid()}.{time.time_ns()}.tmp"
+    try:
+        frame.to_csv(temporary, index=False, encoding="utf-8-sig")
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.remove(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _atomic_write_json(payload, path):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    temporary = f"{path}.{os.getpid()}.{time.time_ns()}.tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.remove(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _snapshot_path(kind, observation_date, suffix):
+    date_key = pd.Timestamp(observation_date).strftime("%Y%m%d")
+    return os.path.join(FORMULA33_SNAPSHOT_DIR, f"{kind}_{date_key}.{suffix}")
+
+
+def _lookup_coverage(universe, lookup):
+    universe_codes = set(universe["code"].dropna().astype(str))
+    covered = {
+        str(code)
+        for code, value in dict(lookup or {}).items()
+        if str(code) in universe_codes
+        and value is not None
+        and not pd.isna(value)
+        and str(value).strip()
+    }
+    return len(covered) / len(universe_codes) if universe_codes else 0.0
+
+
 def to_bs_code(raw_code):
     code = str(raw_code).strip()
     if "." in code:
@@ -156,16 +230,78 @@ def get_trade_dates(lookback, extra_days):
     return df["calendar_date"].tail(lookback).tolist()
 
 
-def get_trade_dates_akshare(lookback, extra_days):
-    df = ak.tool_trade_date_hist_sina()
-    if df is None or df.empty:
-        return []
-    df = df.copy()
-    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
-    end = pd.Timestamp.today().normalize()
+def _calendar_snapshot_is_reusable(payload, required_through):
+    dates = payload.get("trade_dates")
+    if not isinstance(dates, list) or not dates:
+        return False
+    parsed_dates = pd.to_datetime(pd.Series(dates), errors="coerce").dropna()
+    if parsed_dates.empty:
+        return False
+    required = pd.Timestamp(required_through).normalize()
+    if required <= parsed_dates.max().normalize():
+        return True
+    fetched_for = pd.to_datetime(payload.get("fetched_for_date"), errors="coerce")
+    if pd.isna(fetched_for):
+        return False
+    fetched_for = fetched_for.normalize()
+    if fetched_for == required:
+        return True
+    day_gap = (required - fetched_for).days
+    return (
+        fetched_for.weekday() == 4
+        and required.weekday() in (5, 6)
+        and day_gap == required.weekday() - fetched_for.weekday()
+    )
+
+
+def get_trade_dates_akshare(lookback, extra_days, required_through=None):
+    required = pd.Timestamp(required_through or pd.Timestamp.today()).normalize()
+    payload = _read_json(TRADE_CALENDAR_CACHE_FILE)
+    if _calendar_snapshot_is_reusable(payload, required):
+        all_dates = payload["trade_dates"]
+        cache_status = "hit"
+    else:
+        df = ak.tool_trade_date_hist_sina()
+        if df is None or df.empty or "trade_date" not in df.columns:
+            return []
+        parsed = pd.to_datetime(df["trade_date"], errors="coerce").dropna()
+        all_dates = sorted(set(parsed.dt.strftime("%Y-%m-%d")))
+        if not all_dates:
+            return []
+        payload = {
+            "version": 1,
+            "fetched_for_date": required.strftime("%Y-%m-%d"),
+            "trade_dates": all_dates,
+        }
+        _atomic_write_json(payload, TRADE_CALENDAR_CACHE_FILE)
+        cache_status = "write"
+    end = required
     start = end - pd.DateOffset(days=extra_days)
-    df = df[(df["trade_date"] >= start) & (df["trade_date"] <= end)].dropna(subset=["trade_date"])
-    return df["trade_date"].dt.strftime("%Y-%m-%d").tail(lookback).tolist()
+    selected = [
+        value
+        for value in all_dates
+        if start <= pd.Timestamp(value).normalize() <= end
+    ]
+    print(
+        f"Formula33 trade-calendar snapshot {cache_status}: "
+        f"through={required.strftime('%Y-%m-%d')} rows={len(selected)}"
+    )
+    return selected[-lookback:]
+
+
+def latest_trade_date_from_calendar_snapshot(as_of_date=None):
+    payload = _read_json(TRADE_CALENDAR_CACHE_FILE)
+    dates = pd.to_datetime(
+        pd.Series(payload.get("trade_dates", []), dtype="object"),
+        errors="coerce",
+    ).dropna()
+    if dates.empty:
+        return ""
+    as_of = pd.Timestamp(as_of_date or pd.Timestamp.today()).normalize()
+    dates = dates[dates.dt.normalize() <= as_of]
+    if dates.empty:
+        return ""
+    return dates.max().strftime("%Y-%m-%d")
 
 
 def select_trade_dates(trade_dates, start_date, end_date, lookback):
@@ -207,6 +343,216 @@ def parse_code_set(value):
         if item:
             codes.add(to_bs_code(item))
     return codes
+
+
+def build_completion_arguments(args, observation_date):
+    """Return only result-affecting arguments in their effective form."""
+    normalized_start_date = (
+        pd.Timestamp(args.start_date).strftime("%Y-%m-%d")
+        if args.start_date
+        else ""
+    )
+    return {
+        "lookback": int(args.lookback),
+        "start_date": normalized_start_date,
+        "end_date": str(observation_date),
+        "history_days": int(args.history_days),
+        "offset": int(args.offset),
+        "limit": int(args.limit),
+        "exclude_codes": sorted(parse_code_set(args.exclude_codes)),
+        "price_source": str(args.price_source),
+        "metadata_source": str(args.metadata_source),
+        "min_mktcap": float(args.min_mktcap),
+        "min_list_days": int(args.min_list_days),
+        "require_end_trade": bool(args.require_end_trade),
+        "market_cap_source": str(args.market_cap_source),
+        "missing_mktcap_policy": str(args.missing_mktcap_policy),
+    }
+
+
+def load_cached_universe():
+    try:
+        cached = pd.read_csv(UNIVERSE_CACHE_FILE, dtype=str)
+    except (OSError, ValueError, pd.errors.ParserError):
+        return pd.DataFrame()
+    if "code" not in cached.columns:
+        return pd.DataFrame()
+    cached = cached.dropna(subset=["code"]).copy()
+    cached["code"] = cached["code"].astype(str).str.strip()
+    return cached[cached["code"] != ""].drop_duplicates("code").reset_index(drop=True)
+
+
+def select_universe_for_run(universe, args, announce=False):
+    selected = universe.copy()
+    exclude_codes = parse_code_set(args.exclude_codes)
+    if exclude_codes:
+        before_exclude = len(selected)
+        selected = selected[~selected["code"].isin(exclude_codes)].reset_index(drop=True)
+        if announce:
+            print(
+                f"已排除股票 {len(exclude_codes)} 只，股票池 "
+                f"{before_exclude} -> {len(selected)}"
+            )
+    if args.offset:
+        selected = selected.iloc[args.offset:].reset_index(drop=True)
+    if args.limit > 0:
+        selected = selected.head(args.limit).reset_index(drop=True)
+    return selected
+
+
+def reuse_completed_manifest_without_network(args):
+    manifest = CompletionManifest(FORMULA33_MANIFEST_FILE)
+    payload = manifest.read()
+    observation_text = str(payload.get("observation_date", "")).strip()
+    observation = pd.to_datetime(observation_text, errors="coerce")
+    if pd.isna(observation):
+        return False
+    requested = pd.to_datetime(
+        resolve_auto_end_date(args.end_date, args.data_ready_time),
+        errors="coerce",
+    )
+    if pd.isna(requested):
+        return False
+    requested = requested.normalize()
+    observation = observation.normalize()
+    day_gap = (requested - observation).days
+    locally_safe = day_gap == 0 or (
+        observation.weekday() == 4
+        and requested.weekday() in (5, 6)
+        and day_gap == requested.weekday() - observation.weekday()
+    )
+    if not locally_safe:
+        return False
+    cached_universe = load_cached_universe()
+    if cached_universe.empty:
+        return False
+    cached_universe = select_universe_for_run(cached_universe, args)
+    if not manifest.matches(
+        observation_date=observation_text,
+        arguments=build_completion_arguments(args, observation_text),
+        universe_codes=cached_universe["code"].astype(str).tolist(),
+        code_version=FORMULA33_CODE_VERSION,
+    ):
+        return False
+    print(
+        f"Formula33 resume: completed manifest hit date={observation_text}; "
+        "network_fetch=0"
+    )
+    return True
+
+
+def require_lookup_coverage(label, universe, lookup, *, minimum):
+    universe_codes = set(universe["code"].dropna().astype(str))
+    available_codes = {
+        str(code)
+        for code, value in dict(lookup or {}).items()
+        if str(code) in universe_codes
+        and value is not None
+        and not pd.isna(value)
+        and str(value).strip()
+    }
+    coverage = len(available_codes) / len(universe_codes) if universe_codes else 0.0
+    if not universe_codes or coverage < float(minimum):
+        raise RuntimeError(
+            f"{label}覆盖率不足: covered={len(available_codes)} "
+            f"universe={len(universe_codes)} coverage={coverage:.1%} "
+            f"minimum={float(minimum):.1%}"
+        )
+    return coverage
+
+
+def observation_spot_cache_path(observation_date):
+    date_key = pd.Timestamp(observation_date).strftime("%Y%m%d")
+    return os.path.join(OBSERVATION_SPOT_CACHE_DIR, f"spot_{date_key}.csv")
+
+
+def _valid_observation_spot(snapshot, observation_date):
+    required = {"代码", "今开", "最高", "最低", "成交量", "成交额"}
+    if snapshot is None or snapshot.empty or not required.issubset(snapshot.columns):
+        return False
+    if "observation_date" not in snapshot.columns:
+        return False
+    dates = set(snapshot["observation_date"].dropna().astype(str))
+    return dates == {str(observation_date)}
+
+
+def load_observation_spot_snapshot(observation_date, *, allow_network):
+    path = observation_spot_cache_path(observation_date)
+    try:
+        cached = pd.read_csv(path, dtype={"代码": str})
+    except (FileNotFoundError, OSError, ValueError, pd.errors.ParserError):
+        cached = pd.DataFrame()
+    if _valid_observation_spot(cached, observation_date):
+        return cached
+    if not allow_network:
+        return pd.DataFrame()
+
+    snapshot = ak.stock_zh_a_spot()
+    if snapshot is None or snapshot.empty:
+        raise RuntimeError("akshare stock_zh_a_spot returned no observation snapshot")
+    snapshot = snapshot.copy()
+    snapshot["observation_date"] = str(observation_date)
+    if not _valid_observation_spot(snapshot, observation_date):
+        raise RuntimeError("observation snapshot is missing required quote fields")
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = f"{path}.{os.getpid()}.tmp"
+    try:
+        snapshot.to_csv(tmp_path, index=False, encoding="utf-8-sig")
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise RuntimeError(f"observation snapshot cache write failed: {exc}") from exc
+    return snapshot
+
+
+def build_observation_trade_status(universe, snapshot, *, minimum=0.98):
+    universe_codes = set(universe["code"].dropna().astype(str))
+    statuses = {code: "unknown" for code in universe_codes}
+    if snapshot is None or snapshot.empty:
+        return statuses, 0.0
+
+    data = snapshot.copy()
+    data["code"] = data["代码"].map(to_bs_code)
+    numeric_columns = ["今开", "最高", "最低", "成交量", "成交额"]
+    for column in numeric_columns:
+        data[column] = pd.to_numeric(data[column], errors="coerce")
+    data = data[data["code"].isin(universe_codes)].drop_duplicates("code", keep="last")
+    conclusive = 0
+    zero_columns = ["今开", "最高", "最低", "成交量", "成交额"]
+    for _, row in data.iterrows():
+        code = row["code"]
+        values = [row[column] for column in zero_columns]
+        if all(pd.notna(value) and float(value) == 0.0 for value in values):
+            statuses[code] = "suspended"
+            conclusive += 1
+        elif (
+            pd.notna(row["今开"])
+            and pd.notna(row["最高"])
+            and pd.notna(row["最低"])
+            and pd.notna(row["成交量"])
+            and pd.notna(row["成交额"])
+            and float(row["今开"]) > 0
+            and float(row["最高"]) > 0
+            and float(row["最低"]) > 0
+            and float(row["成交量"]) > 0
+            and float(row["成交额"]) > 0
+        ):
+            statuses[code] = "traded"
+            conclusive += 1
+
+    coverage = conclusive / len(universe_codes) if universe_codes else 0.0
+    if not universe_codes or coverage < float(minimum):
+        raise RuntimeError(
+            "observation trade-status coverage insufficient: "
+            f"covered={conclusive} universe={len(universe_codes)} "
+            f"coverage={coverage:.1%} minimum={float(minimum):.1%}"
+        )
+    return statuses, coverage
 
 
 def get_universe(latest_date):
@@ -257,13 +603,54 @@ def get_universe_akshare():
     )
     df = df[mask].copy()
     df = df[~df["code_name"].astype(str).str.contains("ST|退", na=False)]
-    result = df[["code", "code_name"]].drop_duplicates("code").reset_index(drop=True)
+    return df[["code", "code_name"]].drop_duplicates("code").reset_index(drop=True)
+
+
+def _valid_universe_frame(frame):
+    return (
+        isinstance(frame, pd.DataFrame)
+        and not frame.empty
+        and {"code", "code_name"}.issubset(frame.columns)
+        and frame["code"].notna().all()
+    )
+
+
+def load_universe_snapshot(observation_date):
+    path = _snapshot_path("universe", observation_date, "csv")
     try:
-        os.makedirs(os.path.dirname(UNIVERSE_CACHE_FILE), exist_ok=True)
-        result.to_csv(UNIVERSE_CACHE_FILE, index=False, encoding="utf-8-sig")
-    except OSError:
-        pass
-    return result
+        cached = pd.read_csv(path, dtype=str)
+    except (OSError, ValueError, pd.errors.ParserError):
+        cached = pd.DataFrame()
+    if _valid_universe_frame(cached):
+        general = load_cached_universe()
+        cached_codes = set(cached["code"].astype(str))
+        general_codes = (
+            set(general["code"].astype(str)) if not general.empty else set()
+        )
+        if cached_codes != general_codes:
+            _atomic_write_csv(cached, UNIVERSE_CACHE_FILE)
+        print(
+            f"Formula33 universe snapshot hit: date={observation_date} "
+            f"rows={len(cached)}"
+        )
+        return cached.drop_duplicates("code").reset_index(drop=True)
+
+    previous = load_cached_universe()
+    fresh = get_universe_akshare()
+    if not _valid_universe_frame(fresh):
+        return pd.DataFrame()
+    if len(previous) >= 100 and len(fresh) < int(np.ceil(len(previous) * 0.98)):
+        raise RuntimeError(
+            "Formula33 universe snapshot is unexpectedly truncated: "
+            f"fresh={len(fresh)} previous={len(previous)}"
+        )
+    _atomic_write_csv(fresh, path)
+    _atomic_write_csv(fresh, UNIVERSE_CACHE_FILE)
+    print(
+        f"Formula33 universe snapshot write: date={observation_date} "
+        f"rows={len(fresh)}"
+    )
+    return fresh
 
 
 def load_stock_basic():
@@ -300,6 +687,33 @@ def load_stock_basic_akshare():
     except Exception:
         pass
     return pd.DataFrame(rows)
+
+
+def load_stock_basic_snapshot(observation_date, universe):
+    path = _snapshot_path("stock_basic", observation_date, "csv")
+    try:
+        cached = pd.read_csv(path, dtype={"code": str})
+    except (OSError, ValueError, pd.errors.ParserError):
+        cached = pd.DataFrame()
+    if {"code", "ipoDate"}.issubset(cached.columns):
+        cached_lookup = dict(zip(cached["code"], cached["ipoDate"]))
+        if _lookup_coverage(universe, cached_lookup) >= MIN_LIST_DATE_COVERAGE:
+            print(
+                f"Formula33 stock-basic snapshot hit: date={observation_date} "
+                f"rows={len(cached)}"
+            )
+            return cached
+
+    fresh = load_stock_basic_akshare()
+    if {"code", "ipoDate"}.issubset(fresh.columns):
+        fresh_lookup = dict(zip(fresh["code"], fresh["ipoDate"]))
+        if _lookup_coverage(universe, fresh_lookup) >= MIN_LIST_DATE_COVERAGE:
+            _atomic_write_csv(fresh, path)
+            print(
+                f"Formula33 stock-basic snapshot write: date={observation_date} "
+                f"rows={len(fresh)}"
+            )
+    return fresh
 
 
 def get_tushare_token():
@@ -420,8 +834,19 @@ def fetch_total_share_from_gbjg(task):
         return code, None
 
 
-def load_market_caps_from_akshare_capital(universe, capital_workers=2, capital_sleep=0.08, retries=4, retry_delay=1.5):
-    spot = ak.stock_zh_a_spot()
+def load_market_caps_from_akshare_capital(
+    universe,
+    capital_workers=2,
+    capital_sleep=0.08,
+    retries=4,
+    retry_delay=1.5,
+    spot_snapshot=None,
+):
+    spot = (
+        spot_snapshot.copy()
+        if spot_snapshot is not None and not spot_snapshot.empty
+        else ak.stock_zh_a_spot()
+    )
     if spot is None or spot.empty:
         raise RuntimeError("akshare stock_zh_a_spot 无数据，无法取得当前价格")
     code_col = "代码"
@@ -486,7 +911,16 @@ def load_market_caps_from_akshare_capital(universe, capital_workers=2, capital_s
     return caps
 
 
-def load_market_caps(source, trade_date, universe=None, capital_workers=2, capital_sleep=0.08, retries=4, retry_delay=1.5):
+def load_market_caps(
+    source,
+    trade_date,
+    universe=None,
+    capital_workers=2,
+    capital_sleep=0.08,
+    retries=4,
+    retry_delay=1.5,
+    spot_snapshot=None,
+):
     if source == "none":
         print("已按 --market-cap-source none 跳过 FINANCE(40) 市值过滤，仅用于技术条件复核。")
         return {}, "none"
@@ -508,6 +942,7 @@ def load_market_caps(source, trade_date, universe=None, capital_workers=2, capit
                     capital_sleep=capital_sleep,
                     retries=retries,
                     retry_delay=retry_delay,
+                    spot_snapshot=spot_snapshot,
                 )
             else:
                 continue
@@ -519,6 +954,81 @@ def load_market_caps(source, trade_date, universe=None, capital_workers=2, capit
     raise RuntimeError("无法获取总市值数据；" + " | ".join(errors))
 
 
+def load_market_cap_snapshot(
+    source,
+    trade_date,
+    universe,
+    *,
+    capital_workers=2,
+    capital_sleep=0.08,
+    retries=4,
+    retry_delay=1.5,
+    spot_snapshot=None,
+):
+    if source == "none":
+        return load_market_caps(
+            source,
+            trade_date,
+            universe,
+            capital_workers=capital_workers,
+            capital_sleep=capital_sleep,
+            retries=retries,
+            retry_delay=retry_delay,
+            spot_snapshot=spot_snapshot,
+        )
+    safe_source = "".join(
+        char if char.isalnum() or char in {"-", "_"} else "_"
+        for char in str(source)
+    )
+    path = _snapshot_path(f"market_caps_{safe_source}", trade_date, "json")
+    payload = _read_json(path)
+    cached_caps = payload.get("market_caps")
+    if (
+        payload.get("observation_date") == str(trade_date)
+        and payload.get("requested_source") == str(source)
+        and isinstance(cached_caps, dict)
+        and _lookup_coverage(universe, cached_caps) >= MIN_MARKET_CAP_COVERAGE
+    ):
+        resolved_source = str(payload.get("resolved_source", source))
+        caps = {str(code): float(value) for code, value in cached_caps.items()}
+        print(
+            f"Formula33 market-cap snapshot hit: date={trade_date} "
+            f"source={resolved_source} rows={len(caps)}"
+        )
+        return caps, resolved_source
+
+    caps, resolved_source = load_market_caps(
+        source,
+        trade_date,
+        universe,
+        capital_workers=capital_workers,
+        capital_sleep=capital_sleep,
+        retries=retries,
+        retry_delay=retry_delay,
+        spot_snapshot=spot_snapshot,
+    )
+    if _lookup_coverage(universe, caps) >= MIN_MARKET_CAP_COVERAGE:
+        _atomic_write_json(
+            {
+                "version": 1,
+                "observation_date": str(trade_date),
+                "requested_source": str(source),
+                "resolved_source": str(resolved_source),
+                "market_caps": {
+                    str(code): float(value)
+                    for code, value in caps.items()
+                    if value is not None and not pd.isna(value)
+                },
+            },
+            path,
+        )
+        print(
+            f"Formula33 market-cap snapshot write: date={trade_date} "
+            f"source={resolved_source} rows={len(caps)}"
+        )
+    return caps, resolved_source
+
+
 def init_worker():
     bs.login()
 
@@ -526,6 +1036,71 @@ def init_worker():
 def kline_cache_path(source, code):
     safe_code = str(code).replace(".", "_")
     return os.path.join(KLINE_CACHE_DIR, source, f"{safe_code}.csv")
+
+
+def kline_no_trade_marker_path(source, code):
+    return f"{kline_cache_path(source, code)}.no-trade.json"
+
+
+def kline_cache_metadata_path(source, code):
+    return f"{kline_cache_path(source, code)}.meta.json"
+
+
+def _kline_cache_file_signature(source, code):
+    try:
+        stat = os.stat(kline_cache_path(source, code))
+    except OSError:
+        return {}
+    return {
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+def save_kline_cache_metadata(source, code, df):
+    normalized = normalize_kline_df(df)
+    signature = _kline_cache_file_signature(source, code)
+    if normalized.empty or not signature:
+        return False
+    payload = {
+        "version": KLINE_QFQ_CACHE_VERSION,
+        "source": str(source),
+        "code": str(code),
+        "rows": int(len(normalized)),
+        "min_date": str(normalized["date"].min()),
+        "max_date": str(normalized["date"].max()),
+        **signature,
+    }
+    _atomic_write_json(payload, kline_cache_metadata_path(source, code))
+    return True
+
+
+def kline_cache_metadata_matches(source, code, df):
+    if df is None or df.empty:
+        return False
+    payload = _read_json(kline_cache_metadata_path(source, code))
+    signature = _kline_cache_file_signature(source, code)
+    if not signature:
+        return False
+    normalized = normalize_kline_df(df)
+    return (
+        payload.get("version") == KLINE_QFQ_CACHE_VERSION
+        and payload.get("source") == str(source)
+        and payload.get("code") == str(code)
+        and payload.get("rows") == len(normalized)
+        and payload.get("min_date") == str(normalized["date"].min())
+        and payload.get("max_date") == str(normalized["date"].max())
+        and payload.get("size") == signature["size"]
+        and payload.get("mtime_ns") == signature["mtime_ns"]
+    )
+
+
+def invalidate_kline_cache_metadata(source, code):
+    try:
+        os.remove(kline_cache_metadata_path(source, code))
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def normalize_kline_df(df):
@@ -554,17 +1129,188 @@ def load_cached_kline(source, code):
     return pd.DataFrame()
 
 
+def load_persisted_kline(repository, source, code, start_date, end_date):
+    if repository is None:
+        return pd.DataFrame()
+    try:
+        return normalize_kline_df(
+            repository.load_stock_kline(
+                source,
+                code,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        )
+    except Exception as exc:
+        print(f"{code} DuckDB K线读取失败: {exc}")
+        return pd.DataFrame()
+
+
 def save_cached_kline(source, code, df):
     if df is None or df.empty:
-        return
+        return 0
     path = kline_cache_path(source, code)
+    tmp_path = f"{path}.{os.getpid()}.tmp"
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp_path = f"{path}.{os.getpid()}.tmp"
-        normalize_kline_df(df).to_csv(tmp_path, index=False, encoding="utf-8-sig")
+        normalized = normalize_kline_df(df)
+        if normalized.empty:
+            raise ValueError("K-line cache contains no valid OHLC rows")
+        normalized.to_csv(tmp_path, index=False, encoding="utf-8-sig")
+        with open(tmp_path, "r+b") as handle:
+            os.fsync(handle.fileno())
         os.replace(tmp_path, path)
-    except OSError as exc:
-        print(f"{code} K线缓存保存失败: {exc}")
+        return len(normalized)
+    except Exception as exc:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise RuntimeError(f"{code} CSV K-line cache write failed: {exc}") from exc
+
+
+def save_persisted_kline(repository, source, code, df, *, replace_range=None):
+    if repository is None or df is None or df.empty:
+        return 0
+    try:
+        normalized = normalize_kline_df(df)
+        if normalized.empty:
+            raise ValueError("K-line persistence contains no valid OHLC rows")
+        if replace_range is not None:
+            return repository.replace_stock_kline_range(
+                source,
+                code,
+                normalized,
+                start_date=replace_range[0],
+                end_date=replace_range[1],
+            )
+        return repository.upsert_stock_kline(source, code, normalized)
+    except Exception as exc:
+        raise RuntimeError(f"{code} DuckDB K-line write failed: {exc}") from exc
+
+
+def load_kline_no_trade_marker(source, code):
+    path = kline_no_trade_marker_path(source, code)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return {}
+    if (
+        str(payload.get("source", "")) != str(source)
+        or str(payload.get("code", "")) != str(code)
+    ):
+        return {}
+    observation_date = pd.to_datetime(
+        payload.get("observation_date"),
+        errors="coerce",
+    )
+    if pd.isna(observation_date):
+        return {}
+    return {
+        "source": str(source),
+        "code": str(code),
+        "observation_date": observation_date.strftime("%Y-%m-%d"),
+    }
+
+
+def save_kline_no_trade_marker(source, code, observation_date):
+    path = kline_no_trade_marker_path(source, code)
+    tmp_path = f"{path}.{os.getpid()}.tmp"
+    payload = {
+        "version": 1,
+        "source": str(source),
+        "code": str(code),
+        "observation_date": pd.Timestamp(observation_date).strftime("%Y-%m-%d"),
+    }
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=True, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise RuntimeError(f"{code} no-trade marker write failed: {exc}") from exc
+
+
+def _qfq_ohlc_changed(cached, fresh):
+    if cached is None or cached.empty or fresh is None or fresh.empty:
+        return False
+    old = normalize_kline_df(cached).set_index("date")
+    new = normalize_kline_df(fresh).set_index("date")
+    overlap = old.index.intersection(new.index)
+    if overlap.empty:
+        return False
+    for column in ("open", "high", "low", "close"):
+        if not np.allclose(
+            old.loc[overlap, column].to_numpy(dtype=float),
+            new.loc[overlap, column].to_numpy(dtype=float),
+            rtol=1e-6,
+            atol=1e-8,
+            equal_nan=True,
+        ):
+            return True
+    return False
+
+
+def _has_kline_overlap(cached, fresh):
+    if cached is None or cached.empty or fresh is None or fresh.empty:
+        return False
+    return bool(
+        set(normalize_kline_df(cached)["date"])
+        & set(normalize_kline_df(fresh)["date"])
+    )
+
+
+def _missing_expected_trade_dates(
+    cached,
+    fresh,
+    logical_start,
+    logical_end,
+    expected_trade_dates,
+):
+    if expected_trade_dates is None:
+        return []
+    expected = set()
+    for item in expected_trade_dates:
+        parsed = pd.to_datetime(item, errors="coerce")
+        if not pd.isna(parsed):
+            expected.add(parsed.strftime("%Y-%m-%d"))
+    expected = {
+        item for item in expected if logical_start <= item <= logical_end
+    }
+    available = set()
+    for frame in (cached, fresh):
+        if frame is not None and not frame.empty:
+            available.update(normalize_kline_df(frame)["date"].tolist())
+    return sorted(expected - available)
+
+
+def _missing_qfq_refresh_dates(cached, incremental, refreshed, start_date, end_date):
+    required = set()
+    for frame in (cached, incremental):
+        if frame is not None and not frame.empty:
+            in_window = filter_kline_range(frame, start_date, end_date)
+            required.update(in_window["date"].tolist())
+    refreshed_dates = set(normalize_kline_df(refreshed)["date"].tolist())
+    return sorted(required - refreshed_dates)
+
+
+def _fetch_kline_range(source, code, start_date, end_date, retries, retry_delay):
+    loader = load_kline_akshare if source == "akshare" else load_kline_baostock
+    return loader(
+        code,
+        start_date,
+        end_date,
+        retries=retries,
+        retry_delay=retry_delay,
+    )
 
 
 def filter_kline_range(df, start_date, end_date):
@@ -575,34 +1321,279 @@ def filter_kline_range(df, start_date, end_date):
     return df[mask].copy().reset_index(drop=True)
 
 
-def load_kline_with_cache(source, code, start_date, end_date, retries=4, retry_delay=1.5):
-    cached = load_cached_kline(source, code)
-    fetch_ranges = []
+def load_kline_with_cache(
+    source,
+    code,
+    start_date,
+    end_date,
+    retries=4,
+    retry_delay=1.5,
+    repository=None,
+    request_sleep=0.0,
+    expected_trade_dates=None,
+    observation_trade_status="unknown",
+    minimum_history_rows=0,
+):
+    required_history_rows = max(0, int(minimum_history_rows))
+    file_cached = load_cached_kline(source, code)
+    no_trade_marker = load_kline_no_trade_marker(source, code)
+    if not file_cached.empty and kline_cache_metadata_matches(
+        source,
+        code,
+        file_cached,
+    ):
+        file_window = filter_kline_range(file_cached, start_date, end_date)
+        marker_covers_end = (
+            observation_trade_status == "suspended"
+            and no_trade_marker.get("observation_date") == str(end_date)
+        )
+        endpoints_covered = (
+            file_cached["date"].min() <= start_date
+            and (
+                file_cached["date"].max() >= end_date
+                or marker_covers_end
+            )
+        )
+        if endpoints_covered and len(file_window) >= required_history_rows:
+            return file_window
+
+    persisted = load_persisted_kline(repository, source, code, start_date, end_date)
+    if (
+        repository is not None
+        and not file_cached.empty
+        and not persisted.empty
+        and _qfq_ohlc_changed(file_cached, persisted)
+    ):
+        file_cached = normalize_kline_df(
+            pd.concat([file_cached, persisted], ignore_index=True, sort=False)
+        )
+        save_cached_kline(source, code, file_cached)
+    if repository is not None and not file_cached.empty:
+        csv_in_range = filter_kline_range(file_cached, start_date, end_date)
+        csv_dates = set(csv_in_range["date"]) if not csv_in_range.empty else set()
+        database_dates = set(persisted["date"]) if not persisted.empty else set()
+        missing_in_database = csv_dates - database_dates
+        if missing_in_database:
+            invalidate_kline_cache_metadata(source, code)
+            save_persisted_kline(
+                repository,
+                source,
+                code,
+                csv_in_range[csv_in_range["date"].isin(missing_in_database)],
+            )
+    cached = normalize_kline_df(
+        pd.concat([file_cached, persisted], ignore_index=True, sort=False)
+        if not persisted.empty or not file_cached.empty
+        else pd.DataFrame()
+    )
+    effective_expected_trade_dates = set(expected_trade_dates or [])
+    if observation_trade_status == "suspended":
+        effective_expected_trade_dates.discard(str(end_date))
+    logical_fetch_ranges = []
     if not cached.empty:
         cached_min = cached["date"].min()
         cached_max = cached["date"].max()
-        if cached_min <= start_date and cached_max >= end_date:
+        cached_window = filter_kline_range(cached, start_date, end_date)
+        endpoints_covered = cached_min <= start_date and cached_max >= end_date
+        history_deep_enough = len(cached_window) >= required_history_rows
+        if endpoints_covered and history_deep_enough:
+            if repository is not None:
+                if file_cached.empty:
+                    save_cached_kline(source, code, cached)
+                save_kline_cache_metadata(source, code, cached)
             return filter_kline_range(cached, start_date, end_date)
-        if cached_min > start_date:
+        if endpoints_covered and not history_deep_enough:
+            logical_fetch_ranges.append((start_date, end_date))
+        elif cached_min > start_date:
             left_end = (pd.to_datetime(cached_min) - pd.DateOffset(days=1)).strftime("%Y-%m-%d")
             if start_date <= left_end:
-                fetch_ranges.append((start_date, left_end))
-        if cached_max < end_date:
+                logical_fetch_ranges.append((start_date, left_end))
+        if not endpoints_covered and cached_max < end_date:
             right_start = (pd.to_datetime(cached_max) + pd.DateOffset(days=1)).strftime("%Y-%m-%d")
             if right_start <= end_date:
-                fetch_ranges.append((right_start, end_date))
+                marker_matches = (
+                    observation_trade_status == "suspended"
+                    and no_trade_marker.get("observation_date") == str(end_date)
+                )
+                if not marker_matches:
+                    logical_fetch_ranges.append((right_start, end_date))
     else:
-        fetch_ranges.append((start_date, end_date))
+        logical_fetch_ranges.append((start_date, end_date))
 
-    for fetch_start, fetch_end in fetch_ranges:
-        if source == "akshare":
-            fresh = load_kline_akshare(code, fetch_start, fetch_end, retries=retries, retry_delay=retry_delay)
-        else:
-            fresh = load_kline_baostock(code, fetch_start, fetch_end, retries=retries, retry_delay=retry_delay)
-        if fresh is not None and not fresh.empty:
-            cached = pd.concat([cached, fresh], ignore_index=True, sort=False)
+    for logical_start, logical_end in logical_fetch_ranges:
+        request_start = logical_start
+        request_end = logical_end
+        if not cached.empty:
+            cached_min = cached["date"].min()
+            cached_max = cached["date"].max()
+            if logical_start > cached_max:
+                request_start = cached_max
+            elif logical_end < cached_min:
+                request_end = cached_min
+        if request_sleep > 0:
+            time.sleep(request_sleep)
+        fresh = normalize_kline_df(
+            _fetch_kline_range(
+                source,
+                code,
+                request_start,
+                request_end,
+                retries,
+                retry_delay,
+            )
+        )
+        overlap_requested = (
+            request_start < logical_start or request_end > logical_end
+        )
+        needs_full_refresh = _qfq_ohlc_changed(cached, fresh) or (
+            overlap_requested
+            and not fresh.empty
+            and not _has_kline_overlap(cached, fresh)
+        )
+        write_no_trade_marker = False
+        if needs_full_refresh:
+            refresh_start = min(
+                value
+                for value in [
+                    start_date,
+                    cached["date"].min() if not cached.empty else start_date,
+                    fresh["date"].min() if not fresh.empty else start_date,
+                ]
+                if value
+            )
+            refresh_end = max(
+                value
+                for value in [
+                    end_date,
+                    cached["date"].max() if not cached.empty else end_date,
+                    fresh["date"].max() if not fresh.empty else end_date,
+                ]
+                if value
+            )
+            if request_sleep > 0:
+                time.sleep(request_sleep)
+            refreshed = normalize_kline_df(
+                _fetch_kline_range(
+                    source,
+                    code,
+                    refresh_start,
+                    refresh_end,
+                    retries,
+                    retry_delay,
+                )
+            )
+            if refreshed.empty:
+                raise RuntimeError(
+                    f"{code} QFQ adjustment changed but full-window refresh was empty"
+                )
+            missing_refresh_dates = _missing_qfq_refresh_dates(
+                cached,
+                fresh,
+                refreshed,
+                refresh_start,
+                refresh_end,
+            )
+            missing_expected_dates = _missing_expected_trade_dates(
+                cached,
+                refreshed,
+                logical_start,
+                logical_end,
+                effective_expected_trade_dates,
+            )
+            if missing_refresh_dates or missing_expected_dates:
+                missing = sorted(
+                    set(missing_refresh_dates) | set(missing_expected_dates)
+                )
+                raise RuntimeError(
+                    f"{code} incomplete QFQ full-window refresh; "
+                    f"missing dates: {', '.join(missing[:10])}"
+                )
+            if len(filter_kline_range(refreshed, start_date, end_date)) < required_history_rows:
+                raise RuntimeError(
+                    f"{code} incomplete QFQ full-window refresh; "
+                    f"history rows below {required_history_rows}"
+                )
+            response_dates = set(refreshed["date"].tolist())
+            if (
+                observation_trade_status == "suspended"
+                and logical_start <= end_date <= logical_end
+                and end_date not in response_dates
+            ):
+                if not _has_kline_overlap(cached, refreshed):
+                    raise RuntimeError(
+                        f"{code} suspended observation response did not include "
+                        "a cached overlap date"
+                    )
+                write_no_trade_marker = True
+            outside_window = cached[
+                (cached["date"] < refresh_start) | (cached["date"] > refresh_end)
+            ]
+            cached = normalize_kline_df(
+                pd.concat([outside_window, refreshed], ignore_index=True, sort=False)
+            )
+            invalidate_kline_cache_metadata(source, code)
+            save_persisted_kline(
+                repository,
+                source,
+                code,
+                refreshed,
+                replace_range=(refresh_start, refresh_end),
+            )
             save_cached_kline(source, code, cached)
-    return filter_kline_range(cached, start_date, end_date)
+            if repository is not None:
+                save_kline_cache_metadata(source, code, cached)
+        else:
+            missing_expected_dates = _missing_expected_trade_dates(
+                cached,
+                fresh,
+                logical_start,
+                logical_end,
+                effective_expected_trade_dates,
+            )
+            if missing_expected_dates:
+                raise RuntimeError(
+                    f"{code} incomplete K-line response; missing expected trade "
+                    f"dates: {', '.join(missing_expected_dates[:10])}"
+                )
+            response_dates = set(fresh["date"].tolist()) if not fresh.empty else set()
+            if (
+                observation_trade_status == "suspended"
+                and logical_start <= end_date <= logical_end
+                and end_date not in response_dates
+            ):
+                if not _has_kline_overlap(cached, fresh):
+                    raise RuntimeError(
+                        f"{code} suspended observation response did not include "
+                        "a cached overlap date"
+                    )
+                write_no_trade_marker = True
+        if not needs_full_refresh and not fresh.empty:
+            candidate = normalize_kline_df(
+                pd.concat([cached, fresh], ignore_index=True, sort=False)
+            )
+            if len(filter_kline_range(candidate, start_date, end_date)) < required_history_rows:
+                raise RuntimeError(
+                    f"{code} incomplete K-line response; "
+                    f"history rows below {required_history_rows}"
+                )
+            cached = candidate
+            save_cached_kline(source, code, cached)
+            save_persisted_kline(repository, source, code, fresh)
+            if repository is not None:
+                save_kline_cache_metadata(source, code, cached)
+        if write_no_trade_marker:
+            save_kline_no_trade_marker(source, code, end_date)
+    result = filter_kline_range(cached, start_date, end_date)
+    if len(result) < required_history_rows:
+        raise RuntimeError(
+            f"{code} incomplete K-line response; "
+            f"history rows below {required_history_rows}"
+        )
+    if repository is not None and not cached.empty:
+        if file_cached.empty:
+            save_cached_kline(source, code, cached)
+        save_kline_cache_metadata(source, code, cached)
+    return result
 
 
 def load_kline_baostock(code, start_date, end_date, retries=4, retry_delay=1.5):
@@ -636,6 +1627,27 @@ def load_kline_akshare(code, start_date, end_date, retries=4, retry_delay=1.5):
     else:
         market = "sh" if pure.startswith(("6", "9")) else "sz"
     daily_symbol = f"{market}{pure}"
+
+    if pure.startswith("689"):
+        df = call_with_backoff(
+            lambda: ak.stock_zh_a_hist_tx(
+                symbol=daily_symbol,
+                start_date=str(start_date).replace("-", ""),
+                end_date=str(end_date).replace("-", ""),
+                adjust="qfq",
+                timeout=15,
+            ),
+            f"{code} akshare腾讯CDR前复权K线",
+            retries=retries,
+            retry_delay=retry_delay,
+        )
+        if df is None or df.empty:
+            return pd.DataFrame()
+        df = df.copy()
+        df["code"] = code
+        if "volume" not in df.columns and "amount" in df.columns:
+            df = df.rename(columns={"amount": "volume"})
+        return df
 
     def fetch_daily():
         return ak.stock_zh_a_daily(
@@ -692,6 +1704,12 @@ def load_kline_akshare(code, start_date, end_date, retries=4, retry_delay=1.5):
 
 
 def fetch_one_stock(task):
+    if len(task) == 16:
+        task = (*task, False, "unknown")
+    elif len(task) == 17:
+        task = (*task, "unknown")
+    elif len(task) != 18:
+        raise ValueError(f"fetch task must contain 16, 17, or 18 values, got {len(task)}")
     (
         code,
         name,
@@ -709,23 +1727,53 @@ def fetch_one_stock(task):
         debug_filters,
         require_end_trade,
         missing_mktcap_policy,
+        persist_kline,
+        observation_trade_status,
     ) = task
-    if sleep > 0:
-        time.sleep(sleep)
     if ipo_date is None:
         return []
-    mktcap_missing_ok = min_mktcap is not None and mktcap_yi is None and missing_mktcap_policy == "pass"
-    if min_mktcap is not None and mktcap_yi is None and not mktcap_missing_ok:
+    ipo_ts = pd.to_datetime(ipo_date, errors="coerce")
+    if pd.isna(ipo_ts):
         return []
+    end_ts = pd.to_datetime(end_date, errors="coerce")
+    if pd.isna(end_ts):
+        raise ValueError(f"invalid K-line end date: {end_date}")
+    current_list_days = (end_ts - ipo_ts).days
+    if current_list_days <= min_list_days:
+        return []
+    requested_start = pd.to_datetime(start_date, errors="coerce")
+    if pd.isna(requested_start):
+        raise ValueError(f"invalid K-line start date: {start_date}")
+    effective_start_date = max(requested_start, ipo_ts).strftime("%Y-%m-%d")
+    eligible_trade_dates = [
+        value
+        for value in date_set
+        if pd.to_datetime(value, errors="coerce") >= ipo_ts
+    ]
+    minimum_history_rows = min(
+        30,
+        max(1, int(len(eligible_trade_dates) * 0.8)),
+    )
+    mktcap_missing_ok = (
+        min_mktcap is not None
+        and mktcap_yi is None
+        and missing_mktcap_policy == "pass"
+    )
     fetch_error = ""
+    kline_repository = KlineRepository(Database()) if persist_kline else None
     try:
         df = load_kline_with_cache(
             price_source,
             code,
-            start_date,
+            effective_start_date,
             end_date,
             retries=retries,
             retry_delay=retry_delay,
+            repository=kline_repository,
+            request_sleep=sleep,
+            expected_trade_dates={end_date},
+            observation_trade_status=observation_trade_status,
+            minimum_history_rows=minimum_history_rows,
         )
     except Exception as exc:
         fetch_error = str(exc)
@@ -763,21 +1811,29 @@ def fetch_one_stock(task):
     wr10 = calc_wr(df, 10)
     wr20 = calc_wr(df, 20)
     rsi9 = calc_rsi(df["close"], 9)
-    latest_close = df["close"].iloc[-1]
-    if min_mktcap is not None and (not latest_close or pd.isna(latest_close)):
-        return []
-    ipo_ts = pd.to_datetime(ipo_date, errors="coerce")
-    if pd.isna(ipo_ts):
-        return []
-    current_list_days = (pd.to_datetime(end_date) - ipo_ts).days
-    current_mktcap_ok = min_mktcap is None or mktcap_missing_ok or float(mktcap_yi) > min_mktcap
-    current_list_days_ok = current_list_days > min_list_days
+    current_mktcap_ok = bool(
+        min_mktcap is not None
+        and (
+            mktcap_missing_ok
+            or (
+                mktcap_yi is not None
+                and not pd.isna(mktcap_yi)
+                and float(mktcap_yi) > float(min_mktcap)
+            )
+        )
+    )
+    list_days = (
+        pd.to_datetime(df["date"], errors="coerce") - ipo_ts
+    ).dt.days
+    list_days_ok = list_days > min_list_days
 
     kd80 = k > 80
     wr3 = (wr10 < 20) & (wr20 < 20)
     rsi70 = rsi9 > 70
-    base = kd80 & wr3 & rsi70 & current_mktcap_ok & current_list_days_ok
+    base = kd80 & wr3 & rsi70 & list_days_ok
     xg = base.rolling(5, min_periods=5).sum() == 5
+    market_cap_base = base & current_mktcap_ok
+    market_cap_xg = market_cap_base.rolling(5, min_periods=5).sum() == 5
 
     hits = []
     debug_rows = []
@@ -786,8 +1842,10 @@ def fetch_one_stock(task):
         if row["date"] not in date_set:
             continue
         row_date = pd.to_datetime(row["date"], errors="coerce")
-        list_days = (row_date - ipo_ts).days if pd.notna(row_date) else current_list_days
-        if min_mktcap is None or mktcap_missing_ok:
+        row_list_days = (
+            (row_date - ipo_ts).days if pd.notna(row_date) else current_list_days
+        )
+        if min_mktcap is None or mktcap_yi is None or pd.isna(mktcap_yi):
             mktcap_at_date = np.nan
         else:
             mktcap_at_date = float(mktcap_yi)
@@ -801,11 +1859,14 @@ def fetch_one_stock(task):
                 "wr3": bool(wr3.loc[idx]),
                 "rsi70": bool(rsi70.loc[idx]),
                 "mktcap_ok": bool(current_mktcap_ok),
-                "list_days_ok": bool(current_list_days_ok),
+                "list_days_ok": bool(list_days_ok.loc[idx]),
                 "base_ok": bool(base.loc[idx]),
                 "xg_ok": bool(xg.loc[idx]),
+                "market_cap_ok": bool(current_mktcap_ok),
+                "market_cap_base_ok": bool(market_cap_base.loc[idx]),
+                "market_cap_xg_ok": bool(market_cap_xg.loc[idx]),
             })
-        if not current_list_days_ok or not current_mktcap_ok:
+        if not bool(list_days_ok.loc[idx]):
             continue
         record = {
             "date": row["date"],
@@ -813,11 +1874,12 @@ def fetch_one_stock(task):
             "name": name,
             "close": row["close"],
             "mktcap_yi": round(mktcap_at_date, 2) if pd.notna(mktcap_at_date) else np.nan,
-            "list_days": int(list_days),
+            "list_days": int(row_list_days),
             "kdj_k": round(float(k.loc[idx]), 2),
             "wr10": round(float(wr10.loc[idx]), 2),
             "wr20": round(float(wr20.loc[idx]), 2),
             "rsi9": round(float(rsi9.loc[idx]), 2),
+            "market_cap_ok": bool(current_mktcap_ok),
         }
         if bool(base.loc[idx]):
             base_record = record.copy()
@@ -827,6 +1889,21 @@ def fetch_one_stock(task):
             xg_record = record.copy()
             xg_record["signal_type"] = "XG"
             hits.append(xg_record)
+        if bool(market_cap_base.loc[idx]):
+            market_cap_base_record = record.copy()
+            market_cap_base_record["signal_type"] = "MARKET_CAP_BASE"
+            hits.append(market_cap_base_record)
+        if bool(market_cap_xg.loc[idx]):
+            market_cap_xg_record = record.copy()
+            market_cap_xg_record["signal_type"] = "MARKET_CAP_XG"
+            hits.append(market_cap_xg_record)
+    coverage_row = {
+        "signal_type": "TRADE_COVERAGE",
+        "code": code,
+        "covered_dates": tuple(
+            df.loc[df["date"].isin(date_set), "date"].drop_duplicates()
+        ),
+    }
     status_row = {
         "signal_type": "STATUS",
         "code": code,
@@ -835,7 +1912,7 @@ def fetch_one_stock(task):
         "observation_status": observation_status,
         "error": fetch_error,
     }
-    return hits + debug_rows + [status_row]
+    return hits + debug_rows + [coverage_row, status_row]
 
 
 def calc_streaks(counts):
@@ -876,7 +1953,13 @@ def calc_streaks(counts):
     return pd.DataFrame(rows)
 
 
-def build_formula_summary(hits, trade_dates, output_days=21):
+def build_formula_summary(
+    hits,
+    trade_dates,
+    output_days=21,
+    trade_coverage=None,
+    current_statuses=None,
+):
     """Combine compatibility daily counts with rolling breadth statistics."""
     dates = [str(value) for value in trade_dates]
     if hits is None or hits.empty or "signal_type" not in hits.columns:
@@ -901,6 +1984,8 @@ def build_formula_summary(hits, trade_dates, output_days=21):
         dates,
         window=21,
         output_days=output_days,
+        trade_coverage=trade_coverage,
+        current_statuses=current_statuses,
     )
     summary = compatibility.merge(rolling, on="date", how="left")
     return summary[
@@ -913,6 +1998,11 @@ def build_formula_summary(hits, trade_dates, output_days=21):
             "down_streak",
             "signal",
             "window_unique_count",
+            "technical_unique_count",
+            "tradable_unique_count",
+            "window_change",
+            "window_up_streak",
+            "window_down_streak",
             "window_trend_slope",
             "trend_up_streak",
             "trend_down_streak",
@@ -927,6 +2017,8 @@ def save_workbook(
     sample=False,
     unique_hits=None,
     technical_unique_hits=None,
+    market_cap_unique_hits=None,
+    suspended_technical_hits=None,
     statuses=None,
 ):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -944,11 +2036,17 @@ def save_workbook(
         column
         for column in [
             "window_unique_count",
+            "window_change",
+            "window_up_streak",
+            "window_down_streak",
             "window_trend_slope",
             "trend_up_streak",
             "trend_down_streak",
             "trend_signal",
+            "technical_unique_count",
             "tradable_unique_count",
+            "market_cap_unique_count",
+            "market_cap_technical_unique_count",
             "suspended_count",
             "unavailable_count",
         ]
@@ -967,10 +2065,17 @@ def save_workbook(
     ws2.append(["连续下降"] + summary["down_streak"].tolist())
     ws2.append(["结构信号"] + summary["signal"].tolist())
     if "window_unique_count" in summary.columns:
-        ws2.append(["21日XG技术去重"] + summary["window_unique_count"].tolist())
-        ws2.append(["21日去重趋势斜率"] + summary["window_trend_slope"].tolist())
-        ws2.append(["连续正趋势"] + summary["trend_up_streak"].tolist())
-        ws2.append(["连续负趋势"] + summary["trend_down_streak"].tolist())
+        ws2.append(["21日XG可交易技术去重"] + summary["window_unique_count"].tolist())
+        ws2.append(["21日节点较前节点变化"] + summary["window_change"].tolist())
+        ws2.append(["21日节点连续上升"] + summary["window_up_streak"].tolist())
+        ws2.append(["21日节点连续下降"] + summary["window_down_streak"].tolist())
+        if "technical_unique_count" in summary.columns:
+            ws2.append(["21日XG技术全量"] + summary["technical_unique_count"].tolist())
+        if "market_cap_unique_count" in summary.columns:
+            ws2.append(["21日市值大于100亿池"] + summary["market_cap_unique_count"].tolist())
+        ws2.append(["21日节点回归趋势斜率"] + summary["window_trend_slope"].tolist())
+        ws2.append(["斜率连续为正"] + summary["trend_up_streak"].tolist())
+        ws2.append(["斜率连续为负"] + summary["trend_down_streak"].tolist())
 
     ws3 = wb.create_sheet("命中股票")
     if hits.empty:
@@ -981,25 +2086,37 @@ def save_workbook(
         for row in hits[cols].to_dict("records"):
             ws3.append([row.get(col) for col in cols])
 
-    ws4 = wb.create_sheet("最近XG去重")
+    ws4 = wb.create_sheet("21日技术可交易")
     unique_cols = ["date", "code", "name", "close", "mktcap_yi", "list_days", "kdj_k", "wr10", "wr20", "rsi9"]
     ws4.append(unique_cols)
     if unique_hits is not None and not unique_hits.empty:
         for row in unique_hits[unique_cols].to_dict("records"):
             ws4.append([row.get(col) for col in unique_cols])
 
-    ws5 = wb.create_sheet("21日技术XG去重")
+    ws5 = wb.create_sheet("21日技术全量")
     ws5.append(unique_cols)
     if technical_unique_hits is not None and not technical_unique_hits.empty:
         for row in technical_unique_hits[unique_cols].to_dict("records"):
             ws5.append([row.get(col) for col in unique_cols])
 
-    ws6 = wb.create_sheet("观察日状态")
+    ws6 = wb.create_sheet("市值大于100亿池")
+    ws6.append(unique_cols)
+    if market_cap_unique_hits is not None and not market_cap_unique_hits.empty:
+        for row in market_cap_unique_hits[unique_cols].to_dict("records"):
+            ws6.append([row.get(col) for col in unique_cols])
+
+    ws7 = wb.create_sheet("停牌技术命中诊断")
+    ws7.append(unique_cols)
+    if suspended_technical_hits is not None and not suspended_technical_hits.empty:
+        for row in suspended_technical_hits[unique_cols].to_dict("records"):
+            ws7.append([row.get(col) for col in unique_cols])
+
+    ws8 = wb.create_sheet("观察日状态")
     status_cols = ["code", "name", "latest_data_date", "observation_status", "error"]
-    ws6.append(status_cols)
+    ws8.append(status_cols)
     if statuses is not None and not statuses.empty:
         for row in statuses[status_cols].to_dict("records"):
-            ws6.append([row.get(col) for col in status_cols])
+            ws8.append([row.get(col) for col in status_cols])
 
     yellow = PatternFill("solid", fgColor="FFF2CC")
     green = PatternFill("solid", fgColor="E2F0D9")
@@ -1059,6 +2176,9 @@ def main(argv=None):
         print(summary.tail(8).to_string(index=False))
         return
 
+    if reuse_completed_manifest_without_network(args):
+        return 0
+
     bs_available = False
     if args.price_source == "baostock" or args.metadata_source in ("baostock", "auto"):
         lg = bs.login()
@@ -1069,6 +2189,9 @@ def main(argv=None):
                 raise SystemExit("Baostock不可用时不能使用 --price-source baostock，请改用 --price-source akshare")
     try:
         calculation_days = args.lookback * 3 - 2
+        effective_end_date = resolve_auto_end_date(
+            args.end_date, args.data_ready_time
+        )
         raw_trade_dates = (
             get_trade_dates(calculation_days + 5, args.history_days + 90)
             if bs_available and args.metadata_source in ("baostock", "auto")
@@ -1076,13 +2199,14 @@ def main(argv=None):
         )
         if len(raw_trade_dates) < calculation_days:
             raw_trade_dates = get_trade_dates_akshare(
-                calculation_days + 5, args.history_days + 90
+                calculation_days + 5,
+                args.history_days + 90,
+                required_through=effective_end_date,
             )
         if not raw_trade_dates or (
             not args.start_date and len(raw_trade_dates) < calculation_days
         ):
             raise SystemExit("交易日不足，无法统计")
-        effective_end_date = resolve_auto_end_date(args.end_date, args.data_ready_time)
         if not args.end_date:
             print(f"未指定 --end-date，按数据可用时间 {args.data_ready_time} 使用截止日: {effective_end_date}")
         trade_dates = select_trade_dates(
@@ -1099,10 +2223,26 @@ def main(argv=None):
             )
         output_dates = trade_dates[-args.lookback:]
         latest_date = trade_dates[-1]
+        completion_manifest = CompletionManifest(FORMULA33_MANIFEST_FILE)
+        completion_arguments = build_completion_arguments(args, latest_date)
+        cached_universe = load_cached_universe()
+        if not cached_universe.empty:
+            cached_universe = select_universe_for_run(cached_universe, args)
+            if completion_manifest.matches(
+                observation_date=latest_date,
+                arguments=completion_arguments,
+                universe_codes=cached_universe["code"].astype(str).tolist(),
+                code_version=FORMULA33_CODE_VERSION,
+            ):
+                print(
+                    f"Formula33 resume: completed manifest hit date={latest_date}; "
+                    "network_fetch=0"
+                )
+                return 0
         if bs_available and args.metadata_source == "baostock":
             universe_date, universe = get_universe_with_fallback(trade_dates)
         else:
-            universe_date, universe = latest_date, get_universe_akshare()
+            universe_date, universe = latest_date, load_universe_snapshot(latest_date)
         if universe.empty:
             raise SystemExit("无法获取沪深A股股票池")
         if universe_date != latest_date:
@@ -1124,23 +2264,61 @@ def main(argv=None):
             print(f"已按股票池最新日期裁剪统计窗口，最新统计日: {latest_date}")
         print(f"本次统计区间: {trade_dates[0]} ~ {trade_dates[-1]}，共 {len(trade_dates)} 个交易日")
         start_date = (pd.to_datetime(trade_dates[0]) - pd.DateOffset(days=args.history_days)).strftime("%Y-%m-%d")
-        exclude_codes = parse_code_set(args.exclude_codes)
-        if exclude_codes:
-            before_exclude = len(universe)
-            universe = universe[~universe["code"].isin(exclude_codes)].reset_index(drop=True)
-            print(f"已排除股票 {len(exclude_codes)} 只，股票池 {before_exclude} -> {len(universe)}")
-        if args.offset:
-            universe = universe.iloc[args.offset:].reset_index(drop=True)
-        if args.limit > 0:
-            universe = universe.head(args.limit)
+        universe = select_universe_for_run(universe, args, announce=True)
+        completion_arguments = build_completion_arguments(args, latest_date)
+        universe_codes = universe["code"].astype(str).tolist()
+        if completion_manifest.matches(
+            observation_date=latest_date,
+            arguments=completion_arguments,
+            universe_codes=universe_codes,
+            code_version=FORMULA33_CODE_VERSION,
+        ):
+            print(
+                f"Formula33 resume: completed manifest hit date={latest_date}; "
+                "network_fetch=0"
+            )
+            return 0
+        Database().initialize()
+        print("DuckDB K线持久化已启用：每只股票查到后立即写入 raw.stock_kline_daily，并保留CSV缓存。")
         basic = load_stock_basic() if bs_available and args.metadata_source == "baostock" else pd.DataFrame()
         if basic.empty:
-            basic = load_stock_basic_akshare()
+            basic = load_stock_basic_snapshot(latest_date, universe)
         list_date_map = {}
         if not basic.empty and "code" in basic.columns and "ipoDate" in basic.columns:
             list_date_map = dict(zip(basic["code"], basic["ipoDate"]))
+        list_date_coverage = require_lookup_coverage(
+            "上市日期",
+            universe,
+            list_date_map,
+            minimum=MIN_LIST_DATE_COVERAGE,
+        )
+        latest_calendar_date = latest_trade_date_from_calendar_snapshot()
+        spot_snapshot = load_observation_spot_snapshot(
+            latest_date,
+            allow_network=bool(latest_calendar_date)
+            and latest_date == latest_calendar_date,
+        )
+        observation_trade_status, observation_status_coverage = (
+            build_observation_trade_status(
+                universe,
+                spot_snapshot,
+                minimum=MIN_OBSERVATION_STATUS_COVERAGE,
+            )
+            if not spot_snapshot.empty
+            else ({code: "unknown" for code in universe_codes}, 0.0)
+        )
+        suspended_codes = {
+            code
+            for code, status in observation_trade_status.items()
+            if status == "suspended"
+        }
+        print(
+            "观察日交易状态: "
+            f"coverage={observation_status_coverage:.1%} "
+            f"confirmed_suspended={len(suspended_codes)}"
+        )
         try:
-            cap_map, cap_source = load_market_caps(
+            cap_map, cap_source = load_market_cap_snapshot(
                 args.market_cap_source,
                 latest_date,
                 universe,
@@ -1148,10 +2326,21 @@ def main(argv=None):
                 capital_sleep=args.capital_sleep,
                 retries=args.retries,
                 retry_delay=args.retry_delay,
+                spot_snapshot=spot_snapshot,
             )
         except Exception as exc:
             raise SystemExit(f"{exc}\n该公式需要 FINANCE(40)>100亿；可配置 Tushare token，或网络可用时使用 akshare。")
         min_mktcap = None if cap_source == "none" else args.min_mktcap
+        market_cap_coverage = (
+            1.0
+            if cap_source == "none"
+            else require_lookup_coverage(
+                "总市值",
+                universe,
+                cap_map,
+                minimum=MIN_MARKET_CAP_COVERAGE,
+            )
+        )
 
         date_set = set(trade_dates)
         tasks = []
@@ -1175,6 +2364,8 @@ def main(argv=None):
                 args.debug_filters,
                 args.require_end_trade,
                 args.missing_mktcap_policy,
+                True,
+                observation_trade_status.get(code, "unknown"),
             ))
 
         hits = []
@@ -1197,12 +2388,14 @@ def main(argv=None):
                     if idx % 200 == 0:
                         hit_count = sum(item.get("signal_type") in {"BASE", "XG"} for item in hits)
                         print(f"进度 {idx}/{len(tasks)}，命中记录 {hit_count}")
+                        print("K线持久化: 已逐股写入 DuckDB raw.stock_kline_daily，并同步CSV缓存，可中断续跑")
         else:
             for idx, task in enumerate(tasks, start=1):
                 hits.extend(fetch_one_stock(task))
                 if idx % 200 == 0:
                     hit_count = sum(item.get("signal_type") in {"BASE", "XG"} for item in hits)
                     print(f"进度 {idx}/{len(tasks)}，命中记录 {hit_count}")
+                    print("K线持久化: 已逐股写入 DuckDB raw.stock_kline_daily，并同步CSV缓存，可中断续跑")
             if bs_available:
                 bs.logout()
 
@@ -1211,10 +2404,16 @@ def main(argv=None):
             statuses_df = pd.DataFrame(
                 columns=["code", "name", "latest_data_date", "observation_status", "error"]
             )
+            coverage_df = pd.DataFrame(columns=["code", "covered_dates"])
             hits_df = pd.DataFrame()
         else:
             statuses_df = all_rows_df[all_rows_df["signal_type"] == "STATUS"].copy()
-            hits_df = all_rows_df[all_rows_df["signal_type"] != "STATUS"].copy()
+            coverage_df = all_rows_df[
+                all_rows_df["signal_type"] == "TRADE_COVERAGE"
+            ].copy()
+            hits_df = all_rows_df[
+                ~all_rows_df["signal_type"].isin({"STATUS", "TRADE_COVERAGE"})
+            ].copy()
         if args.debug_filters and not hits_df.empty and "signal_type" in hits_df.columns:
             debug_df = hits_df[hits_df["signal_type"] == "DEBUG"].copy()
             if not debug_df.empty:
@@ -1228,15 +2427,22 @@ def main(argv=None):
             window_base_unique = 0
             window_xg_unique = 0
             window_xg_technical_unique = 0
+            window_market_cap_unique = 0
+            window_market_cap_technical_unique = 0
             suspended_count = 0
             unavailable_count = int(
                 statuses_df["observation_status"].eq("data_unavailable").sum()
             ) if not statuses_df.empty else 0
             unique_xg_hits = pd.DataFrame()
             technical_unique_xg_hits = pd.DataFrame()
+            market_cap_unique_xg_hits = pd.DataFrame()
+            suspended_technical_hits = pd.DataFrame()
         else:
             xg_hits = hits_df[hits_df["signal_type"] == "XG"]
             base_hits = hits_df[hits_df["signal_type"] == "BASE"]
+            market_cap_xg_hits = hits_df[
+                hits_df["signal_type"] == "MARKET_CAP_XG"
+            ]
             window_base_unique = int(
                 base_hits[base_hits["date"].isin(output_dates)]["code"].nunique()
             )
@@ -1245,13 +2451,23 @@ def main(argv=None):
                 window_xg_hits,
                 statuses_df,
             )
-            unique_xg_hits = (
-                eligible_unique_xg_hits
-                if args.require_end_trade
-                else technical_unique_xg_hits.copy()
-            )
+            unique_xg_hits = eligible_unique_xg_hits
             window_xg_unique = int(unique_xg_hits["code"].nunique())
             window_xg_technical_unique = int(technical_unique_xg_hits["code"].nunique())
+            window_market_cap_hits = market_cap_xg_hits[
+                market_cap_xg_hits["date"].isin(output_dates)
+            ].copy()
+            (
+                market_cap_technical_unique_xg_hits,
+                market_cap_tradable_unique_xg_hits,
+            ) = select_window_unique_hits(window_market_cap_hits, statuses_df)
+            market_cap_unique_xg_hits = market_cap_tradable_unique_xg_hits
+            window_market_cap_unique = int(
+                market_cap_unique_xg_hits["code"].nunique()
+            )
+            window_market_cap_technical_unique = int(
+                market_cap_technical_unique_xg_hits["code"].nunique()
+            )
             status_by_code = (
                 statuses_df.drop_duplicates("code", keep="last")
                 .set_index("code")["observation_status"]
@@ -1264,33 +2480,113 @@ def main(argv=None):
                 .eq("suspended_or_no_trade")
                 .sum()
             )
+            suspended_technical_hits = technical_unique_xg_hits[
+                technical_unique_xg_hits["code"]
+                .map(status_by_code)
+                .eq("suspended_or_no_trade")
+            ].reset_index(drop=True)
             unavailable_count = int(status_by_code.eq("data_unavailable").sum())
         summary = build_formula_summary(
             hits_df,
             trade_dates,
             output_days=args.lookback,
+            trade_coverage=coverage_df,
+            current_statuses=statuses_df,
         )
         if not summary.empty:
             latest_idx = summary.index[-1]
-            summary.loc[latest_idx, "window_unique_count"] = window_xg_technical_unique
-            summary.loc[latest_idx, "tradable_unique_count"] = window_xg_unique
+            summary_formal = int(summary.loc[latest_idx, "window_unique_count"])
+            summary_technical = int(
+                summary.loc[latest_idx, "technical_unique_count"]
+            )
+            if (
+                summary_formal != window_xg_unique
+                or summary_technical != window_xg_technical_unique
+            ):
+                raise RuntimeError(
+                    "Formula33 rolling summary is inconsistent with the latest "
+                    "formal pool: "
+                    f"summary={summary_formal}/{summary_technical} "
+                    f"pool={window_xg_unique}/{window_xg_technical_unique}"
+                )
+            summary.loc[latest_idx, "market_cap_unique_count"] = window_market_cap_unique
+            summary.loc[
+                latest_idx, "market_cap_technical_unique_count"
+            ] = window_market_cap_technical_unique
             summary.loc[latest_idx, "suspended_count"] = suspended_count
             summary.loc[latest_idx, "unavailable_count"] = unavailable_count
+        retryable_unavailable = pd.DataFrame()
+        if not statuses_df.empty:
+            status_errors = statuses_df.get(
+                "error",
+                pd.Series("", index=statuses_df.index, dtype=str),
+            ).fillna("").astype(str).str.strip()
+            retryable_unavailable = statuses_df[
+                statuses_df["observation_status"].eq("data_unavailable")
+                & ~status_errors.eq("insufficient kline history")
+            ]
+        if not retryable_unavailable.empty:
+            codes = ", ".join(
+                retryable_unavailable["code"].astype(str).head(10).tolist()
+            )
+            raise RuntimeError(
+                "Formula33 has retryable unavailable stocks; "
+                f"completed manifest was not written: count={len(retryable_unavailable)} "
+                f"codes={codes}"
+            )
         xlsx_path, csv_path = save_workbook(
             summary,
             hits_df,
             unique_hits=unique_xg_hits,
             technical_unique_hits=technical_unique_xg_hits,
+            market_cap_unique_hits=market_cap_unique_xg_hits,
+            suspended_technical_hits=suspended_technical_hits,
             statuses=statuses_df,
+        )
+        missing_outputs = [
+            path for path in (xlsx_path, csv_path) if not os.path.isfile(path)
+        ]
+        if missing_outputs:
+            raise RuntimeError(
+                "Formula33 output write did not complete: "
+                + ", ".join(missing_outputs)
+            )
+        completion_manifest.finish(
+            observation_date=latest_date,
+            arguments=completion_arguments,
+            universe_codes=universe_codes,
+            outputs=[xlsx_path, csv_path],
+            summary={
+                "universe": len(universe_codes),
+                "summary_rows": len(summary),
+                "market_cap_source": cap_source,
+                "list_date_coverage": list_date_coverage,
+                "market_cap_coverage": market_cap_coverage,
+                "observation_status_coverage": observation_status_coverage,
+                "retryable_unavailable_count": 0,
+                "window_base_unique": window_base_unique,
+                "window_xg_technical_unique": window_xg_technical_unique,
+                "window_xg_unique": window_xg_unique,
+                "window_market_cap_technical_unique": window_market_cap_technical_unique,
+                "window_market_cap_unique": window_market_cap_unique,
+                "suspended_count": suspended_count,
+                "unavailable_count": unavailable_count,
+            },
+            code_version=FORMULA33_CODE_VERSION,
         )
         print(f"Excel已保存: {xlsx_path}")
         print(f"CSV已保存: {csv_path}")
         print(summary.to_string(index=False))
         print(f"最近{len(output_dates)}个交易日BASE去重股票数: {window_base_unique}")
-        print(f"最近{len(output_dates)}个交易日XG技术去重股票数: {window_xg_technical_unique}")
         print(
-            f"最近{len(output_dates)}个交易日XG正式去重股票数: {window_xg_unique} | "
-            f"观察日无交易排除: {suspended_count} | 数据不可用: {unavailable_count}"
+            f"最近{len(output_dates)}个交易日XG可交易技术去重股票数: "
+            f"{window_xg_unique}"
+        )
+        print(
+            f"技术全量: {window_xg_technical_unique} | "
+            f"观察日无交易技术命中: {suspended_count} | "
+            f"市值大于100亿池: {window_market_cap_unique} | "
+            f"数据不可用: {unavailable_count}"
         )
     finally:
         if bs_available:
@@ -1298,7 +2594,3 @@ def main(argv=None):
                 bs.logout()
             except Exception:
                 pass
-
-
-if __name__ == "__main__":
-    main()

@@ -11,23 +11,33 @@ import pandas as pd
 
 from stock_research.core.as_of import audit_source, write_metadata
 from stock_research.core.paths import PATHS
-from stock_research.indicators.factors import score_direct
 from stock_research.indicators.waves import infer_downtrend_recovery, level_price
 from stock_research.pipelines.factor_selection import classify_method
+from stock_research.strategies.fundamental_selection import (
+    growth_risk,
+    quality_detail,
+    value_method_reason,
+)
 
 
 VALUE_CACHE_DIR = str(PATHS.cache / "q1_value")
 KLINE_CACHE_DIR = str(PATHS.cache / "formula33_kline" / "akshare")
 OUTPUT_DIR = str(PATHS.selection_exports)
 UNIVERSE_PATH = str(PATHS.cache / "stock_universe.csv")
+VALUE_MIN_MARKET_CAP = 100.0
 VALUE_ROUTE_OVERRIDES = {
-    "sz.002415": ("VALUE", "海康威视：大型安防龙头，产业与财务可外推，按用户验收口径纳入"),
+    "sz.002415": ("VALUE", "海康威视：大型安防公司，产业与财务可外推，按用户验收口径纳入"),
 }
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="生成每日基本价值线和正常基本面两部分选股")
     parser.add_argument("--report-period", default="", help="财报期YYYY-MM-DD；默认使用缓存中的最新报告期")
+    parser.add_argument(
+        "--observation-date",
+        required=True,
+        help="观察日YYYY-MM-DD；只允许该日有有效成交K线的股票入选",
+    )
     parser.add_argument("--value-ratio", type=float, default=1.08, help="价值线附近最高现价/价值线")
     parser.add_argument("--normal-top", type=int, default=30, help="正常基本面部分最多股票数")
     parser.add_argument("--output", default="")
@@ -49,7 +59,7 @@ def code_from_symbol(symbol):
     return ("sh." if str(symbol).startswith(("6", "9")) else "sz.") + str(symbol)
 
 
-def load_kline(code):
+def load_kline(code, observation_date=None):
     path = os.path.join(KLINE_CACHE_DIR, f"{code.replace('.', '_')}.csv")
     if not os.path.exists(path):
         return pd.DataFrame()
@@ -58,7 +68,29 @@ def load_kline(code):
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         for col in ["high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df.get(col), errors="coerce")
-        return df.dropna(subset=["date", "high", "low", "close"]).sort_values("date").drop_duplicates("date")
+        df = (
+            df.dropna(subset=["date", "high", "low", "close"])
+            .sort_values("date")
+            .drop_duplicates("date")
+        )
+        df = df[
+            (df["high"] > 0)
+            & (df["low"] > 0)
+            & (df["close"] > 0)
+            & (df["high"] >= df["low"])
+        ]
+        if observation_date is None:
+            return df
+        cutoff = pd.Timestamp(observation_date).normalize()
+        df = df[df["date"].dt.normalize() <= cutoff]
+        if df.empty:
+            return pd.DataFrame()
+        latest = df.iloc[-1]
+        latest_date = pd.Timestamp(latest["date"]).normalize()
+        latest_volume = pd.to_numeric(latest.get("volume"), errors="coerce")
+        if latest_date != cutoff or pd.isna(latest_volume) or latest_volume <= 0:
+            return pd.DataFrame()
+        return df
     except Exception:
         return pd.DataFrame()
 
@@ -154,40 +186,6 @@ def method_routes_from_snapshot(snapshot):
     return routes
 
 
-def quality_detail(eps, yoy, quality):
-    eps_part = score_direct(eps, 0.10, 1.50) * 0.35
-    yoy_part = score_direct(min(max(yoy, -0.5), 1.0), -0.10, 0.50) * 0.35
-    history_part = max(0.0, min(30.0, quality - eps_part - yoy_part))
-    eps_text = "较强" if eps_part >= 28 else "中等" if eps_part >= 17.5 else "偏弱"
-    growth_text = "较强" if yoy_part >= 28 else "中等" if yoy_part >= 17.5 else "偏弱"
-    history_text = "稳定性较高" if history_part >= 24 else "稳定性尚可" if history_part >= 15 else "稳定性偏弱"
-    return (
-        f"扣非EPS为{eps:.2f}元，盈利能力{eps_text}；"
-        f"扣非利润同比{yoy:.1%}，增长{growth_text}；"
-        f"近年扣非盈利{history_text}。综合质量评估{quality:.1f}"
-    )
-
-
-def value_method_reason(industry, mktcap, eps, yoy):
-    industry = str(industry or "行业待核验")
-    if any(key in industry for key in ["计算机、通信", "电子设备", "专用设备", "通用设备", "汽车制造", "电气机械"]):
-        economics = "属于制造业，净资产和持续扣非盈利能够反映经营价值"
-    else:
-        economics = "不属于金融、强周期资源或纯轻资产预期行业，可先用净资产和扣非盈利观察价值"
-    return (
-        f"{industry}；{economics}；市值{mktcap:.1f}亿元、扣非EPS{eps:.2f}元、"
-        f"扣非同比{yoy:.1%}均通过基本价值线初筛。仍需人工确认行业龙头地位和产业趋势"
-    )
-
-
-def growth_risk(yoy):
-    if yoy >= 3:
-        return "；风险：扣非同比超过300%，同比评分已封顶，需核验低基数、扭亏或一次性口径变化"
-    if yoy < 0:
-        return "；风险：扣非同比为负"
-    return ""
-
-
 def load_mainline_boards():
     path = str(PATHS.cache / "sector_mainline_constituents.csv")
     if not os.path.exists(path):
@@ -204,7 +202,15 @@ def load_mainline_boards():
         return {}
 
 
-def value_rows(report_period, names, snapshot, max_ratio, method_routes, mainline_boards):
+def value_rows(
+    report_period,
+    names,
+    snapshot,
+    max_ratio,
+    method_routes,
+    mainline_boards,
+    observation_date,
+):
     suffix = report_period.replace("-", "")
     industry_map = {}
     theme_map = {}
@@ -212,12 +218,8 @@ def value_rows(report_period, names, snapshot, max_ratio, method_routes, mainlin
         industry_map = snapshot.drop_duplicates("code").set_index("code").get("industry", pd.Series(dtype=str)).to_dict()
         theme_map = snapshot.drop_duplicates("code").set_index("code").get("theme", pd.Series(dtype=str)).to_dict()
         method_map = snapshot.drop_duplicates("code").set_index("code").get("method", pd.Series(dtype=str)).to_dict()
-        applicability_map = snapshot.drop_duplicates("code").set_index("code").get(
-            "value_applicability_status", pd.Series(dtype=str)
-        ).to_dict()
     else:
         method_map = {}
-        applicability_map = {}
     rows = []
     for path in glob.glob(os.path.join(VALUE_CACHE_DIR, f"*_{suffix}.json")):
         symbol = os.path.basename(path).split("_", 1)[0]
@@ -226,14 +228,12 @@ def value_rows(report_period, names, snapshot, max_ratio, method_routes, mainlin
         route_method = route.get("method") or method_map.get(code)
         if route_method != "VALUE":
             continue
-        if applicability_map and applicability_map.get(code) != "rule_eligible":
-            continue
         try:
             with open(path, "r", encoding="utf-8") as handle:
                 value = json.load(handle)
         except (OSError, ValueError):
             continue
-        df = load_kline(code)
+        df = load_kline(code, observation_date)
         tech = technical_fields(df)
         close = tech.get("close")
         value_line = pd.to_numeric(value.get("value_line"), errors="coerce")
@@ -247,13 +247,11 @@ def value_rows(report_period, names, snapshot, max_ratio, method_routes, mainlin
         ratio = close / value_line
         # Cache membership means the stock passed the historical VALUE-method
         # industry routing. Growth, size and financial quality are rechecked.
-        applicable = mktcap >= 100 and yoy >= 0 and quality >= 50
+        applicable = mktcap >= VALUE_MIN_MARKET_CAP and yoy >= 0 and quality >= 50
         if not applicable or ratio > max_ratio:
             continue
         industry = route.get("industry") or industry_map.get(code, "")
         method_reason = value_method_reason(industry, mktcap, eps, yoy)
-        if applicability_map:
-            method_reason += "；行业市值分位与同业数量通过自动化龙头代理规则"
         row = {
             "strategy_part": "1.基本价值线或附近",
             "code": code,
@@ -283,7 +281,7 @@ def value_rows(report_period, names, snapshot, max_ratio, method_routes, mainlin
     return pd.DataFrame(rows)
 
 
-def normal_rows(report_period, snapshot, names, mainline_boards):
+def normal_rows(report_period, snapshot, names, mainline_boards, observation_date):
     if snapshot.empty:
         return pd.DataFrame()
     work = snapshot.drop_duplicates("code").copy()
@@ -323,7 +321,9 @@ def normal_rows(report_period, snapshot, names, mainline_boards):
     for _, source in work.iterrows():
         code = str(source["code"])
         fixed_pool_member = bool(source.get("pool_member", False))
-        tech = technical_fields(load_kline(code))
+        tech = technical_fields(load_kline(code, observation_date))
+        if not tech:
+            continue
         row = source.to_dict()
         row.update(tech)
         if tech.get("close") is not None and pd.notna(source.get("value_line")) and source.get("value_line", 0) > 0:
@@ -419,15 +419,15 @@ def normal_rows(report_period, snapshot, names, mainline_boards):
     )
 
 
-from stock_research.strategies import fundamental_selection as _fundamental_rules
-
-quality_detail = _fundamental_rules.quality_detail
-value_method_reason = _fundamental_rules.value_method_reason
-growth_risk = _fundamental_rules.growth_risk
-
-
 def main(argv=None):
     args = parse_args(argv)
+    try:
+        observation_date = pd.Timestamp(args.observation_date).normalize()
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"无效 observation_date: {args.observation_date!r}") from exc
+    if pd.isna(observation_date):
+        raise SystemExit(f"无效 observation_date: {args.observation_date!r}")
+    observation_date_text = observation_date.strftime("%Y-%m-%d")
     report_period = args.report_period or latest_report_period()
     names = load_names()
     mainline_boards = load_mainline_boards()
@@ -443,13 +443,33 @@ def main(argv=None):
         "formation_date": None,
     }
     method_routes = method_routes_from_snapshot(snapshot)
-    values = value_rows(report_period, names, snapshot, args.value_ratio, method_routes, mainline_boards)
-    normal = normal_rows(report_period, snapshot, names, mainline_boards)
+    values = value_rows(
+        report_period,
+        names,
+        snapshot,
+        args.value_ratio,
+        method_routes,
+        mainline_boards,
+        observation_date_text,
+    )
+    normal = normal_rows(
+        report_period,
+        snapshot,
+        names,
+        mainline_boards,
+        observation_date_text,
+    )
     normal = normal.head(max(1, args.normal_top))
     combined = pd.concat([values, normal], ignore_index=True, sort=False)
     if combined.empty:
-        raise SystemExit("没有生成每日基本面候选")
-    report_date = combined["date"].dropna().max()
+        raise SystemExit(f"观察日 {observation_date_text} 没有生成每日基本面候选")
+    result_dates = set(combined["date"].dropna().astype(str))
+    if result_dates != {observation_date_text}:
+        raise SystemExit(
+            "基本面候选包含非观察日行情: "
+            f"expected={observation_date_text} actual={sorted(result_dates)}"
+        )
+    report_date = observation_date_text
     stamp = datetime.now().strftime("%H%M%S")
     output = args.output or os.path.join(OUTPUT_DIR, f"daily_fundamental_selection_{report_date}_{stamp}.csv")
     os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
@@ -460,6 +480,7 @@ def main(argv=None):
         "report_period": report_period,
         "selection_mode": "dynamic",
         "source_snapshot": snapshot_path,
+        "observation_date": observation_date_text,
         "daily_technical_cutoff": report_date,
         "dynamic_signal_members": int(normal.get("signal_eligible", pd.Series(dtype=bool)).fillna(False).sum()) if not normal.empty else 0,
     })
@@ -472,7 +493,3 @@ def main(argv=None):
         if not hit.empty:
             row = hit.iloc[0]
             print(f"验收 {row['name']} {code}: 现价/价值线={row['price_to_value']:.3f}, {row['selection_reason']}")
-
-
-if __name__ == "__main__":
-    main()
