@@ -34,8 +34,8 @@ def value_method_reason(industry, mktcap, eps, yoy):
     else:
         economics = "不属于金融、强周期资源或纯轻资产预期行业，可先用净资产和扣非盈利观察价值"
     return (
-        f"{industry}；{economics}；市值{mktcap:.1f}亿元、扣非EPS{eps:.2f}元、"
-        f"扣非同比{yoy:.1%}均通过基本价值线初筛。仍需人工确认行业龙头地位和产业趋势"
+        f"{industry}；{economics}；总市值{mktcap:.1f}亿元（不低于100亿元）、扣非EPS{eps:.2f}元、"
+        f"扣非同比{yoy:.1%}均通过基本价值线初筛。仍需人工确认主营稳定性和公式适用性"
     )
 
 

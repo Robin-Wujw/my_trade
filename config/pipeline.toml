@@ -2,13 +2,13 @@
 workers = 1
 
 [formula33]
-workers = 1
-sleep = 0.2
+workers = 2
+sleep = 0.5
 retries = 5
 
 [sector]
 sleep = 0.3
-retries = 5
+retries = 2
 
 [fundamental]
 max_updates = 100

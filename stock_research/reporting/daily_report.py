@@ -3,6 +3,7 @@
 import argparse
 from dataclasses import dataclass
 import html
+import json
 import os
 from datetime import datetime
 
@@ -22,6 +23,12 @@ SELECTION_DIR = str(PATHS.selection_exports)
 BOARD_DIR = str(PATHS.market_exports)
 REPORT_DIR = str(PATHS.report_exports)
 HISTORY_FILE = str(PATHS.state / "daily_selection_history.json")
+FORMULA_PHASE_FILE = str(PATHS.state / "formula33_right_side_phase.json")
+FORMULA_PHASE_VERSION = 2
+RIGHT_SIDE_WAITING = "等待右侧阶段"
+RIGHT_SIDE_WATCH = "观察、可右侧积极做多阶段"
+RIGHT_SIDE_ACTIVE = "明确进入右侧阶段"
+RIGHT_SIDE_EXITED = "明确退出右侧阶段"
 
 
 @dataclass(frozen=True)
@@ -34,6 +41,7 @@ class DailyReportBundle:
     formula_path: str
     sector_path: str
     selection_diff: SelectionDiff | None
+    formula_phase_state: dict | None = None
 
 
 def parse_args(argv=None):
@@ -42,6 +50,9 @@ def parse_args(argv=None):
     parser.add_argument("--selection-top", type=int, default=30, help="兼容旧参数；正常基本面展示上限")
     parser.add_argument("--max-chars", type=int, default=18000)
     parser.add_argument("--no-push", action="store_true")
+    parser.add_argument("--fundamental-path", default="")
+    parser.add_argument("--formula-path", default="")
+    parser.add_argument("--sector-path", default="")
     return parser.parse_args(argv)
 
 
@@ -52,8 +63,52 @@ def latest_file(directory, prefix, suffix):
         os.path.join(directory, name)
         for name in os.listdir(directory)
         if name.startswith(prefix) and name.endswith(suffix)
+        and "_sample" not in name.lower()
     ]
     return max(paths, key=os.path.getmtime) if paths else ""
+
+
+def ensure_same_observation_date(inputs):
+    normalized = {}
+    for name, value in inputs.items():
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            raise ValueError(f"{name} observation date missing or invalid: {value}")
+        normalized[str(name)] = pd.Timestamp(parsed).strftime("%Y-%m-%d")
+    dates = set(normalized.values())
+    if len(dates) != 1:
+        raise ValueError(f"observation date mismatch: {normalized}")
+    return next(iter(dates))
+
+
+def _resolve_input_path(explicit_path, directory, prefix, label):
+    path = str(explicit_path or "").strip() or latest_file(
+        directory,
+        prefix,
+        ".csv",
+    )
+    if not path or not os.path.isfile(path):
+        raise SystemExit(f"未找到{label}文件: {path or 'missing'}")
+    if "_sample" in os.path.basename(path).lower():
+        raise SystemExit(f"{label}不能使用样例文件: {path}")
+    return os.path.abspath(path)
+
+
+def _observation_date(frame, label):
+    if "date" not in frame.columns:
+        raise ValueError(f"{label}缺少date字段")
+    dates = pd.to_datetime(frame["date"], errors="coerce")
+    if dates.dropna().empty:
+        raise ValueError(f"{label}没有有效observation date")
+    return dates.max().strftime("%Y-%m-%d")
+
+
+def _reject_sample_content(frame, path, label):
+    if "data_status" not in frame.columns:
+        return
+    statuses = frame["data_status"].dropna().astype(str).str.lower()
+    if statuses.str.contains("sample", regex=False).any():
+        raise ValueError(f"{label}包含样例数据，拒绝生成生产日报: {path}")
 
 
 def num(value, digits=2):
@@ -93,34 +148,113 @@ def esc(value, fallback="未提供"):
 
 
 def render_formula_status(latest_formula):
-    """Render only rolling 21-day Formula33 breadth and trend diagnostics."""
-    def integer(name, default=0):
-        value = latest_formula.get(name, default)
-        try:
-            return default if pd.isna(value) else int(float(value))
-        except (TypeError, ValueError):
-            return default
-
+    """Render only the formal rolling 21-day Formula33 result."""
     window_count = latest_formula.get("window_unique_count")
-    slope = latest_formula.get("window_trend_slope")
     if window_count is None or pd.isna(window_count):
-        return "近21个交易日三浪三数据不足，右侧趋势暂不判断。"
-    slope_text = "数据不足" if slope is None or pd.isna(slope) else f"{float(slope):+.2f}"
-    up_streak = integer("trend_up_streak")
-    down_streak = integer("trend_down_streak")
-    if up_streak:
-        streak_text = f"连续正趋势{up_streak}日"
-    elif down_streak:
-        streak_text = f"连续负趋势{down_streak}日"
-    else:
-        streak_text = "趋势连续性未确认"
-    return (
-        f"近21个交易日三浪三技术去重{integer('window_unique_count')}只，"
-        f"趋势斜率{slope_text}，{streak_text}；"
-        f"正式{integer('tradable_unique_count')}只；"
-        f"观察日无交易排除{integer('suspended_count')}只，"
-        f"数据不可用{integer('unavailable_count')}只。"
+        return "近21个交易日三浪三正式结果数据不足。"
+    return f"近21个交易日三浪三正式结果：{int(float(window_count))}只。"
+
+
+def load_formula_phase_state(path=FORMULA_PHASE_FILE):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def advance_formula_phase(formula_rows, previous_state=None):
+    """Advance the persistent 3/5-day right-side phase without changing XG."""
+    previous = dict(previous_state or {})
+    if previous.get("version") != FORMULA_PHASE_VERSION:
+        previous = {}
+    phase = previous.get("phase") or RIGHT_SIDE_WAITING
+    transition_date = str(previous.get("transition_date") or "")
+    trigger = str(previous.get("trigger") or "")
+    last_observation = pd.to_datetime(
+        previous.get("observation_date"), errors="coerce"
     )
+
+    frame = pd.DataFrame(formula_rows).copy()
+    required = {"date", "window_up_streak", "window_down_streak"}
+    if frame.empty or not required.issubset(frame.columns):
+        return {
+            "version": FORMULA_PHASE_VERSION,
+            "phase": phase,
+            "transition_date": transition_date,
+            "trigger": trigger,
+            "observation_date": str(previous.get("observation_date") or ""),
+        }
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame = frame.dropna(subset=["date"]).sort_values("date")
+    if frame.empty:
+        return {
+            "version": FORMULA_PHASE_VERSION,
+            "phase": phase,
+            "transition_date": transition_date,
+            "trigger": trigger,
+            "observation_date": str(previous.get("observation_date") or ""),
+        }
+
+    latest_date = frame["date"].max().normalize()
+    if pd.notna(last_observation) and last_observation.normalize() > latest_date:
+        phase = RIGHT_SIDE_WAITING
+        transition_date = ""
+        trigger = ""
+        last_observation = pd.NaT
+    if pd.notna(last_observation):
+        frame = frame[frame["date"].dt.normalize() > last_observation.normalize()]
+
+    def streak(value):
+        number = pd.to_numeric(value, errors="coerce")
+        return 0 if pd.isna(number) else int(number)
+
+    for _, row in frame.iterrows():
+        row_date = row["date"].strftime("%Y-%m-%d")
+        up = streak(row.get("window_up_streak"))
+        down = streak(row.get("window_down_streak"))
+        if down >= 5:
+            if phase != RIGHT_SIDE_EXITED:
+                transition_date = row_date
+                trigger = "连续5日负趋势"
+            phase = RIGHT_SIDE_EXITED
+        elif up >= 5:
+            if phase != RIGHT_SIDE_ACTIVE:
+                transition_date = row_date
+                trigger = "连续5日正趋势"
+            phase = RIGHT_SIDE_ACTIVE
+        elif up >= 3 and phase != RIGHT_SIDE_ACTIVE:
+            if phase != RIGHT_SIDE_WATCH:
+                transition_date = row_date
+                trigger = "连续3日正趋势"
+            phase = RIGHT_SIDE_WATCH
+
+    return {
+        "version": FORMULA_PHASE_VERSION,
+        "phase": phase,
+        "transition_date": transition_date,
+        "trigger": trigger,
+        "observation_date": latest_date.strftime("%Y-%m-%d"),
+    }
+
+
+def save_formula_phase_state(path, state):
+    if not state:
+        return
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    temporary = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(temporary, path)
+    finally:
+        try:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+        except OSError:
+            pass
 
 
 def wave_position(row):
@@ -136,23 +270,6 @@ def wave_position(row):
     if value < 0:
         return "仍低于该下跌波段后低"
     return f"当前修复至{value:.1f}%"
-
-
-def right_side_conclusion(row):
-    up = int(row.get("trend_up_streak", 0) or 0)
-    down = int(row.get("trend_down_streak", 0) or 0)
-    slope = pd.to_numeric(row.get("window_trend_slope"), errors="coerce")
-    if down >= 5:
-        return "暂停右侧交易", "21日三浪三去重趋势连续5日为负"
-    if down >= 3:
-        return "谨慎或暂停右侧", "21日三浪三去重趋势连续3日为负"
-    if up >= 5:
-        return "可以右侧交易", "21日三浪三去重趋势连续5日为正"
-    if up >= 3:
-        return "可以谨慎右侧", "21日三浪三去重趋势连续3日为正"
-    if pd.notna(slope) and float(slope) > 0:
-        return "轻仓观察右侧", "21日三浪三去重趋势为正但连续不足3日"
-    return "等待右侧确认", "21日三浪三去重趋势尚未形成连续正向确认"
 
 
 def stock_line(row, include_value=True):
@@ -176,9 +293,12 @@ def stock_line(row, include_value=True):
     return base
 
 
-def render_stock_section(title, frame, include_value=True, limit=None):
+def render_stock_section(title, frame, include_value=True, limit=None, changes_html=""):
     shown = frame if limit is None else frame.head(limit)
-    parts = [f"<h2>{esc(title)}（{len(frame)}只）</h2><ol>"]
+    parts = [f"<h2>{esc(title)}（{len(frame)}只）</h2>"]
+    if changes_html:
+        parts.append(changes_html)
+    parts.append("<ol>")
     for _, row in shown.iterrows():
         parts.append(f"<li>{stock_line(row, include_value=include_value)}。理由：{esc(row.get('selection_reason', ''))}</li>")
     parts.append("</ol>")
@@ -188,9 +308,11 @@ def render_stock_section(title, frame, include_value=True, limit=None):
     return "".join(parts)
 
 
-def render_normal_section(frame, limit=None):
+def render_normal_section(frame, limit=None, changes_html=""):
     shown = frame if limit is None else frame.head(limit)
     parts = [f"<h2>2. 正常基本面选股（{len(frame)}只）</h2>"]
+    if changes_html:
+        parts.append(changes_html)
     for layer, group in shown.groupby("strategy_layer", sort=False):
         parts.append(f"<h3>{esc(layer)}（{len(group)}只）</h3><ol>")
         for _, row in group.iterrows():
@@ -221,7 +343,6 @@ def render_selection_changes(selection_diff, strategy_part=None):
     moved = [
         item for item in selection_diff.moved
         if strategy_part is None
-        or item.get("from_part") == strategy_part
         or item.get("to_part") == strategy_part
     ]
     if not added and not removed and not moved:
@@ -334,8 +455,8 @@ def build_push_reports(
     selection_diff,
     max_chars,
     top=5,
+    formula_phase=RIGHT_SIDE_WAITING,
 ):
-    right_status, right_reason = right_side_conclusion(latest_formula)
     formula_status = render_formula_status(latest_formula)
     value_zones = values.get("wave_zone", pd.Series(dtype=str)).value_counts()
     normal_zones = normal.get("wave_zone", pd.Series(dtype=str)).value_counts()
@@ -349,11 +470,8 @@ def build_push_reports(
         part1 = "".join(
             [
                 f"<h1>[1/2] {esc(report_date)} 市场状态与价值线池</h1>",
-                f"<h2>结论：{esc(right_status)}</h2>",
-                f"<p>{esc(right_reason)}。价值线池以估值、质量和右侧位置分层，低估不等同于右侧确认。</p>",
-                "<h2>一、最近21个交易日三浪三市场宽度</h2>",
-                f"<p>{formula_status}</p>",
-                render_selection_changes(selection_diff),
+                "<h2>一、最近21个交易日三浪三结果</h2>",
+                f"<p>{formula_status}<b>当前阶段：{esc(formula_phase)}</b>。</p>",
                 f"<h2>二、基本价值线或附近（{len(values)}只）</h2>",
                 "<p><b>分析链：</b>价值适用性 → 现价/价值线 → 基本面质量 → 50%/62.5%右侧位置。</p>",
                 f"<p>低于50% {int(value_zones.get('50%以下未确认', 0))}只；"
@@ -364,7 +482,7 @@ def build_push_reports(
                 _priority_details(values, True, detail_count),
                 "<h3>全部股票紧凑名单</h3>",
                 _compact_stock_table(values, "value"),
-                "<h3>风险</h3><p>价值线适用性仍需核验产业地位；低于50%的股票属于左侧观察，不因价格便宜自动升级为可执行右侧。</p>",
+                "<h3>风险</h3><p>价值线适用性仍需核验行业方法和财务口径；低于50%的股票属于左侧观察，不因价格便宜自动升级为可执行右侧。</p>",
             ]
         )
         part2 = "".join(
@@ -402,27 +520,51 @@ def build_push_reports(
         return compact_parts
 
 
-def build_reports(top, normal_top, max_chars):
-    fundamental_path = latest_file(SELECTION_DIR, "daily_fundamental_selection_", ".csv")
-    formula_path = latest_file(BOARD_DIR, "formula33_stats_", ".csv")
-    sector_path = latest_file(BOARD_DIR, "sector_watch_", ".csv")
-    if not fundamental_path:
-        raise SystemExit("未找到daily_fundamental_selection每日基本面文件")
-    if not formula_path:
-        raise SystemExit("未找到formula33_stats市场结构文件")
-    if not sector_path:
-        raise SystemExit("未找到sector_watch主流板块文件")
+def build_reports(
+    top,
+    normal_top,
+    max_chars,
+    fundamental_path="",
+    formula_path="",
+    sector_path="",
+):
+    fundamental_path = _resolve_input_path(
+        fundamental_path,
+        SELECTION_DIR,
+        "daily_fundamental_selection_",
+        "daily_fundamental_selection每日基本面",
+    )
+    formula_path = _resolve_input_path(
+        formula_path,
+        BOARD_DIR,
+        "formula33_stats_",
+        "formula33_stats市场结构",
+    )
+    sector_path = _resolve_input_path(
+        sector_path,
+        BOARD_DIR,
+        "sector_watch_",
+        "sector_watch主流板块",
+    )
 
     stocks = pd.read_csv(fundamental_path, dtype={"code": str}, low_memory=False)
     formula = pd.read_csv(formula_path)
     sectors = pd.read_csv(sector_path)
+    _reject_sample_content(stocks, fundamental_path, "基本面输入")
+    _reject_sample_content(formula, formula_path, "Formula33输入")
+    _reject_sample_content(sectors, sector_path, "板块输入")
+    report_date = ensure_same_observation_date(
+        {
+            "fundamental": _observation_date(stocks, "基本面输入"),
+            "formula33": _observation_date(formula, "Formula33输入"),
+            "sector_watch": _observation_date(sectors, "板块输入"),
+        }
+    )
     values = stocks[stocks["strategy_part"] == "1.基本价值线或附近"].copy()
     normal = stocks[stocks["strategy_part"] == "2.正常基本面选股"].copy().head(normal_top)
     values = values.sort_values(["price_to_value", "quality_score"], ascending=[True, False])
     if {"layer_order", "fundamental_score"}.issubset(normal.columns):
         normal = normal.sort_values(["layer_order", "fundamental_score"], ascending=[True, False])
-    report_date = str(stocks["date"].dropna().max())
-
     history = load_history(HISTORY_FILE)
     previous = history.previous_before(report_date)
     selection_diff = (
@@ -431,12 +573,17 @@ def build_reports(top, normal_top, max_chars):
         else None
     )
 
+    formula = formula.assign(
+        date=pd.to_datetime(formula["date"], errors="coerce")
+    )
     latest_formula = formula.sort_values("date").iloc[-1]
-    right_status, right_reason = right_side_conclusion(latest_formula)
+    formula_phase_state = advance_formula_phase(
+        formula,
+        load_formula_phase_state(FORMULA_PHASE_FILE),
+    )
+    formula_phase = formula_phase_state["phase"]
     sector_date = pd.to_datetime(sectors["date"], errors="coerce").max()
-    report_dt = pd.to_datetime(report_date)
-    sector_fresh = pd.notna(sector_date) and 0 <= (report_dt - sector_date).days <= 7
-    top_sectors = sectors.sort_values("final_score", ascending=False).head(10) if sector_fresh else pd.DataFrame()
+    top_sectors = sectors.sort_values("final_score", ascending=False).head(10)
 
     heading = (
         f"<h1>{esc(report_date)} 每日四项分析</h1>"
@@ -444,13 +591,26 @@ def build_reports(top, normal_top, max_chars):
         "四部分分别判断，不用短期动量补齐名单。</p>"
     )
     full_parts = [heading]
-    full_parts.append(render_selection_changes(selection_diff))
-    full_parts.append(render_stock_section("1. 基本价值线或附近（适用股票全量）", values, True, None))
-    full_parts.append(render_normal_section(normal, None))
     full_parts.append(
-        "<h2>3. 最近21个交易日三浪三趋势与右侧开关</h2>"
+        render_stock_section(
+            "1. 基本价值线或附近（适用股票全量）",
+            values,
+            True,
+            None,
+            render_selection_changes(selection_diff, "1.基本价值线或附近"),
+        )
+    )
+    full_parts.append(
+        render_normal_section(
+            normal,
+            None,
+            render_selection_changes(selection_diff, "2.正常基本面选股"),
+        )
+    )
+    full_parts.append(
+        "<h2>3. 最近21个交易日三浪三结果</h2>"
         f"<p>{render_formula_status(latest_formula)}"
-        f"<b>结论：{esc(right_status)}</b>。{esc(right_reason)}。</p>"
+        f"<b>当前阶段：{esc(formula_phase)}</b>。</p>"
     )
     full_parts.append("<h2>4. 主流板块判断</h2>")
     if top_sectors.empty:
@@ -464,10 +624,6 @@ def build_reports(top, normal_top, max_chars):
                 f"5日/20日量能{num(row.get('amount_5_20'))}，涨停扩散{int(row.get('limit_up_count',0) or 0)}。</li>"
             )
         full_parts.append("</ol>")
-    full_parts.append(
-        "<hr><p>价值线左侧与50%右侧是两个维度。价值线内但低于50%的股票保留在第一栏等待；"
-        "价值线上方但完成50%的高增长主线股票可进入第二栏，并单独提示估值风险。</p>"
-    )
     full_html = "".join(full_parts)
 
     push_parts = build_push_reports(
@@ -479,6 +635,7 @@ def build_reports(top, normal_top, max_chars):
         selection_diff,
         max_chars,
         top=top,
+        formula_phase=formula_phase,
     )
     return DailyReportBundle(
         report_date=report_date,
@@ -489,12 +646,20 @@ def build_reports(top, normal_top, max_chars):
         formula_path=formula_path,
         sector_path=sector_path,
         selection_diff=selection_diff,
+        formula_phase_state=formula_phase_state,
     )
 
 
 def main(argv=None):
     args = parse_args(argv)
-    bundle = build_reports(args.top, args.selection_top, args.max_chars)
+    bundle = build_reports(
+        args.top,
+        args.selection_top,
+        args.max_chars,
+        args.fundamental_path,
+        args.formula_path,
+        args.sector_path,
+    )
     report_date = bundle.report_date
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_path = os.path.join(REPORT_DIR, f"daily_report_{stamp}.html")
@@ -505,6 +670,7 @@ def main(argv=None):
         handle.write(bundle.full_html)
     bundle.stocks.to_csv(output_path, index=False, encoding="utf-8-sig")
     save_snapshot(HISTORY_FILE, report_date, bundle.stocks.to_dict("records"))
+    save_formula_phase_state(FORMULA_PHASE_FILE, bundle.formula_phase_state)
     print(f"完整四项报告: {report_path}")
     print(f"前两项完整选股: {output_path}，共{len(bundle.stocks)}行")
     print(
@@ -528,7 +694,3 @@ def main(argv=None):
         print(f"PUSH_RESULT_{index}", ok)
     if not all(results):
         raise SystemExit(2)
-
-
-if __name__ == "__main__":
-    main()

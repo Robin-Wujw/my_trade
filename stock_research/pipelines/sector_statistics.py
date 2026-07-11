@@ -13,9 +13,10 @@ import hashlib
 import os
 import random
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from stock_research.api import akshare as ak
+from stock_research.api import ths
 import numpy as np
 import pandas as pd
 from openpyxl import Workbook
@@ -23,11 +24,26 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from stock_research.core.paths import PATHS
+from stock_research.core.part_logger import PartLogger
+from stock_research.market.sectors import normalize_board_name as normalize_sector_board_name
+from stock_research.market.sector_provider import (
+    coverage_can_still_pass,
+    effective_pipeline_retries,
+    sector_history_is_fresh,
+    validate_sector_histories,
+)
+from stock_research.storage import Database, SectorRepository
 
 
 OUTPUT_DIR = str(PATHS.market_exports)
 CACHE_DIR = str(PATHS.cache / "sector_stats")
-BENCHMARK_SYMBOL = "000001"
+BENCHMARK_SYMBOL = "sh000001"
+BOARD_LIST_MAX_AGE = "24h"
+THS_BOARD_SOURCE = "ths/board_list"
+THS_HISTORY_SOURCE = "ths/history"
+MINIMUM_SECTOR_COVERAGE = 0.95
+MINIMUM_STATS_HISTORY_ROWS = 21
+MAXIMUM_REQUIRED_HISTORY_ROWS = 60
 SECTOR_GROUPS = [
     "有色资源类",
     "半导体",
@@ -118,7 +134,22 @@ def classify_group(name):
 
 
 def normalize_board_name(name):
-    return str(name).replace("行业板块", "").strip()
+    return normalize_sector_board_name(name)
+
+
+def _board_names_from_repository(frame):
+    result = frame.rename(
+        columns={"board_name": "board", "group_name": "group"}
+    ).copy()
+    result["group"] = result["group"].fillna("")
+    result["group"] = result.apply(
+        lambda row: row["group"] or classify_group(row["board"]),
+        axis=1,
+    )
+    if "board_code" not in result.columns:
+        result["board_code"] = ""
+    result["board_code"] = result["board_code"].fillna("").astype(str)
+    return result[["board", "group", "board_code"]].drop_duplicates("board").reset_index(drop=True)
 
 
 def pct_change(series, days):
@@ -143,75 +174,203 @@ def candle_label(row):
     return f"{level}{direction}"
 
 
-def load_board_names(retries=4, retry_delay=2.0):
+def load_board_names(
+    retries=4,
+    retry_delay=2.0,
+    repository=None,
+    logger=None,
+    provider=None,
+):
+    provider = provider or ths
+    pipeline_retries = effective_pipeline_retries(provider, retries)
+    stale_database = pd.DataFrame()
+    if repository is not None:
+        try:
+            cached = repository.load_boards(
+                max_age=BOARD_LIST_MAX_AGE,
+                source=THS_BOARD_SOURCE,
+            )
+            if not cached.empty and cached["board_code"].notna().all():
+                result = _board_names_from_repository(cached)
+                if logger is not None:
+                    logger.event(
+                        "board_names",
+                        "duckdb",
+                        "hit",
+                        message="同花顺行业板块列表命中 DuckDB",
+                        rows=len(result),
+                    )
+                return result
+            stale_database = repository.load_boards(source=THS_BOARD_SOURCE)
+        except Exception as exc:
+            if logger is not None:
+                logger.event("board_names", "duckdb", "failed", message=str(exc))
+
     try:
-        df = call_with_backoff(
-            ak.stock_board_industry_name_em,
-            "行业板块列表",
-            retries=retries,
+        raw = call_with_backoff(
+            provider.load_board_list,
+            "同花顺行业板块列表",
+            retries=pipeline_retries,
             retry_delay=retry_delay,
         )
-    except Exception as exc:
-        cached = read_cache("board_names", "industry")
-        if not cached.empty:
-            print(f"行业板块列表读取失败，使用缓存: {exc}")
-            return cached
-        raise
-    if df is None or df.empty:
-        return pd.DataFrame()
-    name_col = "板块名称" if "板块名称" in df.columns else "名称"
-    df = df.rename(columns={name_col: "board"})
-    df["board"] = df["board"].map(normalize_board_name)
-    df["group"] = df["board"].map(classify_group)
-    df = df.dropna(subset=["board"]).drop_duplicates(subset=["board"], keep="first")
-    write_cache("board_names", "industry", df)
-    return df
+    except Exception:
+        if stale_database.empty:
+            raise
+        result = _board_names_from_repository(stale_database)
+        result.attrs["offline_cache"] = True
+        return result
+
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=["board", "group", "board_code"])
+    result = raw.rename(columns={"name": "board", "code": "board_code"}).copy()
+    result["board"] = result["board"].map(normalize_board_name)
+    result["board_code"] = result["board_code"].astype(str).str.zfill(6)
+    result["group"] = result["board"].map(classify_group)
+    result = result.dropna(subset=["board"]).drop_duplicates("board").reset_index(drop=True)
+    result = result[["board", "group", "board_code"]]
+    if repository is not None:
+        rows = repository.replace_boards(result, source=THS_BOARD_SOURCE)
+        if logger is not None:
+            logger.event(
+                "board_names",
+                "ths",
+                "write",
+                message="同花顺行业板块快照写入 DuckDB",
+                rows=rows,
+            )
+    write_cache("ths_board_names", "industry", result)
+    return result
 
 
-def load_board_history(board, days, retries=4, retry_delay=2.0):
-    end_dt = pd.Timestamp.today().normalize()
+def load_board_history(
+    board,
+    days,
+    retries=4,
+    retry_delay=2.0,
+    repository=None,
+    logger=None,
+    as_of_date=None,
+    offline_cache=False,
+    board_code=None,
+    provider=None,
+    request_sleep=0.0,
+):
+    del offline_cache
+    provider = provider or ths
+    pipeline_retries = effective_pipeline_retries(provider, retries)
+    end_dt = pd.Timestamp(as_of_date).normalize() if as_of_date else pd.Timestamp.today().normalize()
     end_date = end_dt.strftime("%Y%m%d")
-    start_date = (datetime.now() - timedelta(days=max(days * 3, 180))).strftime("%Y%m%d")
-    cached = read_cache("board_history", board, date_cols=["date"])
-    if not cached.empty:
-        cached = cached.sort_values("date")
-        sliced = cached[cached["date"] <= end_dt].tail(days)
-        cache_reaches_cutoff = cached["date"].max() >= end_dt - pd.Timedelta(days=7)
-        if len(sliced) >= min(days, 60) and cache_reaches_cutoff:
-            return sliced.reset_index(drop=True)
+    start_date = (end_dt - pd.Timedelta(days=max(days * 3, 180))).strftime("%Y%m%d")
+    stored = pd.DataFrame()
+    if repository is not None:
+        try:
+            stored = repository.load_board_history(
+                board,
+                end_date=end_dt,
+                days=days,
+                date_column="date",
+                source=THS_HISTORY_SOURCE,
+            )
+            if not stored.empty:
+                stored = stored.sort_values("date")
+                has_required_depth = len(stored) >= min(days, 60)
+                cache_reaches_observation = stored["date"].max() >= end_dt
+                if has_required_depth and cache_reaches_observation:
+                    if logger is not None:
+                        logger.event(
+                            "board_history",
+                            "duckdb",
+                            "hit",
+                            message=f"{board} K线命中 DuckDB",
+                            rows=len(stored),
+                            context={"board": board},
+                        )
+                    return stored.reset_index(drop=True)
+                if has_required_depth:
+                    start_date = (
+                        stored["date"].max() + pd.Timedelta(days=1)
+                    ).strftime("%Y%m%d")
+        except Exception as exc:
+            if logger is not None:
+                logger.event(
+                    "board_history",
+                    "duckdb",
+                    "failed",
+                    message=str(exc),
+                    context={"board": board},
+                )
+    if not board_code:
+        raise ValueError(f"{board} 缺少同花顺板块代码")
     try:
+        if request_sleep > 0:
+            time.sleep(request_sleep)
         df = call_with_backoff(
-            lambda: ak.stock_board_industry_hist_em(
-                symbol=board,
+            lambda: provider.load_board_history(
+                board_code,
                 start_date=start_date,
                 end_date=end_date,
-                period="日k",
-                adjust="",
             ),
-            f"{board} 板块K线",
-            retries=retries,
+            f"{board} 同花顺板块K线",
+            retries=pipeline_retries,
             retry_delay=retry_delay,
         )
-    except Exception as exc:
-        cached = read_cache("board_history", board, date_cols=["date"])
-        if not cached.empty:
-            print(f"{board} K线读取失败，使用缓存: {exc}")
-            return cached.tail(days).reset_index(drop=True)
+        if logger is not None:
+            logger.event(
+                "board_history",
+                "ths",
+                "hit",
+                message=f"{board} K线使用同花顺",
+                rows=len(df),
+                context={"board": board, "board_code": str(board_code)},
+            )
+    except Exception:
+        if not stored.empty:
+            return stored.reset_index(drop=True)
         raise
     if df is None or df.empty:
         return pd.DataFrame()
     df = df.copy()
-    df["date"] = pd.to_datetime(df["日期"], errors="coerce")
-    for src, dst in [("开盘", "open"), ("收盘", "close"), ("最高", "high"), ("最低", "low"), ("成交额", "amount")]:
-        if src in df.columns:
-            df[dst] = pd.to_numeric(df[src], errors="coerce")
-    if "涨跌幅" in df.columns:
-        df["pct_chg"] = pd.to_numeric(df["涨跌幅"], errors="coerce") / 100.0
-    else:
-        df["pct_chg"] = df["close"].pct_change()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
-    write_cache("board_history", board, df)
-    return df.tail(days).reset_index(drop=True)
+    if repository is not None:
+        try:
+            rows = repository.upsert_board_history(
+                board,
+                df,
+                source=THS_HISTORY_SOURCE,
+            )
+            if logger is not None:
+                logger.event(
+                    "board_history",
+                    "duckdb",
+                    "write",
+                    message=f"{board} K线写入 DuckDB",
+                    rows=rows,
+                    context={"board": board},
+                )
+        except Exception as exc:
+            if logger is not None:
+                logger.event(
+                    "board_history",
+                    "duckdb",
+                    "write_failed",
+                    message=str(exc),
+                    context={"board": board},
+                )
+    canonical_columns = [
+        "date", "open", "high", "low", "close", "volume", "amount", "pct_chg"
+    ]
+    combined = pd.concat(
+        [
+            stored[[column for column in canonical_columns if column in stored.columns]],
+            df[[column for column in canonical_columns if column in df.columns]],
+        ],
+        ignore_index=True,
+        sort=False,
+    )
+    combined = combined.sort_values("date").drop_duplicates("date", keep="last")
+    write_cache("ths_board_history", board_code, combined)
+    return combined.tail(days).reset_index(drop=True)
 
 
 def build_board_daily(history_map, board_info, lookback):
@@ -255,41 +414,101 @@ def build_board_daily(history_map, board_info, lookback):
 
 
 def load_limit_up_by_date(date_keys):
-    rows = []
+    frames = []
     for date_key in date_keys:
+        cached = read_cache("limit_up_pool", date_key)
+        if not cached.empty:
+            cached = cached.copy()
+            cached["date_key"] = date_key
+            cached["code"] = (
+                cached["code"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(6)
+            )
+            frames.append(cached)
+            continue
         date_str = date_key.replace("-", "")
         try:
             zt = ak.stock_zt_pool_em(date=date_str)
-        except Exception:
-            zt = pd.DataFrame()
+        except Exception as exc:
+            raise RuntimeError(f"涨停池 {date_key} 读取失败: {exc}") from exc
         if zt is None or zt.empty:
-            continue
+            raise RuntimeError(f"涨停池 {date_key} 缺失，拒绝按 0 继续统计")
+        rows = []
         for _, row in zt.iterrows():
             board = row.get("所属行业") or row.get("行业") or "其他"
             rows.append({
                 "date_key": date_key,
                 "name": row.get("名称", ""),
-                "code": row.get("代码", ""),
+                "code": str(row.get("代码", "")).replace(".0", "").zfill(6),
                 "board": normalize_board_name(board),
                 "group": classify_group(board),
             })
-    return pd.DataFrame(rows)
+        frame = pd.DataFrame(rows)
+        write_cache("limit_up_pool", date_key, frame)
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame(columns=["date_key", "name", "code", "board", "group"])
+    return pd.concat(frames, ignore_index=True)
 
 
-def load_benchmark_daily(date_keys):
+def _prepare_benchmark_frame(frame):
+    required_columns = {"date", "open", "close"}
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        raise RuntimeError("上证指数数据为空")
+    missing_columns = required_columns.difference(frame.columns)
+    if missing_columns:
+        raise RuntimeError(
+            f"上证指数缺少必要字段: {sorted(missing_columns)}"
+        )
+    result = frame.copy()
+    result["date"] = pd.to_datetime(result["date"], errors="coerce")
+    result["close"] = pd.to_numeric(result["close"], errors="coerce")
+    result["open"] = pd.to_numeric(result["open"], errors="coerce")
+    result = (
+        result.dropna(subset=["date", "open", "close"])
+        .sort_values("date")
+        .drop_duplicates("date", keep="last")
+        .reset_index(drop=True)
+    )
+    if result.empty:
+        raise RuntimeError("上证指数没有可用的日期/开盘/收盘数据")
+    return result
+
+
+def load_benchmark_frame():
     try:
-        df = ak.stock_zh_index_daily_em(symbol=BENCHMARK_SYMBOL)
-    except Exception:
-        return pd.DataFrame()
-    if df is None or df.empty:
-        return pd.DataFrame()
-    df = df.copy()
+        frame = ak.stock_zh_index_daily(symbol=BENCHMARK_SYMBOL)
+    except Exception as exc:
+        raise RuntimeError(f"上证指数读取失败: {exc}") from exc
+    return _prepare_benchmark_frame(frame)
+
+
+def load_benchmark_daily(date_keys, benchmark_frame=None):
+    df = _prepare_benchmark_frame(
+        load_benchmark_frame() if benchmark_frame is None else benchmark_frame
+    )
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df["date_key"] = df["date"].dt.strftime("%Y-%m-%d")
-    df["close"] = pd.to_numeric(df["close"], errors="coerce")
-    df["open"] = pd.to_numeric(df["open"], errors="coerce")
     df["pct_chg"] = df["close"].pct_change()
-    return df[df["date_key"].isin(date_keys)].copy()
+    required_dates = list(dict.fromkeys(str(value) for value in date_keys))
+    result = df[df["date_key"].isin(required_dates)].copy()
+    missing_dates = sorted(set(required_dates).difference(result["date_key"]))
+    if missing_dates:
+        raise RuntimeError(
+            f"上证指数缺少板块统计所需交易日: {', '.join(missing_dates)}"
+        )
+    return result
+
+
+def resolve_latest_trading_date(as_of_date=None, benchmark_frame=None):
+    cap = pd.Timestamp(as_of_date).normalize() if as_of_date else pd.Timestamp.today().normalize()
+    frame = _prepare_benchmark_frame(
+        load_benchmark_frame() if benchmark_frame is None else benchmark_frame
+    )
+    dates = frame["date"]
+    dates = dates[dates.notna() & (dates <= cap)]
+    if dates.empty:
+        raise RuntimeError(f"无法确定 {cap:%Y-%m-%d} 之前的板块观察交易日")
+    return dates.max().normalize()
 
 
 def sample_board_daily(lookback):
@@ -518,8 +737,15 @@ def save_outputs(board_daily, limit_up, benchmark, top_amount):
     return xlsx_path, md_path, analysis_lines
 
 
-def main(argv=None):
+def main(argv=None, repository=None, logger=None, provider=None):
     args = parse_args(argv)
+    provider = provider or ths
+    if repository is None:
+        database = Database()
+        database.initialize()
+        repository = SectorRepository(database)
+    if logger is None:
+        logger = PartLogger("sector_stats", repository=repository)
     if args.sample:
         board_daily = sample_board_daily(args.lookback)
         date_keys = sorted(board_daily["date_key"].unique())
@@ -529,8 +755,19 @@ def main(argv=None):
             "pct_chg": [0.01, -0.008, 0.018, 0.026, -0.004, 0.012, 0.006, 0.021, 0.009, 0.015][-len(date_keys):],
         })
     else:
+        benchmark_frame = load_benchmark_frame()
+        observation_date = resolve_latest_trading_date(
+            benchmark_frame=benchmark_frame
+        )
         try:
-            boards = load_board_names(retries=args.retries, retry_delay=args.retry_delay)
+            with logger.part("board_names"):
+                boards = load_board_names(
+                    retries=args.retries,
+                    retry_delay=args.retry_delay,
+                    repository=repository,
+                    logger=logger,
+                    provider=provider,
+                )
         except Exception as exc:
             if args.fallback_sample:
                 print(f"真实板块接口失败，改用 --fallback-sample 样例数据: {exc}")
@@ -546,7 +783,7 @@ def main(argv=None):
                 print(f"文字分析已保存: {md_path}")
                 print("\n".join(analysis_lines[:8]))
                 return
-            raise SystemExit(f"无法访问东方财富板块接口：{exc}\n可先用 --sample 查看版式，或换网络后重跑真实数据。")
+            raise SystemExit(f"无法访问同花顺板块接口：{exc}\n可先用 --sample 查看版式，或换网络后重跑真实数据。")
         if boards.empty:
             if args.fallback_sample:
                 print("真实板块列表为空，改用 --fallback-sample 样例数据")
@@ -562,20 +799,105 @@ def main(argv=None):
             raise SystemExit("无法获取行业板块列表")
         board_info = boards.set_index("board").to_dict("index")
         history_map = {}
-        for idx, board in enumerate(boards["board"].tolist(), start=1):
-            try:
-                history_map[board] = load_board_history(
-                    board,
-                    args.history_days,
-                    retries=args.retries,
-                    retry_delay=args.retry_delay,
-                )
-            except Exception as exc:
-                print(f"跳过 {board}: {exc}")
-            if args.sleep > 0:
-                time.sleep(args.sleep)
-            if idx % 20 == 0:
-                print(f"板块K线进度 {idx}/{len(boards)}")
+        offline_cache = bool(boards.attrs.get("offline_cache"))
+        expected_boards = len(boards)
+        fresh_completed = 0
+        history_days = max(MINIMUM_STATS_HISTORY_ROWS, args.history_days)
+        minimum_history_rows = min(history_days, MAXIMUM_REQUIRED_HISTORY_ROWS)
+        with logger.part("board_history"):
+            for completed, (_, board_row) in enumerate(boards.iterrows(), start=1):
+                board = board_row["board"]
+                try:
+                    history = load_board_history(
+                        board,
+                        history_days,
+                        retries=args.retries,
+                        retry_delay=args.retry_delay,
+                        repository=repository,
+                        logger=logger,
+                        offline_cache=offline_cache,
+                        as_of_date=observation_date,
+                        board_code=board_row.get("board_code"),
+                        provider=provider,
+                        request_sleep=args.sleep,
+                    )
+                    history_map[board] = history
+                    if sector_history_is_fresh(
+                        history,
+                        observation_date=observation_date,
+                        max_stale_days=0,
+                        minimum_rows=minimum_history_rows,
+                    ):
+                        fresh_completed += 1
+                except Exception as exc:
+                    print(f"跳过 {board}: {exc}")
+                    logger.event(
+                        "board_history",
+                        "board",
+                        "skip",
+                        message=str(exc),
+                        context={"board": board},
+                    )
+                if not coverage_can_still_pass(
+                    expected=expected_boards,
+                    completed=completed,
+                    fresh=fresh_completed,
+                    minimum=MINIMUM_SECTOR_COVERAGE,
+                ):
+                    message = (
+                        f"提前停止: completed={completed} fresh={fresh_completed} "
+                        f"remaining={expected_boards - completed}，已无法达到 "
+                        f"{MINIMUM_SECTOR_COVERAGE:.0%} 覆盖率"
+                    )
+                    print(message)
+                    logger.event(
+                        "board_history",
+                        "early_stop",
+                        "failed",
+                        message=message,
+                        rows=fresh_completed,
+                    )
+                    break
+                if completed % 20 == 0:
+                    print(f"板块K线进度 {completed}/{len(boards)}")
+                    logger.event(
+                        "board_history",
+                        "progress",
+                        "running",
+                        message=f"板块K线进度 {completed}/{len(boards)}",
+                        rows=len(history_map),
+                    )
+        history_map, coverage = validate_sector_histories(
+            boards["board"].tolist(),
+            history_map,
+            observation_date=observation_date,
+            max_stale_days=0,
+            minimum_rows=minimum_history_rows,
+            minimum=MINIMUM_SECTOR_COVERAGE,
+        )
+        coverage_status = "pass" if coverage.passed else "failed"
+        coverage_message = (
+            f"provider=ths expected={coverage.expected} fresh={coverage.fresh} "
+            f"stale={coverage.stale} missing={coverage.missing} "
+            f"coverage={coverage.coverage:.1%}"
+        )
+        print(f"板块覆盖率: {coverage_message}")
+        logger.event(
+            "coverage",
+            "ths",
+            coverage_status,
+            message=coverage_message,
+            rows=coverage.fresh,
+            context={
+                "expected": coverage.expected,
+                "fresh": coverage.fresh,
+                "stale": coverage.stale,
+                "missing": coverage.missing,
+                "coverage": coverage.coverage,
+            },
+        )
+        if not coverage.passed:
+            raise SystemExit(2)
         board_daily = build_board_daily(history_map, board_info, args.lookback)
         if board_daily.empty:
             if args.fallback_sample:
@@ -592,13 +914,12 @@ def main(argv=None):
             raise SystemExit("无有效板块历史数据")
         date_keys = sorted(board_daily["date_key"].unique())
         limit_up = load_limit_up_by_date(date_keys)
-        benchmark = load_benchmark_daily(date_keys)
+        benchmark = load_benchmark_daily(
+            date_keys,
+            benchmark_frame=benchmark_frame,
+        )
 
     xlsx_path, md_path, analysis_lines = save_outputs(board_daily, limit_up, benchmark, args.top_amount)
     print(f"Excel已保存: {xlsx_path}")
     print(f"文字分析已保存: {md_path}")
     print("\n".join(analysis_lines[:8]))
-
-
-if __name__ == "__main__":
-    main()

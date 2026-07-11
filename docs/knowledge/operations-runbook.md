@@ -1,134 +1,187 @@
-# 数据回填与每日流水线运维手册
+# 每日流水线运维
 
-## 1. 运行类型
+## 1. 解释器与入口
 
-- **历史回填**：首次收集全市场可获得的完整三大财务报表与版本。
-- **每日增量**：检查新报告期、新公告和修订，更新行情、板块和派生截面。
-- **生产分析**：在统一观察日下执行市场结构、板块、基本面和报告。
-- **离线验证**：不联网，仅使用本地归档重建指定观察日结果。
-
-## 2. 历史回填流程
-
-1. 生成固定股票池和任务清单。
-2. 初始化或迁移 `var/data/my_trade.duckdb` schema。
-3. 以低并发处理股票与报表类型，遵守数据源限速。
-4. 工作线程获取原始响应并计算规范化内容哈希，将批次交给主进程写入协调器。
-5. 在同一 DuckDB 事务中写入原始载荷、版本元数据、财务事实和任务状态。
-6. 定期输出成功、失败、重试、明确缺失和三表完整率。
-7. 任务中断后从未完成或可重试状态继续，不重新抓取已验证哈希。
-
-## 3. 每日流水线顺序
-
-```text
-创建 RunContext
-  → 更新交易日和股票池
-  → 更新行情缓存
-  → 检查新财报与修订
-  → 更新板块数据和历史成分
-  → 构建观察日财务截面
-  → 计算三浪三技术命中并筛选市值
-  → 执行价值线与基本面策略
-  → 执行覆盖率和日期门控
-  → 生成 CSV/HTML
-  → 门控通过后推送
-```
-
-每一步只写当前 `run_id` 的数据库记录，并把状态写入 `ops.runs` 与 `ops.run_steps`。重跑同一观察日应创建新的 `run_id`，旧运行不可覆盖。
-
-## 4. 覆盖率指标
-
-每日最少报告：
-
-- 股票池数量；
-- 行情有效数量与覆盖率；
-- 当前报告期财务有效数量与覆盖率；
-- 三表完整数量；
-- 行业已知数量；
-- 市值有效数量；
-- 新增财报版本和修订版本数量；
-- 首选源成功、回退成功、失败和明确缺失数量。
-
-迁移期行情低于 90% 或当前报告期财务低于 35% 时禁止正式发布；任一低于 95% 时显示警告。新数据层正式切换要求行情和当前可见财务均至少达到 95%。
-
-## 5. 常见故障处理
-
-### 数据源连接失败
-
-确认失败属于网络、限流、源端空数据还是字段变化。按固定优先级执行回退，并记录原因。不要删除已存在的有效版本，也不要把连接失败登记成源端明确缺失。
-
-### 财报字段变化
-
-原始响应仍然保存在 `raw.financial_payloads`，适配器映射失败的版本标为 `normalization_failed`。修复映射后从数据库原始载荷重新归一化，无需重新下载。
-
-### 原始载荷与版本哈希不一致
-
-停止消费受影响记录，运行数据库完整性审计。根据可信备份恢复，或从数据源重新抓取并生成新版本。禁止手工改写哈希绕过检查。
-
-### 日期门控失败
-
-检查运行清单中的观察日、实际行情截止日、板块日期和财报生效时间。不得通过复制、改名或修改文件时间绕过门控。
-
-### 三浪三市值大量缺失
-
-分别核对收盘价、总股本版本和代码映射。缺失股票保持在诊断名单，不得通过 `missing_mktcap_policy=pass` 放入正式结果。
-
-### 三浪三停牌与数据不可用
-
-- `traded`：观察日存在有效日线，可以进入本次正式 21 日去重集合；
-- `suspended_or_no_trade`：保留窗口内历史技术命中，但本次正式集合排除；下一观察日重新判断；
-- `data_unavailable`：所有行情源失败，失败关闭并进入诊断，不得标记为停牌。
-
-日报同时显示 21 日技术去重数、正式去重数、观察日无交易排除数和数据不可用数。任何状态只属于本次观察日，不形成永久黑名单。
-
-## 6. 断点与重试
-
-`ops.ingestion_tasks` 至少区分 `pending`、`running`、`succeeded`、`retryable_failed`、`permanent_missing` 和 `normalization_failed`。进程启动时把超时的 `running` 任务恢复为可重试状态。重试采用有上限的指数退避；永久缺失只有在源端明确确认或多来源均确认无数据时使用。
-
-## 7. 生产入口
-
-正式入口为 `python -m apps.daily_pipeline`，`scripts/run_daily_analysis.ps1` 只设置解释器、编码和代理后调用该入口。根目录旧脚本已经移除。单步补跑使用对应的 `apps.*` 模块，不能重新拼接第二套生产顺序。
-
-## 8. 备份与恢复
-
-需要备份 `var/data/my_trade.duckdb`。备份必须通过受控检查点或一致性导出生成，不能在活跃写事务中直接复制数据库文件。持久化增量缓存位于 `var/cache`，在数据库尚未成为全部生产数据唯一来源前也必须纳入受控备份。
-
-## 9. 日常检查清单
-
-- 最新正式运行是否门控通过；
-- 观察日与所有实际截止日是否一致；
-- 覆盖率是否下降；
-- 新增修订数量是否异常；
-- 回退和失败数量是否突然增加；
-- 三浪三技术命中、市值有效和最终命中数量是否均有输出；
-- 报告查询的记录是否全部属于同一 `run_id`；
-- 日志和推送中是否意外出现凭证或敏感配置。
-
-## 10. 导出原则
-
-当前生产链仍生成 CSV、Excel 和 HTML，统一保存到 `var/exports/selection`、`var/exports/market` 和 `var/exports/reports`。导出文件是可再生产物，不作为测试夹具；六份回归样本独立保存在 `tests/fixtures/regression`。后续完成 DuckDB 生产切换后，再将自动导出改为显式导出。
-
-## 11. 运行记录接入顺序
-
-迁移中的顶层入口按以下顺序使用基础模块：
-
-1. 创建不可变 `RunContext`，日期校验失败时不得初始化正式运行；
-2. 调用 `Database.initialize()` 应用尚未执行的 schema 迁移；
-3. 调用 `RunRepository.start_run()`，每个步骤开始前调用 `start_step()`；
-4. 步骤结束时调用 `finish_step()`，明确写入成功或失败、行数和覆盖率；
-5. 全部门控通过后调用 `finish_run(..., gate_status="passed")`，任何关键失败都写入 `failed`，不得让运行长期停留在 `running`。
-
-`stock_research.storage` 已提供上述基础设施；尚未接入运行记录的策略流水线必须按此顺序迁移，不得自行维护第二套运行状态。
-
-## 12. 历史结果回归审计
-
-基线清单 `tests/regression/legacy-output-v1.json` 固定了 3 次三浪三统计、2 次合并选股和 1 次因子选股。每次迁移算法、指标、日期截断或数据读取路径后执行：
+推荐使用项目生产解释器：
 
 ```powershell
-python -m stock_research.regression.output_baseline verify tests/regression/legacy-output-v1.json
+$Python = 'D:\ActionsRunner\my-trade\python\python.exe'
 ```
 
-输出必须为 `6 baselines verified`。`file_sha256 changed` 表示文件字节发生变化；`semantic_sha256 changed` 表示排序后的日期、股票代码或关键业务指标发生变化，必须解释并获得批准后才能更新基线。基线位于 `tests/fixtures/regression`，不依赖 `var/exports`。
+完整生产入口：
 
-## 13. SQL 验收状态
+```powershell
+.\scripts\run_daily_analysis.ps1
+```
 
-`var/data/my_trade.duckdb` 已验证 schema 迁移幂等、约束、只读连接、运行步骤生命周期和事务回滚。生产流水线尚未全部改为只读 DuckDB，因此运维时必须区分“SQL 基础层可用”和“生产唯一事实源已经切换”；后者仍需后续迁移与并行回归。
+脚本设置 UTF-8、选择财报期、处理代理环境变量并调用 `python -m apps.daily_pipeline`。不要手工串联多个单步命令替代生产入口。
+
+## 2. 七步顺序
+
+```text
+1. formula33             21 日市场结构和观察日资格
+2. sector_stats          板块行情统计与持久化
+3. sector_watch          主线评分、涨停扩散和成分
+4. factor_selection      独立因子候选
+5. fundamental_update    财务增量与动态截面
+6. fundamental_selection 价值线和正常基本面候选
+7. daily_report          四项日报、CSV/HTML 和可选推送
+```
+
+`fundamental_update` 失败时必须跳过 `fundamental_selection`。六个上游步骤任一失败时必须跳过正式日报推送。日报还会校验 Formula33 完成清单、样例标记、必需产物数量和三个输入的观察日。
+
+## 3. 推荐运行流程
+
+先做离线结构检查：
+
+```powershell
+& $Python -m apps.daily_pipeline --dry-run --no-push
+```
+
+再完整跑一遍但不推送：
+
+```powershell
+& $Python -m apps.daily_pipeline --no-push
+```
+
+逐项确认七步退出码、结果数量、日期和产物后，才执行正式推送：
+
+```powershell
+& $Python -m apps.daily_pipeline
+```
+
+正式推送成功的日志必须同时出现：
+
+```text
+PUSH_RESULT_1 True
+PUSH_RESULT_2 True
+```
+
+只看到日报文件生成不代表推送成功。任何一步失败或任一 PushPlus 返回失败，都不能报告整次生产成功。
+
+## 4. Formula33 增量与断点
+
+生产参数固定使用 AkShare 清单、交易日和前复权行情，并带 `--require-end-trade`。日线缓存版本是 `qfq-cache-v2`。
+
+运行行为：
+
+- 单股已有完整历史时直接从缓存读取；
+- 新交易日只请求缺少的增量区间；
+- 运行在第 N 只股票中断后，前面已原子落盘的缓存继续有效；
+- 重跑时已完成股票快速通过，未完成或缺日期的股票才访问网络；
+- 全部必要股票、覆盖率和输出均成功后才写 `var/state/formula33_completion.json`；
+- 同一观察日、有效参数和股票池完全匹配时直接复用完成清单；
+- 周末复跑最近交易日时完成清单命中，日志应显示 `network_fetch=0`。
+
+不要删除有效缓存来处理网络故障。先确认请求、限流、代理和提供方状态；缓存版本或复权口径确实错误时才做有记录的定向重建。
+
+## 5. Formula33 固定验收
+
+复核命令：
+
+```powershell
+& $Python -m apps.formula33 --start-date 2026-06-11 --end-date 2026-07-10 --history-days 420 --workers 2 --maxtasksperchild 1000 --sleep 0.5 --retries 5 --retry-delay 5 --capital-workers 1 --require-end-trade --price-source akshare --metadata-source akshare --market-cap-source auto --missing-mktcap-policy exclude
+```
+
+验收值：
+
+```text
+技术条件原始去重       193
+上市不足 300 天排除      2
+技术全量               191
+观察日无交易排除          3
+正式结果               188
+市值大于 100 亿元独立池 145
+```
+
+还必须核对 188 只逐代码回归，而不只核对总数。`001331` 的 2026-05-27 前复权收盘价应为 `48.08`。
+
+## 6. 板块验收
+
+`sector_stats` 和 `sector_watch` 必须都成功：
+
+- 板块列表来自真实提供方，不使用样例回退；
+- 每个板块历史满足最少行数；
+- 实际最后交易日符合新鲜度要求；
+- 整体新鲜覆盖率达到门槛；
+- 排名前列板块有有效板块代码；
+- 主线板块成分全部成功获取；
+- 涨停池能够按股票代码与板块成分交叉核对。
+
+接口失败时保留已验证的板块缓存。缓存过期、缺行或来源不匹配时必须失败关闭，不能用旧文件改名伪装本轮结果。
+
+## 7. 基本面与选股验收
+
+`fundamental_update` 输出本轮观察日、报告期、行情覆盖率和财务覆盖率。生产门槛由七步入口传入：
+
+```text
+最低行情覆盖率       90%
+最低财务覆盖率       35%
+目标财务覆盖率       95%
+```
+
+`fundamental_selection` 必须生成：
+
+- 基本价值线或附近全量；
+- 正常基本面候选；
+- 每只股票的报告期、技术截止日、方法、质量、流动性、市值、主流板块和右侧位置。
+
+价值线和正常基本面数量可以随观察日变化，不以固定数量为成功标准。成功标准是数据覆盖、硬条件、日期和产物完整。
+
+## 8. 产物检查
+
+主要输出目录：
+
+- `var/exports/market`：Formula33 Excel/CSV 和市场结果；
+- `var/exports/selection`：因子、基本面和合并选择 CSV；
+- `var/exports/reports`：完整四项 HTML 日报；
+- `var/logs`：PowerShell transcript 和步骤日志；
+- `var/state`：Formula33 完成清单、财务断点和日报比较基线。
+
+日报只消费本轮明确捕获的产物。不要把 `_sample` 文件、旧观察日文件或手工导出文件放进正式输入。
+
+## 9. 常见故障
+
+### 网络或限流
+
+区分连接错误、限流、空数据和字段变化。保留有效缓存，按已配置重试和退避处理。Formula33 的 `data_unavailable` 不能改记为停牌。
+
+### 观察日无交易
+
+股票仍保留在 Formula33 技术全量和停牌诊断，但从正式名单排除。下一观察日重新判断，不写永久黑名单。
+
+### Formula33 完成清单未命中
+
+检查观察日、有效参数、股票池、代码版本和输出文件是否变化。参数不同或产物缺失时重新计算是正确行为；不能手工修改清单骗过门禁。
+
+### 板块覆盖失败
+
+查看 `ops.pipeline_events` 和控制台中的 expected、fresh、stale、missing、coverage。修复数据源或补齐缓存后重跑板块步骤，再从完整生产入口验证。
+
+### 财务覆盖不足
+
+保留 `var/state` 中的断点，后续从缺失股票继续补齐。不得为了推送降低生产门槛或把请求失败当成无财务数据。
+
+### 日期不一致
+
+检查 Formula33 观察日、板块实际日期和基本面技术截止日。日报拒绝混合旧产物；不要通过改文件名或修改时间绕过。
+
+## 10. 代码验证
+
+```powershell
+& $Python -m compileall -q apps stock_research tests
+& $Python -m pytest -q
+& $Python -m stock_research.regression.output_baseline verify tests/regression/legacy-output-v1.json
+```
+
+历史基线成功输出应为 `6 baselines verified`。Formula33 的 188 只逐代码回归包含在测试套件中。
+
+## 11. DuckDB 检查边界
+
+当前迁移只包含 7 张应用表：3 张基础运维表、1 张事件表、2 张板块表和 1 张股票日线表。顶层七步生产成功不能通过查询一个不存在的全链路运行表来判断；以退出码、完成清单、覆盖率、产物和 PushPlus 返回值共同验收。
+
+数据库备份应在没有活跃写事务时进行。由于财务和部分生产数据仍在文件缓存中，当前灾备范围还必须包含 `var/cache` 和 `var/state`。
+
+## 12. 计划任务
+
+`scripts/setup_scheduled_task.bat` 创建每天 20:30 的 `StockSelection-Daily` 任务，工作目录为项目根目录。定时任务应使用与手工验证相同的解释器和环境变量，并保留 `var/logs` 中的完整日志。

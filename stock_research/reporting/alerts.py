@@ -12,7 +12,3 @@ def main(argv=None):
     args = parser.parse_args(argv)
     ok = send_pushplus(args.title, f"<p>{args.message}</p>")
     return 0 if ok else 2
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

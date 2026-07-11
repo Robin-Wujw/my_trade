@@ -4,16 +4,14 @@ from pathlib import Path
 ROOT = Path(__file__).parents[2]
 
 
-def test_stock_selection_workflow_runs_full_pipeline_daily():
-    text = (ROOT / ".github/workflows/stock-selection.yml").read_text(
+def test_local_scheduled_task_is_daily_and_checkout_portable():
+    text = (ROOT / "scripts/setup_scheduled_task.bat").read_text(
         encoding="utf-8"
     )
 
-    assert 'cron: "30 8 * * *"' in text
-    assert "Three-day schedule gate" not in text
-    assert "steps.gate.outputs.run" not in text
-    assert "Run tests" in text
-    assert "Run full-market selection" in text
+    assert "New-ScheduledTaskTrigger -Daily -At '20:30'" in text
+    assert "%~dp0" in text
+    assert r"D:\MyCodes\my_trade" not in text
 
 
 def test_strategy_uses_only_rolling_21_day_formula33_breadth():

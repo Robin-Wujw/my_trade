@@ -74,6 +74,110 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        version=2,
+        name="sector_persistence",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS raw.sector_boards (
+                board_name VARCHAR PRIMARY KEY,
+                group_name VARCHAR,
+                source VARCHAR NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS raw.sector_board_history (
+                board_name VARCHAR NOT NULL,
+                trade_date DATE NOT NULL,
+                open DOUBLE,
+                close DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                amount DOUBLE,
+                volume DOUBLE,
+                pct_chg DOUBLE,
+                source VARCHAR NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (board_name, trade_date)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS ops.pipeline_events (
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                run_id VARCHAR,
+                step_name VARCHAR NOT NULL,
+                part_name VARCHAR NOT NULL,
+                event_type VARCHAR NOT NULL,
+                status VARCHAR NOT NULL,
+                message VARCHAR,
+                rows BIGINT,
+                elapsed_seconds DOUBLE,
+                context_json VARCHAR,
+                CHECK (rows IS NULL OR rows >= 0),
+                CHECK (elapsed_seconds IS NULL OR elapsed_seconds >= 0)
+            )
+            """,
+        ),
+    ),
+    Migration(
+        version=3,
+        name="stock_kline_persistence",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS raw.stock_kline_daily (
+                source VARCHAR NOT NULL,
+                code VARCHAR NOT NULL,
+                trade_date DATE NOT NULL,
+                open DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                close DOUBLE,
+                volume DOUBLE,
+                tradestatus VARCHAR,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (source, code, trade_date)
+            )
+            """,
+        ),
+    ),
+    Migration(
+        version=4,
+        name="provider_aware_sector_storage",
+        statements=(
+            "ALTER TABLE raw.sector_boards ADD COLUMN board_code VARCHAR",
+            """
+            CREATE TABLE raw.sector_board_history_provider_aware (
+                board_name VARCHAR NOT NULL,
+                trade_date DATE NOT NULL,
+                open DOUBLE,
+                close DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                amount DOUBLE,
+                volume DOUBLE,
+                pct_chg DOUBLE,
+                source VARCHAR NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (board_name, trade_date, source)
+            )
+            """,
+            """
+            INSERT INTO raw.sector_board_history_provider_aware (
+                board_name, trade_date, open, close, high, low, amount,
+                volume, pct_chg, source, updated_at
+            )
+            SELECT board_name, trade_date, open, close, high, low, amount,
+                   volume, pct_chg, source, updated_at
+            FROM raw.sector_board_history
+            """,
+            "DROP TABLE raw.sector_board_history",
+            """
+            ALTER TABLE raw.sector_board_history_provider_aware
+            RENAME TO sector_board_history
+            """,
+        ),
+    ),
 )
 
 

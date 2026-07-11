@@ -5,7 +5,7 @@ import argparse
 import os
 from pathlib import Path
 
-from stock_research.api.pushplus import send_pushplus
+from stock_research.core.console import configure_utf8_console
 from stock_research.core.paths import PATHS
 from stock_research.core.config import load_pipeline_config
 from stock_research.pipelines.daily import (
@@ -31,6 +31,7 @@ def build_parser():
 
 
 def main(argv=None) -> int:
+    configure_utf8_console()
     args = build_parser().parse_args(argv)
     config = load_pipeline_config(Path(args.config))
     steps = build_default_steps(
@@ -44,9 +45,6 @@ def main(argv=None) -> int:
     result = run_daily_pipeline(
         steps=steps,
         no_push=args.no_push,
-        alert=lambda message: send_pushplus(
-            "Daily selection pipeline failed", f"<p>{message}</p>"
-        ),
     )
     if result.failed_steps:
         print("FAILED STEPS: " + ", ".join(result.failed_steps))
