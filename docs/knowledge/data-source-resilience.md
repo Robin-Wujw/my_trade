@@ -39,15 +39,17 @@ Sequoia-X 的回填流程包含：
 
 ## 本次已实施改进
 
-### Tushare 优先行情源
+### Tushare 标准化补充源
 
-Formula33 的 `--price-source` 现在支持 `auto/tushare/akshare/baostock`，默认 `auto`。配置 token 后，启动时用一只股票的小窗口探测 `daily` 与 `adj_factor` 权限：两者均可用才选择 Tushare；无 token、无复权因子权限、接口异常或空结果时自动回退 AkShare。显式指定 `tushare` 时不会静默换源。
+Formula33 的 `--price-source` 支持 `tushare/akshare/baostock`，默认仍为 AkShare。Tushare 保留为显式的小批量或高权限账号选项。启动时只检查 token，不做能力探测，以免探测本身消耗 `adj_factor` 的低频额度。
 
 Tushare 返回的不复权 OHLC 与复权因子在本地按“价格 × 当日因子 ÷ 请求截止日因子”计算前复权，保持当前 Formula33 的 QFQ 口径。增量请求造成锚点变化时，既有重叠检测会触发整窗刷新。
 
 本项目直接使用 Tushare 官方标准 HTTP 协议，不依赖额外 SDK。token 只从 `TUSHARE_TOKEN`、`TUSHARE_TOKEN_FILE` 或被 Git 忽略的 `var/secrets/tushare_token` 读取，不写入日志、缓存元数据和提交。
 
-官方权限表显示 120 积分档为每分钟 50 次、每天 8000 次且只开放不复权日线；复权行情还需要复权因子权限。默认 `TUSHARE_MIN_INTERVAL=1.25`，通过文件锁在所有 worker 之间共享，合计约 48 次/分钟，为 50 次限制留出余量。一次股票前复权窗口需要 `daily` 和 `adj_factor` 两次调用，因此首次全市场回填仍可能很慢或触及每日总量，后续由 DuckDB/CSV 增量缓存减少请求。
+官方权限表显示 120 积分档为每分钟 50 次、每天 8000 次且只开放不复权日线；复权行情还需要复权因子权限。接口自身还可能有更低限制：当前账号实测 `adj_factor` 返回 40203，提示 1 次/分钟，个别请求提示 1 次/小时。因此不能把账号总频次直接套到每个接口。一次股票前复权窗口需要 `daily` 和 `adj_factor` 两次调用，当前逐股架构不适合用此账号做全市场 Tushare K 线。
+
+Tushare 仍优先用于 `daily_basic` 总市值：一次请求可返回全市场，本账号实测返回 5599 行，标准化程度和调用效率都优于逐股抓取。前复权 K 线使用更快的 AkShare，并继续由本地缓存和完整性规则保护。
 
 相关官方说明：
 
@@ -105,7 +107,7 @@ PowerShell 示例：
 $env:AKSHARE_MIN_INTERVAL = "0.3"
 $env:BAOSTOCK_MIN_INTERVAL = "0.1"
 $env:TUSHARE_TOKEN_FILE = "D:\secure\tushare_token"
-python -m apps.formula33 --price-source auto --workers 2 --retries 5 --retry-delay 2
+python -m apps.formula33 --price-source akshare --workers 2 --retries 5 --retry-delay 2
 ```
 
 ## 暂未实施

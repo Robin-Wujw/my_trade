@@ -96,9 +96,9 @@ def parse_args(argv=None):
     parser.add_argument("--maxtasksperchild", type=int, default=200, help="多进程模式下每个worker处理多少任务后重启")
     parser.add_argument(
         "--price-source",
-        choices=["auto", "tushare", "akshare", "baostock"],
-        default="auto",
-        help="前复权K线来源；auto 有权限时优先 Tushare，否则 AkShare",
+        choices=["tushare", "akshare", "baostock"],
+        default="akshare",
+        help="前复权K线来源；默认 AkShare，Tushare 低频账号仅适合显式小批量使用",
     )
     parser.add_argument("--metadata-source", choices=["akshare", "baostock", "auto"], default="akshare", help="交易日/股票池/上市日期来源，默认优先 AkShare")
     parser.add_argument("--min-mktcap", type=float, default=100.0, help="最低总市值，单位亿元")
@@ -1669,34 +1669,12 @@ def load_kline_tushare(code, start_date, end_date, retries=4, retry_delay=1.5):
 
 
 def resolve_price_source(requested, start_date, end_date, retries, retry_delay):
-    if requested not in {"auto", "tushare"}:
+    if requested != "tushare":
         return requested
     if not get_tushare_token():
-        if requested == "tushare":
-            raise RuntimeError("--price-source tushare 需要配置 Tushare token")
-        print("未配置 Tushare token，前复权 K 线使用 AkShare")
-        return "akshare"
-    probe_start = max(
-        pd.to_datetime(start_date),
-        pd.to_datetime(end_date) - pd.DateOffset(days=10),
-    ).strftime("%Y-%m-%d")
-    try:
-        probe = load_kline_tushare(
-            "sz.000001",
-            probe_start,
-            end_date,
-            retries=retries,
-            retry_delay=retry_delay,
-        )
-        if probe.empty:
-            raise RuntimeError("能力探测返回空行情")
-        print("前复权 K 线来源: Tushare（daily + adj_factor）")
-        return "tushare"
-    except Exception as exc:
-        if requested == "tushare":
-            raise RuntimeError(f"Tushare 前复权能力探测失败: {exc}") from exc
-        print(f"Tushare 前复权权限或服务不可用，回退 AkShare: {exc}")
-        return "akshare"
+        raise RuntimeError("--price-source tushare 需要配置 Tushare token")
+    print("前复权 K 线来源: Tushare（显式小批量模式）")
+    return "tushare"
 
 
 def load_kline_akshare(code, start_date, end_date, retries=4, retry_delay=1.5):

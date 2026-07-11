@@ -132,17 +132,28 @@ def test_tushare_kline_calculates_end_date_anchored_qfq(monkeypatch):
     assert result["volume"].tolist() == [100.0, 120.0]
 
 
-def test_auto_price_source_falls_back_without_tushare_qfq_permission(monkeypatch):
+def test_explicit_tushare_source_requires_token(monkeypatch):
+    monkeypatch.setattr(formula33, "get_tushare_token", lambda: "")
+
+    with pytest.raises(RuntimeError, match="需要配置"):
+        formula33.resolve_price_source(
+            "tushare", "2026-01-01", "2026-01-10", 1, 0
+        )
+
+
+def test_explicit_tushare_source_does_not_consume_probe_quota(monkeypatch):
     monkeypatch.setattr(formula33, "get_tushare_token", lambda: "configured")
     monkeypatch.setattr(
         formula33,
         "load_kline_tushare",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("没有权限")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("source resolution must not consume adj_factor quota")
+        ),
     )
 
     assert formula33.resolve_price_source(
-        "auto", "2026-01-01", "2026-01-10", 1, 0
-    ) == "akshare"
+        "tushare", "2026-01-01", "2026-01-10", 1, 0
+    ) == "tushare"
 
 
 def test_duckdb_value_wins_over_stale_csv_for_the_same_trade_date(
