@@ -249,6 +249,16 @@ def test_fully_cached_range_does_not_call_network(monkeypatch, tmp_path):
         "sz.000001",
         formula33.load_cached_kline("akshare", "sz.000001"),
     )
+    cache_event = {}
+    formula33.load_kline_with_cache(
+        "akshare",
+        "sz.000001",
+        "2026-07-06",
+        "2026-07-10",
+        repository=repository,
+        cache_event=cache_event,
+    )
+    assert cache_event == {"complete_file_cache": True}
 
     class RepositoryMustNotOpen:
         @staticmethod

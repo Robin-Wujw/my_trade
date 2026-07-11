@@ -6,6 +6,7 @@
 
 - [tianjingle/zMain](https://github.com/tianjingle/zMain)，检查提交 `327b5c5ab1ce075f419471a002ebdb393594b148`
 - [sngyai/Sequoia-X](https://github.com/sngyai/Sequoia-X)，检查提交 `444c0db69ff36b46ef2b22ab265051d60c16029d`
+- [Junene611/akshare_alpha_project](https://github.com/Junene611/akshare_alpha_project)，检查提交 `274be71dc6291222ecd3f6c38e21293535e36010`
 
 ## 参考项目对照
 
@@ -27,6 +28,12 @@ Sequoia-X 的回填流程包含：
 6. 单只失败计数并继续，任务可再次运行续传。
 
 不足之处是日常批量同步 worker 没有同等级重试，非零错误码会被直接跳过，空结果统一视作非交易日，并行数固定最高 8 且缺少显式节流。其写入前仅做基础数值过滤，完整性验证弱于本项目。
+
+### akshare_alpha_project
+
+值得吸收的是列名先归一化再匹配别名、分批落盘、进度条和 `limit/offset/resume` 操作入口。本项目已加入严格别名解析：忽略大小写、空格、下划线等无意义差异，但字段缺失或出现多个候选时明确报错，绝不按列位置猜测。
+
+其 `resume` 只要某股票在 CSV 出现过就整只跳过，无法识别日期缺口；追加 CSV 也不是原子写，并缺少重试、部分结果校验和复权锚点检测，因此这些部分不采用。本项目继续使用逐日期缺口补齐、DuckDB 事务、原子 CSV 和交易日覆盖门禁。
 
 ## 本项目原有能力
 

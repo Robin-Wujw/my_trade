@@ -258,6 +258,7 @@ def test_fetch_preserves_historical_hit_when_observation_date_has_no_trade(monke
             "latest_data_date": "2026-06-26",
             "observation_status": "suspended_or_no_trade",
             "error": "",
+            "data_origin": "database_or_network",
         }
     ]
     assert [row["date"] for row in xg] == ["2026-06-26"]
@@ -280,6 +281,7 @@ def test_fetch_error_is_data_unavailable_not_suspension(monkeypatch):
             "latest_data_date": "",
             "observation_status": "data_unavailable",
             "error": "source timeout",
+            "data_origin": "database_or_network",
         }
     ]
 
@@ -586,6 +588,7 @@ def test_transient_unavailable_stock_does_not_complete_manifest(monkeypatch, tmp
                 "latest_data_date": "2026-07-09",
                 "observation_status": "data_unavailable",
                 "error": "source timeout",
+                "data_origin": "database_or_network",
             }
         ],
     )

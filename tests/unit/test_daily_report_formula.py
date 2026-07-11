@@ -38,7 +38,11 @@ def test_formula_status_only_reports_formal_21_day_result():
         }
     )
 
-    assert result == "近21个交易日三浪三正式结果：188只。"
+    assert result == (
+        "三浪三正式结果：188只（技术命中191只；观察日停牌或无交易3只已排除；"
+        "数据不可用6只）。含义：近21个交易日内曾连续5日满足强势技术条件，"
+        "且观察日仍可交易的去重股票。"
+    )
 
 
 def test_formula_phase_evaluates_every_21_day_node_and_ignores_daily_xg_counts():

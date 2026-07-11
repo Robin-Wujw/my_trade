@@ -152,7 +152,26 @@ def render_formula_status(latest_formula):
     window_count = latest_formula.get("window_unique_count")
     if window_count is None or pd.isna(window_count):
         return "近21个交易日三浪三正式结果数据不足。"
-    return f"近21个交易日三浪三正式结果：{int(float(window_count))}只。"
+    formal = int(float(window_count))
+    technical = pd.to_numeric(
+        latest_formula.get("technical_unique_count"), errors="coerce"
+    )
+    suspended = pd.to_numeric(latest_formula.get("suspended_count"), errors="coerce")
+    unavailable = pd.to_numeric(
+        latest_formula.get("unavailable_count"), errors="coerce"
+    )
+    details = []
+    if pd.notna(technical):
+        details.append(f"技术命中{int(technical)}只")
+    if pd.notna(suspended):
+        details.append(f"观察日停牌或无交易{int(suspended)}只已排除")
+    if pd.notna(unavailable):
+        details.append(f"数据不可用{int(unavailable)}只")
+    suffix = f"（{'；'.join(details)}）" if details else ""
+    return (
+        f"三浪三正式结果：{formal}只{suffix}。含义：近21个交易日内曾连续5日"
+        "满足强势技术条件，且观察日仍可交易的去重股票。"
+    )
 
 
 def load_formula_phase_state(path=FORMULA_PHASE_FILE):
@@ -470,7 +489,7 @@ def build_push_reports(
         part1 = "".join(
             [
                 f"<h1>[1/2] {esc(report_date)} 市场状态与价值线池</h1>",
-                "<h2>一、最近21个交易日三浪三结果</h2>",
+                "<h2>一、最近21个交易日强势技术结果</h2>",
                 f"<p>{formula_status}<b>当前阶段：{esc(formula_phase)}</b>。</p>",
                 f"<h2>二、基本价值线或附近（{len(values)}只）</h2>",
                 "<p><b>分析链：</b>价值适用性 → 现价/价值线 → 基本面质量 → 50%/62.5%右侧位置。</p>",
@@ -608,7 +627,7 @@ def build_reports(
         )
     )
     full_parts.append(
-        "<h2>3. 最近21个交易日三浪三结果</h2>"
+        "<h2>3. 最近21个交易日强势技术结果</h2>"
         f"<p>{render_formula_status(latest_formula)}"
         f"<b>当前阶段：{esc(formula_phase)}</b>。</p>"
     )

@@ -34,6 +34,7 @@ from stock_research.api import akshare as ak
 from stock_research.api import baostock as bs
 from stock_research.api import tushare as ts_api
 from stock_research.api.retry import call_with_backoff
+from stock_research.api.schema import rename_columns_strict
 import numpy as np
 import pandas as pd
 from openpyxl import Workbook
@@ -69,7 +70,7 @@ TRADE_CALENDAR_CACHE_FILE = os.path.join(
 )
 UNIVERSE_CACHE_FILE = str(PATHS.cache / "stock_universe.csv")
 FORMULA33_MANIFEST_FILE = str(PATHS.state / "formula33_completion.json")
-FORMULA33_CODE_VERSION = "formula33-v6"
+FORMULA33_CODE_VERSION = "formula33-v7"
 KLINE_QFQ_CACHE_VERSION = "qfq-cache-v2"
 REQUEST_RETRY_ERRORS = (BrokenPipeError, ConnectionError, TimeoutError, OSError)
 MIN_LIST_DATE_COVERAGE = 0.98
@@ -584,7 +585,14 @@ def get_universe_akshare():
     df = ak.stock_info_a_code_name()
     if df is None or df.empty:
         return pd.DataFrame()
-    df = df.rename(columns={"code": "raw_code", "name": "code_name"})
+    df = rename_columns_strict(
+        df,
+        {
+            "raw_code": ("code", "股票代码", "证券代码", "代码"),
+            "code_name": ("name", "股票简称", "证券简称", "名称"),
+        },
+        label="AkShare A-share universe",
+    )
     df["code"] = df["raw_code"].map(to_bs_code)
     mask = (
         df["code"].str.startswith("sh.60")
@@ -658,25 +666,45 @@ def load_stock_basic():
 
 def load_stock_basic_akshare():
     rows = []
+    errors = []
     for symbol in ["\u4e3b\u677fA\u80a1", "\u79d1\u521b\u677f"]:
         try:
             sh = ak.stock_info_sh_name_code(symbol=symbol)
+            sh = rename_columns_strict(
+                sh,
+                {
+                    "raw_code": ("证券代码", "股票代码", "A股代码", "code"),
+                    "ipo_date": ("上市日期", "A股上市日期", "list_date", "ipo_date"),
+                },
+                label=f"AkShare Shanghai stock basic/{symbol}",
+            )
             for _, row in sh.iterrows():
                 rows.append({
-                    "code": f"sh.{str(row.get('证券代码')).zfill(6)}",
-                    "ipoDate": row.get("上市日期"),
+                    "code": f"sh.{str(row.get('raw_code')).zfill(6)}",
+                    "ipoDate": row.get("ipo_date"),
                 })
-        except Exception:
+        except Exception as exc:
+            errors.append(str(exc))
             continue
     try:
         sz = ak.stock_info_sz_name_code(symbol="\u0041\u80a1\u5217\u8868")
+        sz = rename_columns_strict(
+            sz,
+            {
+                "raw_code": ("A股代码", "证券代码", "股票代码", "code"),
+                "ipo_date": ("A股上市日期", "上市日期", "list_date", "ipo_date"),
+            },
+            label="AkShare Shenzhen stock basic",
+        )
         for _, row in sz.iterrows():
             rows.append({
-                "code": f"sz.{str(row.get('A股代码')).zfill(6)}",
-                "ipoDate": row.get("A股上市日期"),
+                "code": f"sz.{str(row.get('raw_code')).zfill(6)}",
+                "ipoDate": row.get("ipo_date"),
             })
-    except Exception:
-        pass
+    except Exception as exc:
+        errors.append(str(exc))
+    if errors:
+        print("AkShare 上市日期部分接口异常: " + " | ".join(errors))
     return pd.DataFrame(rows)
 
 
@@ -1318,6 +1346,7 @@ def load_kline_with_cache(
     expected_trade_dates=None,
     observation_trade_status="unknown",
     minimum_history_rows=0,
+    cache_event=None,
 ):
     required_history_rows = max(0, int(minimum_history_rows))
     file_cached = load_cached_kline(source, code)
@@ -1340,6 +1369,8 @@ def load_kline_with_cache(
             )
         )
         if endpoints_covered and len(file_window) >= required_history_rows:
+            if cache_event is not None:
+                cache_event["complete_file_cache"] = True
             return file_window
 
     persisted = load_persisted_kline(repository, source, code, start_date, end_date)
@@ -1763,6 +1794,37 @@ def load_kline_akshare(code, start_date, end_date, retries=4, retry_delay=1.5):
     })
 
 
+def update_fetch_progress(counts, result):
+    """Update human-readable stock-fetch outcome counters from one task result."""
+    counts["processed"] += 1
+    if not result:
+        counts["skipped"] += 1
+        return
+    status = next(
+        (item for item in result if item.get("signal_type") == "STATUS"),
+        {},
+    )
+    if status.get("observation_status") == "data_unavailable":
+        counts["failed"] += 1
+    else:
+        counts["succeeded"] += 1
+    if status.get("data_origin") == "complete_file_cache":
+        counts["cache_hits"] += 1
+    counts["signals"] += sum(
+        item.get("signal_type") in {"BASE", "XG"} for item in result
+    )
+
+
+def format_fetch_progress(counts, total):
+    remaining = max(0, int(total) - int(counts["processed"]))
+    return (
+        f"行情进度 {counts['processed']}/{total} | 成功 {counts['succeeded']} | "
+        f"完整缓存 {counts['cache_hits']} | 跳过 {counts['skipped']} | "
+        f"失败 {counts['failed']} | 剩余 {remaining} | "
+        f"BASE/XG记录 {counts['signals']}"
+    )
+
+
 def fetch_one_stock(task):
     if len(task) == 16:
         task = (*task, False, "unknown")
@@ -1821,6 +1883,7 @@ def fetch_one_stock(task):
     )
     fetch_error = ""
     kline_repository = KlineRepository(Database()) if persist_kline else None
+    cache_event = {}
     try:
         df = load_kline_with_cache(
             price_source,
@@ -1834,10 +1897,16 @@ def fetch_one_stock(task):
             expected_trade_dates={end_date},
             observation_trade_status=observation_trade_status,
             minimum_history_rows=minimum_history_rows,
+            cache_event=cache_event,
         )
     except Exception as exc:
         fetch_error = str(exc)
         df = load_cached_kline(price_source, code)
+    data_origin = (
+        "complete_file_cache"
+        if cache_event.get("complete_file_cache")
+        else "database_or_network"
+    )
     if df.empty:
         return [{
             "signal_type": "STATUS",
@@ -1846,6 +1915,7 @@ def fetch_one_stock(task):
             "latest_data_date": "",
             "observation_status": "data_unavailable",
             "error": fetch_error or "empty kline",
+            "data_origin": data_origin,
         }]
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -1865,6 +1935,7 @@ def fetch_one_stock(task):
             "latest_data_date": latest_data_date,
             "observation_status": "data_unavailable",
             "error": fetch_error or "insufficient kline history",
+            "data_origin": data_origin,
         }]
 
     k = calc_kdj_k(df)
@@ -1971,6 +2042,7 @@ def fetch_one_stock(task):
         "latest_data_date": latest_data_date,
         "observation_status": observation_status,
         "error": fetch_error,
+        "data_origin": data_origin,
     }
     return hits + debug_rows + [coverage_row, status_row]
 
@@ -2071,6 +2143,73 @@ def build_formula_summary(
     ]
 
 
+FORMULA_EXCEL_HEADERS = {
+    "date": "日期",
+    "base_count": "当日BASE数量",
+    "count": "当日XG数量",
+    "change": "较前一日变化",
+    "up_streak": "连续增加天数",
+    "down_streak": "连续减少天数",
+    "signal": "当日结构判断",
+    "window_unique_count": "近21日正式可交易去重数",
+    "technical_unique_count": "近21日技术命中去重数",
+    "tradable_unique_count": "观察日可交易去重数",
+    "window_change": "较前一观察节点变化",
+    "window_up_streak": "窗口连续增加节点",
+    "window_down_streak": "窗口连续减少节点",
+    "window_trend_slope": "窗口趋势斜率",
+    "trend_up_streak": "斜率连续为正节点",
+    "trend_down_streak": "斜率连续为负节点",
+    "trend_signal": "21日趋势判断",
+    "market_cap_unique_count": "市值超100亿正式池",
+    "market_cap_technical_unique_count": "市值超100亿技术池",
+    "suspended_count": "观察日停牌技术命中",
+    "unavailable_count": "数据不可用数量",
+    "signal_type": "信号类型",
+    "code": "股票代码",
+    "name": "股票名称",
+    "close": "命中日收盘价",
+    "mktcap_yi": "总市值（亿元）",
+    "list_days": "上市天数",
+    "kdj_k": "KDJ-K",
+    "wr10": "WR10",
+    "wr20": "WR20",
+    "rsi9": "RSI9",
+    "latest_data_date": "最新行情日期",
+    "observation_status": "观察日状态",
+    "error": "异常说明",
+    "data_origin": "行情来源状态",
+}
+
+FORMULA_EXCEL_VALUES = {
+    "BASE": "BASE（当日四条件同时满足）",
+    "XG": "XG（BASE连续5日满足）",
+    "MARKET_CAP_BASE": "市值池BASE",
+    "MARKET_CAP_XG": "市值池XG",
+    "tradable": "可交易",
+    "suspended_or_no_trade": "观察日停牌或无交易",
+    "data_unavailable": "数据不可用",
+    "complete_file_cache": "完整CSV缓存命中",
+    "database_or_network": "DuckDB或网络补齐",
+}
+
+
+def _excel_display_value(column, value):
+    if column in {"signal_type", "observation_status", "data_origin"}:
+        return FORMULA_EXCEL_VALUES.get(value, value)
+    return value
+
+
+def _append_excel_table(sheet, frame, columns):
+    sheet.append([FORMULA_EXCEL_HEADERS.get(column, column) for column in columns])
+    if frame is None or frame.empty:
+        return
+    for row in frame[columns].to_dict("records"):
+        sheet.append(
+            [_excel_display_value(column, row.get(column)) for column in columns]
+        )
+
+
 def save_workbook(
     summary,
     hits,
@@ -2089,8 +2228,23 @@ def save_workbook(
     summary.to_csv(csv_path, index=False, encoding="utf-8-sig")
 
     wb = Workbook()
-    ws = wb.active
-    ws.title = "33公式日统计"
+    guide = wb.active
+    guide.title = "先看这里"
+    guide_rows = [
+        ["阅读顺序", "先看“近21日正式名单”，再看“33公式日统计”和“观察日状态”；诊断表不等于正式候选。"],
+        ["正式结果是什么", "近21个交易日内至少一次满足XG，且观察日仍可交易的股票去重名单。"],
+        ["BASE", "某一交易日同时满足 KDJ-K>80、WR10/WR20<20、RSI9>70、上市超过300天。"],
+        ["XG", "BASE连续5个交易日成立；这是正式技术信号。"],
+        ["近21日技术命中", "只看技术条件，不检查观察日是否停牌；用于解释差异，不直接作为正式名单。"],
+        ["市值超100亿池", "从技术命中中单独列出的总市值参考池，不改变原始XG定义。"],
+        ["观察日状态", "可交易=行情覆盖观察日；停牌或无交易=仅进诊断；数据不可用=接口或历史不足，需要处理。"],
+        ["指标方向", "KDJ-K、RSI9越高代表短期偏强；WR10/WR20越低代表收盘越接近近期高位。"],
+        ["机器数据", "同名CSV保留英文稳定字段，供程序读取；Excel使用中文标题供人工查看。"],
+    ]
+    for row in guide_rows:
+        guide.append(row)
+
+    ws = wb.create_sheet("33公式日统计")
     headers = ["date", "base_count", "count", "change", "up_streak", "down_streak", "signal"]
     headers += [
         column
@@ -2112,9 +2266,7 @@ def save_workbook(
         ]
         if column in summary.columns
     ]
-    ws.append(headers)
-    for row in summary[headers].to_dict("records"):
-        ws.append([row[h] for h in headers])
+    _append_excel_table(ws, summary, headers)
 
     ws2 = wb.create_sheet("横向统计")
     ws2.append(["指标"] + summary["date"].tolist())
@@ -2138,45 +2290,28 @@ def save_workbook(
         ws2.append(["斜率连续为负"] + summary["trend_down_streak"].tolist())
 
     ws3 = wb.create_sheet("命中股票")
-    if hits.empty:
-        ws3.append(["signal_type", "date", "code", "name", "close", "mktcap_yi", "list_days", "kdj_k", "wr10", "wr20", "rsi9"])
-    else:
-        cols = ["signal_type", "date", "code", "name", "close", "mktcap_yi", "list_days", "kdj_k", "wr10", "wr20", "rsi9"]
-        ws3.append(cols)
-        for row in hits[cols].to_dict("records"):
-            ws3.append([row.get(col) for col in cols])
+    cols = ["signal_type", "date", "code", "name", "close", "mktcap_yi", "list_days", "kdj_k", "wr10", "wr20", "rsi9"]
+    _append_excel_table(ws3, hits, cols)
 
-    ws4 = wb.create_sheet("21日技术可交易")
+    ws4 = wb.create_sheet("近21日正式名单")
     unique_cols = ["date", "code", "name", "close", "mktcap_yi", "list_days", "kdj_k", "wr10", "wr20", "rsi9"]
-    ws4.append(unique_cols)
-    if unique_hits is not None and not unique_hits.empty:
-        for row in unique_hits[unique_cols].to_dict("records"):
-            ws4.append([row.get(col) for col in unique_cols])
+    _append_excel_table(ws4, unique_hits, unique_cols)
 
-    ws5 = wb.create_sheet("21日技术全量")
-    ws5.append(unique_cols)
-    if technical_unique_hits is not None and not technical_unique_hits.empty:
-        for row in technical_unique_hits[unique_cols].to_dict("records"):
-            ws5.append([row.get(col) for col in unique_cols])
+    ws5 = wb.create_sheet("近21日技术命中")
+    _append_excel_table(ws5, technical_unique_hits, unique_cols)
 
     ws6 = wb.create_sheet("市值大于100亿池")
-    ws6.append(unique_cols)
-    if market_cap_unique_hits is not None and not market_cap_unique_hits.empty:
-        for row in market_cap_unique_hits[unique_cols].to_dict("records"):
-            ws6.append([row.get(col) for col in unique_cols])
+    _append_excel_table(ws6, market_cap_unique_hits, unique_cols)
 
     ws7 = wb.create_sheet("停牌技术命中诊断")
-    ws7.append(unique_cols)
-    if suspended_technical_hits is not None and not suspended_technical_hits.empty:
-        for row in suspended_technical_hits[unique_cols].to_dict("records"):
-            ws7.append([row.get(col) for col in unique_cols])
+    _append_excel_table(ws7, suspended_technical_hits, unique_cols)
 
     ws8 = wb.create_sheet("观察日状态")
-    status_cols = ["code", "name", "latest_data_date", "observation_status", "error"]
-    ws8.append(status_cols)
-    if statuses is not None and not statuses.empty:
-        for row in statuses[status_cols].to_dict("records"):
-            ws8.append([row.get(col) for col in status_cols])
+    status_cols = ["code", "name", "latest_data_date", "observation_status", "data_origin", "error"]
+    if statuses is not None and "data_origin" not in statuses.columns:
+        statuses = statuses.copy()
+        statuses["data_origin"] = ""
+    _append_excel_table(ws8, statuses, status_cols)
 
     yellow = PatternFill("solid", fgColor="FFF2CC")
     green = PatternFill("solid", fgColor="E2F0D9")
@@ -2184,6 +2319,7 @@ def save_workbook(
     thin = Side(style="thin", color="666666")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     for sheet in wb.worksheets:
+        sheet.freeze_panes = "A2"
         for row in sheet.iter_rows():
             for cell in row:
                 cell.border = border
@@ -2197,6 +2333,10 @@ def save_workbook(
                     cell.fill = red
         for col in range(1, sheet.max_column + 1):
             sheet.column_dimensions[get_column_letter(col)].width = 18
+        if sheet.title != "先看这里" and sheet.max_row >= 1:
+            sheet.auto_filter.ref = sheet.dimensions
+    guide.column_dimensions["A"].width = 22
+    guide.column_dimensions["B"].width = 90
     wb.save(path)
     return path, csv_path
 
@@ -2441,6 +2581,14 @@ def main(argv=None):
             f"候选股票: {len(tasks)} | offset={args.offset} | limit={args.limit} | "
             f"workers={workers} | price_source={price_source}"
         )
+        progress = {
+            "processed": 0,
+            "succeeded": 0,
+            "cache_hits": 0,
+            "skipped": 0,
+            "failed": 0,
+            "signals": 0,
+        }
         if workers > 1:
             if bs_available:
                 bs.logout()
@@ -2452,17 +2600,18 @@ def main(argv=None):
             ) as pool:
                 for idx, result in enumerate(pool.imap_unordered(fetch_one_stock, tasks), start=1):
                     hits.extend(result)
-                    if idx % 200 == 0:
-                        hit_count = sum(item.get("signal_type") in {"BASE", "XG"} for item in hits)
-                        print(f"进度 {idx}/{len(tasks)}，命中记录 {hit_count}")
-                        print("K线持久化: 已逐股写入 DuckDB raw.stock_kline_daily，并同步CSV缓存，可中断续跑")
+                    update_fetch_progress(progress, result)
+                    if idx % 200 == 0 or idx == len(tasks):
+                        print(format_fetch_progress(progress, len(tasks)))
+                        print("保存方式：每只完成后立即写 DuckDB，并原子更新 CSV；中断后可续跑。")
         else:
             for idx, task in enumerate(tasks, start=1):
-                hits.extend(fetch_one_stock(task))
-                if idx % 200 == 0:
-                    hit_count = sum(item.get("signal_type") in {"BASE", "XG"} for item in hits)
-                    print(f"进度 {idx}/{len(tasks)}，命中记录 {hit_count}")
-                    print("K线持久化: 已逐股写入 DuckDB raw.stock_kline_daily，并同步CSV缓存，可中断续跑")
+                result = fetch_one_stock(task)
+                hits.extend(result)
+                update_fetch_progress(progress, result)
+                if idx % 200 == 0 or idx == len(tasks):
+                    print(format_fetch_progress(progress, len(tasks)))
+                    print("保存方式：每只完成后立即写 DuckDB，并原子更新 CSV；中断后可续跑。")
             if bs_available:
                 bs.logout()
 
