@@ -247,6 +247,10 @@ def test_build_push_reports_keeps_every_stock_and_bounds_each_part():
     assert all(code in part2 for code in normal["code"])
     assert "三浪三正式结果：193只" in part1 and "风险" in part1
     assert "结论" in part2 and "风险" in part2
+    assert "30秒结论" in part1 and "今天怎么用" in part1
+    assert "数据是否可用" in part1 and "现价÷价值线" in part1
+    assert "30秒结论" in part2 and "核验顺序" in part2
+    assert "当前阶段" in part1 and "当前阶段" in part2
 
 
 def test_selection_changes_are_separated_by_strategy_part():

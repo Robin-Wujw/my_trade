@@ -396,11 +396,45 @@ def _risk_label(row):
     return "未见额外风险标签"
 
 
+def _action_label(row):
+    zone = text(row.get("wave_zone"), "")
+    if "62.5%以上" in zone:
+        return "右侧确认"
+    if "50%-62.5%" in zone:
+        return "右侧启动"
+    if "50%以下" in zone:
+        return "左侧观察"
+    return "位置待确认"
+
+
+def _phase_guidance(phase):
+    return {
+        RIGHT_SIDE_WAITING: "市场结构尚未形成连续改善，优先观察，不因单日命中增加而追涨。",
+        RIGHT_SIDE_WATCH: "市场结构初步改善，可重点跟踪右侧启动和右侧确认股票，仍需控制试错仓位。",
+        RIGHT_SIDE_ACTIVE: "市场结构已连续改善，优先核验右侧确认、基本面质量和主流板块是否共振。",
+        RIGHT_SIDE_EXITED: "市场结构已转弱，暂停新增右侧暴露，先处理风险和已有持仓。",
+    }.get(str(phase), "阶段信息不足，保持观察并先核验数据。")
+
+
+def _push_style():
+    return (
+        "<style>body{font-family:Arial,'Microsoft YaHei',sans-serif;line-height:1.55;"
+        "color:#1f2937}h1{font-size:22px}h2{font-size:18px;border-left:4px solid "
+        "#2563eb;padding-left:8px}h3{font-size:16px}.summary{background:#eff6ff;"
+        "border:1px solid #93c5fd;border-radius:8px;padding:10px;margin:8px 0}"
+        ".action{background:#f0fdf4;border:1px solid #86efac;border-radius:8px;"
+        "padding:10px;margin:8px 0}.warning{background:#fff7ed;border:1px solid "
+        "#fdba74;border-radius:8px;padding:10px;margin:8px 0}table{border-collapse:"
+        "collapse;width:100%;font-size:13px}th{background:#f3f4f6}th,td{padding:5px;"
+        "vertical-align:top}</style>"
+    )
+
+
 def _compact_stock_table(frame, kind):
     if kind == "value":
-        headers = ("股票", "价值比", "质量", "右侧位置", "风险")
+        headers = ("股票/代码", "现价÷价值线", "质量/100", "当前阶段", "主要风险")
     else:
-        headers = ("股票", "质量", "主流板块", "右侧位置", "风险")
+        headers = ("股票/代码", "质量/100", "命中主线", "当前阶段", "主要风险")
     parts = [
         "<table border='1' cellspacing='0' cellpadding='4'><thead><tr>",
         "".join(f"<th>{header}</th>" for header in headers),
@@ -413,7 +447,7 @@ def _compact_stock_table(frame, kind):
                 stock,
                 num(row.get("price_to_value"), 3),
                 num(row.get("quality_score"), 1),
-                esc(row.get("wave_zone"), "位置不足"),
+                esc(_action_label(row)),
                 esc(_risk_label(row)),
             )
         else:
@@ -421,7 +455,7 @@ def _compact_stock_table(frame, kind):
                 stock,
                 num(row.get("quality_score"), 1),
                 esc(row.get("mainline_boards"), "未命中"),
-                esc(row.get("wave_zone"), "位置不足"),
+                esc(_action_label(row)),
                 esc(_risk_label(row)),
             )
         parts.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
@@ -484,45 +518,64 @@ def build_push_reports(
     industries = normal.get("industry", pd.Series(dtype=str)).fillna("未知").value_counts()
     top_industry = industries.index[0] if len(industries) else "未知"
     top_industry_count = int(industries.iloc[0]) if len(industries) else 0
+    technical_unavailable = pd.to_numeric(
+        latest_formula.get("unavailable_count"), errors="coerce"
+    )
+    technical_unavailable = int(technical_unavailable) if pd.notna(technical_unavailable) else 0
+
+    def zone_count(counts, name):
+        return int(counts.get(name, 0))
 
     def make_parts(detail_count):
         part1 = "".join(
             [
-                f"<h1>[1/2] {esc(report_date)} 市场状态与价值线池</h1>",
-                "<h2>一、最近21个交易日强势技术结果</h2>",
-                f"<p>{formula_status}<b>当前阶段：{esc(formula_phase)}</b>。</p>",
-                f"<h2>二、基本价值线或附近（{len(values)}只）</h2>",
-                "<p><b>分析链：</b>价值适用性 → 现价/价值线 → 基本面质量 → 50%/62.5%右侧位置。</p>",
-                f"<p>低于50% {int(value_zones.get('50%以下未确认', 0))}只；"
-                f"50%至62.5% {int(value_zones.get('50%-62.5%右侧启动', 0))}只；"
-                f"达到62.5% {int(value_zones.get('62.5%以上确认', 0))}只；"
-                f"质量分不低于80共{value_quality}只。</p>",
+                _push_style(),
+                f"<h1>[1/2] {esc(report_date)} 今日结论与价值线池</h1>",
+                "<div class='summary'><b>30秒结论</b><br>",
+                f"市场阶段：<b>{esc(formula_phase)}</b><br>{formula_status}</div>",
+                f"<div class='action'><b>今天怎么用：</b>{esc(_phase_guidance(formula_phase))}</div>",
+                "<h2>1. 数据是否可用</h2>",
+                f"<p>技术数据不可用 <b>{technical_unavailable}</b> 只。"
+                "为0表示本次全市场技术统计完整；非0应先看异常，不把缺数据当成弱势。</p>",
+                f"<h2>2. 价值线候选（{len(values)}只）</h2>",
+                "<p><b>分层：</b>",
+                f"右侧确认 {zone_count(value_zones, '62.5%以上确认')}只；"
+                f"右侧启动 {zone_count(value_zones, '50%-62.5%右侧启动')}只；"
+                f"左侧观察 {zone_count(value_zones, '50%以下未确认')}只；"
+                f"质量分≥80有 {value_quality}只。</p>",
+                "<p><b>阅读方法：</b>现价÷价值线低不等于可以买；优先顺序是右侧确认 → "
+                "右侧启动 → 左侧观察，再核验质量与风险。</p>",
                 render_selection_changes(selection_diff, "1.基本价值线或附近"),
                 _priority_details(values, True, detail_count),
-                "<h3>全部股票紧凑名单</h3>",
+                "<h3>完整名单（代码不会省略）</h3>",
                 _compact_stock_table(values, "value"),
-                "<h3>风险</h3><p>价值线适用性仍需核验行业方法和财务口径；低于50%的股票属于左侧观察，不因价格便宜自动升级为可执行右侧。</p>",
+                "<div class='warning'><b>边界：</b>价值线适用性仍需核验行业方法和财务口径；"
+                "左侧观察只表示价格位置较低，不是买入信号。</div>",
             ]
         )
         part2 = "".join(
             [
+                _push_style(),
                 f"<h1>[2/2] {esc(report_date)} 基本面候选与主线</h1>",
-                f"<h2>结论：正常基本面候选{len(normal)}只</h2>",
-                f"<p>候选最多集中于{esc(top_industry)}（{top_industry_count}只）。"
-                "先验证业绩与流动性，再看主流板块、长期扣抵和右侧位置；高同比不会自动等同于可持续增长。</p>",
-                f"<h2>三、正常基本面选股（{len(normal)}只）</h2>",
-                "<p><b>分析链：</b>业绩硬条件 → 质量/流动性 → 主流板块 → 长期扣抵 → 右侧位置 → 风险。</p>",
-                f"50%至62.5% {int(normal_zones.get('50%-62.5%右侧启动', 0))}只；"
-                f"达到62.5% {int(normal_zones.get('62.5%以上确认', 0))}只；"
-                f"质量分不低于80共{normal_quality}只。</p>",
+                "<div class='summary'><b>30秒结论</b><br>"
+                f"正常基本面候选 <b>{len(normal)}</b>只；质量分≥80有 <b>{normal_quality}</b>只；"
+                f"最多集中于 <b>{esc(top_industry)}</b>（{top_industry_count}只）。</div>",
+                "<div class='action'><b>核验顺序：</b>业绩硬条件 → 质量与流动性 → "
+                "是否命中主线 → 右侧阶段 → 个股风险。高同比不自动等于可持续增长。</div>",
+                f"<h2>3. 基本面候选分层（{len(normal)}只）</h2>",
+                f"<p>右侧确认 {zone_count(normal_zones, '62.5%以上确认')}只；"
+                f"右侧启动 {zone_count(normal_zones, '50%-62.5%右侧启动')}只；"
+                f"左侧观察 {zone_count(normal_zones, '50%以下未确认')}只。</p>",
                 render_selection_changes(selection_diff, "2.正常基本面选股"),
                 _priority_details(normal, "auto", detail_count),
-                "<h3>全部股票紧凑名单</h3>",
+                "<h3>完整名单（代码不会省略）</h3>",
                 _compact_stock_table(normal, "normal"),
-                "<h2>四、主流板块判断</h2>",
-                "<p><b>分析链：</b>数据新鲜度 → 3/5/20日趋势 → 量能 → 强弱 → 涨停扩散。</p>",
+                "<h2>4. 主流板块</h2>",
+                "<p><b>怎么看：</b>先看3/5/20日是否同向，再看5日成交额相对20日是否放大，"
+                "最后看涨停是否扩散；单项高分不代表主线成立。</p>",
                 _sector_summary(top_sectors),
-                "<h3>风险</h3><p>异常同比需核验低基数、扭亏和一次性口径；板块数据超过7天退出判断；缺失数据不静默补齐。</p>",
+                "<div class='warning'><b>边界：</b>异常同比需核验低基数、扭亏和一次性项目；"
+                "板块数据超过7天不参与判断；缺失数据不会自动补成通过。</div>",
             ]
         )
         return part1, part2
@@ -682,15 +735,23 @@ def main(argv=None):
     report_date = bundle.report_date
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_path = os.path.join(REPORT_DIR, f"daily_report_{stamp}.html")
+    push_preview_path = os.path.join(REPORT_DIR, f"pushplus_preview_{stamp}.html")
     output_path = os.path.join(SELECTION_DIR, f"daily_consolidated_selection_{report_date}_{stamp[-6:]}.csv")
     os.makedirs(REPORT_DIR, exist_ok=True)
     os.makedirs(SELECTION_DIR, exist_ok=True)
     with open(report_path, "w", encoding="utf-8") as handle:
         handle.write(bundle.full_html)
+    with open(push_preview_path, "w", encoding="utf-8") as handle:
+        handle.write(
+            bundle.push_parts[0]
+            + "<hr style='margin:32px 0;border:0;border-top:3px solid #111827'>"
+            + bundle.push_parts[1]
+        )
     bundle.stocks.to_csv(output_path, index=False, encoding="utf-8-sig")
     save_snapshot(HISTORY_FILE, report_date, bundle.stocks.to_dict("records"))
     save_formula_phase_state(FORMULA_PHASE_FILE, bundle.formula_phase_state)
     print(f"完整四项报告: {report_path}")
+    print(f"PushPlus发送前预览: {push_preview_path}")
     print(f"前两项完整选股: {output_path}，共{len(bundle.stocks)}行")
     print(
         f"数据源: {bundle.fundamental_path} | {bundle.formula_path} | "
