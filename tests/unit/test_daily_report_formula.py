@@ -187,6 +187,43 @@ def test_daily_report_pushes_the_final_selection_html(monkeypatch, tmp_path):
     ]
 
 
+def test_daily_report_sends_one_complete_html_email_without_pushplus(monkeypatch, tmp_path):
+    emails = []
+    pushes = []
+    stocks = pd.DataFrame([{"code": "sz.000001", "name": "平安银行"}])
+    bundle = DailyReportBundle(
+        report_date="2026-07-03",
+        full_html="<h1>完整报告</h1><p>全部价值线股票</p>",
+        push_parts=("<h1>分页1</h1>", "<h1>分页2</h1>"),
+        stocks=stocks,
+        fundamental_path="fundamental.csv",
+        formula_path="formula.csv",
+        sector_path="sector.csv",
+        selection_diff=SelectionDiff((), (), ()),
+    )
+    monkeypatch.setattr(daily_report, "REPORT_DIR", str(tmp_path))
+    monkeypatch.setattr(daily_report, "SELECTION_DIR", str(tmp_path))
+    monkeypatch.setattr(daily_report, "HISTORY_FILE", str(tmp_path / "history.json"))
+    monkeypatch.setattr(daily_report, "build_reports", lambda *args: bundle)
+    monkeypatch.setattr(
+        daily_report,
+        "send_html_email",
+        lambda subject, content, recipients="": emails.append((subject, content, recipients)) or True,
+    )
+    monkeypatch.setattr(
+        daily_report,
+        "send_pushplus",
+        lambda *args: pushes.append(args) or True,
+    )
+
+    daily_report.main(["--delivery", "email", "--email-to", "reader@example.com"])
+
+    assert len(emails) == 1
+    assert "完整报告" in emails[0][1]
+    assert emails[0][2] == "reader@example.com"
+    assert pushes == []
+
+
 def make_stocks(prefix, count, strategy_part):
     rows = []
     for index in range(count):

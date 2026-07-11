@@ -42,6 +42,8 @@ var/              缓存、数据库、状态、日志和导出（不提交）
 
 `--no-push` 会完整生成结果但不发送 PushPlus，适合生产前复核。正式运行不带该参数；只有六个上游步骤全部成功、日报输入属于同一观察日且必需产物有效时，才允许生成分页摘要。页数由完整名单和 PushPlus 字符上限决定，不固定为两条；任一必需步骤或任一分页发送失败都视为推送失败。
 
+完整名单推荐使用一封 HTML 邮件投递。配置 `REPORT_EMAIL_TO` 后，日报默认切换为 `email`，不再发送多条 PushPlus；`REPORT_DELIVERY=both` 可同时发送邮件和 PushPlus，`REPORT_DELIVERY=pushplus` 保持旧模式。SMTP 密码必须使用邮箱授权码并放在 `SMTP_PASSWORD` 或被忽略的 `var/secrets/smtp_password`，不得提交仓库。
+
 只检查配置、导入和步骤顺序，不访问行情接口：
 
 ```powershell

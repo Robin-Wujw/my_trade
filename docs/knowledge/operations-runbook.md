@@ -61,6 +61,10 @@ PUSH_RESULT_6 True
 
 只看到日报文件生成不代表推送成功。任何一步失败或任一 PushPlus 返回失败，都不能报告整次生产成功。
 
+使用 HTML 邮件时，成功日志为 `EMAIL_RESULT True`。配置 `REPORT_EMAIL_TO` 后默认投递模式是 `email`；显式设置 `REPORT_DELIVERY=both` 才会同时检查邮件与所有 PushPlus 分页。邮件或任一分页失败，日报步骤均返回失败。
+
+SMTP 必需变量为 `SMTP_HOST`、`SMTP_USERNAME`、`SMTP_PASSWORD` 和 `REPORT_EMAIL_TO`。SSL 默认端口 465；STARTTLS 通常使用 587，并设置 `SMTP_SECURITY=starttls`。授权码可以存放在 `var/secrets/smtp_password`，不得写入脚本、日志或 Git。
+
 ## 4. Formula33 增量与断点
 
 生产参数固定使用 AkShare 清单、交易日和前复权行情，并带 `--require-end-trade`。日线缓存版本是 `qfq-cache-v2`。

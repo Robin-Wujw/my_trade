@@ -10,6 +10,7 @@ from datetime import datetime
 import pandas as pd
 
 from stock_research.api.pushplus import send_pushplus
+from stock_research.api.email import send_html_email
 from stock_research.core.paths import PATHS
 from stock_research.reporting.diff import (
     SelectionDiff,
@@ -60,6 +61,16 @@ def parse_args(argv=None):
     parser.add_argument("--selection-top", type=int, default=30, help="兼容旧参数；正常基本面展示上限")
     parser.add_argument("--max-chars", type=int, default=18000)
     parser.add_argument("--no-push", action="store_true")
+    default_delivery = os.environ.get("REPORT_DELIVERY", "").strip().lower()
+    if not default_delivery:
+        default_delivery = "email" if os.environ.get("REPORT_EMAIL_TO", "").strip() else "pushplus"
+    parser.add_argument(
+        "--delivery",
+        choices=("pushplus", "email", "both"),
+        default=default_delivery,
+        help="外部投递方式；配置REPORT_EMAIL_TO后默认只发HTML邮件",
+    )
+    parser.add_argument("--email-to", default=os.environ.get("REPORT_EMAIL_TO", ""))
     parser.add_argument("--fundamental-path", default="")
     parser.add_argument("--formula-path", default="")
     parser.add_argument("--sector-path", default="")
@@ -1152,6 +1163,18 @@ def main(argv=None):
     for index, content in enumerate(bundle.push_parts, start=1):
         print(f"PushPlus第{index}部分长度: {len(content)}")
     if args.no_push:
+        return
+    if args.delivery in {"email", "both"}:
+        email_html = _push_style() + bundle.full_html
+        email_ok = send_html_email(
+            f"{report_date} 每日A股研究报告",
+            email_html,
+            recipients=args.email_to,
+        )
+        print("EMAIL_RESULT", email_ok)
+        if not email_ok:
+            raise SystemExit(2)
+    if args.delivery == "email":
         return
     results = []
     total_parts = len(bundle.push_parts)
