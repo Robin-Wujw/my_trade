@@ -8,8 +8,16 @@ version = "0.1.0"
 description = "A-share research and stock selection pipeline"
 requires-python = ">=3.9"
 dependencies = [
+    "akshare",
+    "baostock",
+    "beautifulsoup4>=4.12,<5",
     "duckdb>=1.5,<2",
+    "lxml>=5,<7",
+    "numpy>=1.26,<3",
+    "openpyxl>=3.1,<4",
+    "pandas>=2.2,<4",
     "pytz>=2024,<2027",
+    "requests>=2.31,<3",
     "tomli>=2; python_version < '3.11'",
 ]
 

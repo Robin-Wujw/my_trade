@@ -11,6 +11,8 @@
 - [数据源连接与容错改进](knowledge/data-source-resilience.md)：AkShare/BaoStock 的节流、退避、重连、异常结果和参考项目对照。
 - [结果输出阅读指南](knowledge/output-guide.md)：Formula33、每日选股和板块结果先看什么、字段是什么意思、哪些不能直接当买入信号。
 
+日报新增的技术量化、双波段关键价和两个月突破追踪均以 [结果输出阅读指南](knowledge/output-guide.md) 为展示口径，以根目录 [STRATEGY.md](../STRATEGY.md) 为计算口径。
+
 ## 已验证基准
 
 Formula33 固定回归区间为 2026-06-11 至 2026-07-10：

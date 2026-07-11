@@ -1,6 +1,8 @@
 akshare
 baostock
+beautifulsoup4
 duckdb>=1.5,<2
+lxml
 numpy
 openpyxl
 pandas

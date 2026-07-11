@@ -13,8 +13,8 @@ from .retry import FileRateLimiter, call_with_backoff, is_transient_error
 
 
 API_URL = "https://api.tushare.pro"
-# The free 120-point tier is documented as 50 calls/minute. 48/min leaves
-# a little margin for clock and scheduling jitter.
+# Keep a conservative cross-process default. Tushare permissions and limits
+# are endpoint-specific; for example, daily and adj_factor use different tiers.
 _RATE_LIMITER = FileRateLimiter(
     float(os.environ.get("TUSHARE_MIN_INTERVAL", "1.25")),
     PATHS.tmp / "tushare_rate_limit.lock",

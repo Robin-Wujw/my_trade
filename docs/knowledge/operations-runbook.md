@@ -50,11 +50,13 @@ $Python = 'D:\ActionsRunner\my-trade\python\python.exe'
 & $Python -m apps.daily_pipeline
 ```
 
-正式推送成功的日志必须同时出现：
+正式推送成功的日志必须对本次生成的每一页都出现成功结果，例如六页时：
 
 ```text
 PUSH_RESULT_1 True
 PUSH_RESULT_2 True
+...
+PUSH_RESULT_6 True
 ```
 
 只看到日报文件生成不代表推送成功。任何一步失败或任一 PushPlus 返回失败，都不能报告整次生产成功。
@@ -66,7 +68,7 @@ PUSH_RESULT_2 True
 运行行为：
 
 - 单股已有完整历史时直接从缓存读取；
-- 新交易日只请求缺少的增量区间；
+- 新交易日通常只请求缺少的增量区间；若重叠日 OHLC 变化，说明前复权锚点变化，必须整窗刷新并原子替换；
 - 运行在第 N 只股票中断后，前面已原子落盘的缓存继续有效；
 - 重跑时已完成股票快速通过，未完成或缺日期的股票才访问网络；
 - 全部必要股票、覆盖率和输出均成功后才写 `var/state/formula33_completion.json`；
@@ -161,6 +163,10 @@ PUSH_RESULT_2 True
 ### 财务覆盖不足
 
 保留 `var/state` 中的断点，后续从缺失股票继续补齐。不得为了推送降低生产门槛或把请求失败当成无财务数据。
+
+### 两个月突破追踪异常
+
+状态文件为 `var/state/two_month_breakout_watch.json`，历史名单基线为 `var/state/daily_selection_history.json`。同一观察日重跑不会重复累计突破次数；只有新交易日从 50% 下方重新上穿才加一次。不要通过删除状态文件消除提醒，除非明确要重新建立追踪基线。
 
 ### 日期不一致
 

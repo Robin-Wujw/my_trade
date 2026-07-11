@@ -58,9 +58,10 @@ scripts/run_daily_analysis.ps1
 AkShare 股票清单/交易日
           |
           v
-按股票读取 qfq-cache-v2
+按股票读取 qfq-cache-v2（单一提供方复权序列）
           |
           +-- 缺历史或缺新增交易日 --> AkShare 前复权增量抓取
+          +-- 重叠日 OHLC 改变 --> 全窗刷新并原子替换
           |
           v
 本地 CSV 缓存 + raw.stock_kline_daily
@@ -91,7 +92,7 @@ Excel/CSV + formula33_completion.json
 3. Formula33 市场结构；
 4. 板块主线。
 
-完整结果写入 HTML 和 CSV，PushPlus 只发送有长度和代码完整性校验的两部分摘要。
+完整结果写入 HTML 和 CSV。日报同时计算技术量化快照、双波段关键价和独立的两个月突破追踪池；PushPlus 按内容自动分页，每页有长度校验，合并后有代码完整性校验。
 
 ## 7. 运行数据
 
@@ -99,7 +100,7 @@ Excel/CSV + formula33_completion.json
 
 - `var/cache`：可复用的增量数据和快照；
 - `var/data/my_trade.duckdb`：当前 7 张实际表；
-- `var/state`：完成清单、断点和日报比较基线；
+- `var/state`：完成清单、断点、日报比较基线和两个月突破追踪状态；
 - `var/exports`：市场、选股和日报导出；
 - `var/logs`：运行日志；
 - `var/secrets`：本地凭证。
@@ -110,7 +111,7 @@ Excel/CSV + formula33_completion.json
 
 - Formula33 正式结果必须排除观察日无交易股票；
 - 数据源错误与停牌必须分开；
-- AkShare 前复权缓存只能增量补齐，不能因单次失败覆盖有效历史；
+- AkShare 前复权缓存通常增量补齐；复权锚点改变时必须整窗刷新，单次失败不能覆盖有效历史；
 - 同一日报的必需输入必须属于同一观察日；
 - 六个上游生产步骤没有全部成功时不得推送；
 - 样例产物不能进入正式日报；
