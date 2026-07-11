@@ -254,9 +254,9 @@ def test_build_push_reports_keeps_every_stock_and_bounds_each_part():
     assert "结论" in part2 and "风险" in part2
     assert "30秒结论" in part1 and "今天怎么用" in part1
     assert "数据是否可用" in part1 and "现价÷价值线" in part1
-    assert "70.0% · 右侧确认" in part1 and "低点=0%" in part1
+    assert "回调修复 70.0%，右侧确认" in part1 and "回调突破价" in part1
     assert "30秒结论" in part2 and "核验顺序" in part2
-    assert "70.0% · 右侧确认" in part2 and "两种分位不可混用" in part2
+    assert "回调修复 70.0%，右侧确认" in part2 and "两种分位不可混用" in part2
 
 
 def test_large_value_pool_paginates_without_compressing_fields():
@@ -278,9 +278,9 @@ def test_large_value_pool_paginates_without_compressing_fields():
     assert all(len(part) <= 18000 for part in parts)
     assert all(code in combined for code in values["code"])
     assert all(code in combined for code in normal["code"])
-    assert combined.count("70.0% · 右侧确认") == len(values) + len(normal)
+    assert combined.count("回调修复 70.0%，右侧确认") == len(values) + len(normal)
     assert "字段和风险说明不压缩" in combined
-    assert "主要风险" in combined
+    assert "指标警讯" in combined and "技术评分" in combined
 
 
 def test_old_unbounded_wave_progress_is_displayed_as_bounded_percentile():
@@ -293,7 +293,7 @@ def test_old_unbounded_wave_progress_is_displayed_as_bounded_percentile():
         }
     )
 
-    assert daily_report.wave_position_compact(row) == "100.0% · 突破前高+25.0%"
+    assert daily_report.wave_position_compact(row) == "已突破前高 25.0%"
     assert "波段分位179.4%" not in daily_report.wave_position(row)
 
 
@@ -488,6 +488,32 @@ def test_value_pool_keeps_stock_above_recovery_50():
     )
 
     assert values.iloc[0]["code"] in part1
+
+
+def test_build_reports_orders_each_pool_by_action_score_then_lower_risk(monkeypatch, tmp_path):
+    value_part = "1.基本价值线或附近"
+    normal_part = "2.正常基本面选股"
+    values = make_stocks("V", 3, value_part)
+    normal = make_stocks("N", 2, normal_part)
+    values["technical_action_score"] = [60, 90, 90]
+    values["technical_risk_score"] = [10, 30, 20]
+    normal["technical_action_score"] = [50, 80]
+    normal["technical_risk_score"] = [10, 40]
+    stocks = pd.concat([values, normal], ignore_index=True)
+    fundamental = tmp_path / "daily_fundamental_selection_current.csv"
+    formula = tmp_path / "formula33_stats_current.csv"
+    sector = tmp_path / "sector_watch_current.csv"
+    stocks.to_csv(fundamental, index=False)
+    pd.DataFrame([{"date": "2026-07-03", "window_unique_count": 188}]).to_csv(formula, index=False)
+    pd.DataFrame([{"date": "2026-07-03", "board": "测试", "final_score": 1}]).to_csv(sector, index=False)
+    monkeypatch.setattr(daily_report, "load_history", lambda _path: type("History", (), {"snapshots": {}, "previous_before": lambda self, _date: None})())
+    monkeypatch.setattr(daily_report, "load_watch_state", lambda _path: {})
+
+    bundle = build_reports(3, 30, 18000, str(fundamental), str(formula), str(sector))
+    html = "".join(bundle.push_parts)
+
+    assert html.index(values.iloc[2]["code"]) < html.index(values.iloc[1]["code"]) < html.index(values.iloc[0]["code"])
+    assert html.index(normal.iloc[1]["code"]) < html.index(normal.iloc[0]["code"])
 
 
 def test_daily_report_fails_when_either_push_fails(monkeypatch, tmp_path):

@@ -77,7 +77,7 @@ def load_history(path):
     return SelectionHistory(snapshots=snapshots)
 
 
-def save_snapshot(path, date_str, rows, retain=5):
+def save_snapshot(path, date_str, rows, retain=45):
     target = Path(path)
     history = load_history(target)
     snapshots = dict(history.snapshots)

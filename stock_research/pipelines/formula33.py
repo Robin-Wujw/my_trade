@@ -1738,8 +1738,9 @@ def load_kline_akshare(code, start_date, end_date, retries=4, retry_delay=1.5):
         return df
 
     def fetch_daily():
-        result = ak.stock_zh_a_daily(
-            symbol=daily_symbol,
+        result = ak.stock_zh_a_hist(
+            symbol=pure,
+            period="daily",
             start_date=str(start_date).replace("-", ""),
             end_date=str(end_date).replace("-", ""),
             adjust="qfq",
@@ -1751,21 +1752,20 @@ def load_kline_akshare(code, start_date, end_date, retries=4, retry_delay=1.5):
     try:
         df = call_with_backoff(
             fetch_daily,
-            f"{code} akshare新浪K线",
+            f"{code} akshare东方财富K线",
             retries=retries,
             retry_delay=retry_delay,
         )
     except Exception as exc:
-        print(f"{code} akshare新浪K线失败，回退东方财富: {exc}")
+        print(f"{code} akshare东方财富K线失败，回退新浪: {exc}")
         df = call_with_backoff(
-            lambda: ak.stock_zh_a_hist(
-                symbol=pure,
-                period="daily",
+            lambda: ak.stock_zh_a_daily(
+                symbol=daily_symbol,
                 start_date=str(start_date).replace("-", ""),
                 end_date=str(end_date).replace("-", ""),
                 adjust="qfq",
             ),
-            f"{code} akshare东方财富K线",
+            f"{code} akshare新浪K线",
             retries=retries,
             retry_delay=retry_delay,
         )

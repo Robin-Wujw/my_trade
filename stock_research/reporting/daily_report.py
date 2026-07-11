@@ -17,6 +17,12 @@ from stock_research.reporting.diff import (
     load_history,
     save_snapshot,
 )
+from stock_research.reporting.breakout_watch import (
+    load_watch_state,
+    recent_pool,
+    save_watch_state,
+    update_breakout_watch,
+)
 
 
 SELECTION_DIR = str(PATHS.selection_exports)
@@ -24,6 +30,8 @@ BOARD_DIR = str(PATHS.market_exports)
 REPORT_DIR = str(PATHS.report_exports)
 HISTORY_FILE = str(PATHS.state / "daily_selection_history.json")
 FORMULA_PHASE_FILE = str(PATHS.state / "formula33_right_side_phase.json")
+BREAKOUT_WATCH_FILE = str(PATHS.state / "two_month_breakout_watch.json")
+KLINE_CACHE_DIR = str(PATHS.cache / "formula33_kline" / "akshare")
 FORMULA_PHASE_VERSION = 2
 RIGHT_SIDE_WAITING = "等待右侧阶段"
 RIGHT_SIDE_WATCH = "观察、可右侧积极做多阶段"
@@ -42,6 +50,8 @@ class DailyReportBundle:
     sector_path: str
     selection_diff: SelectionDiff | None
     formula_phase_state: dict | None = None
+    breakout_watch_state: dict | None = None
+    breakout_alerts: tuple[dict, ...] = ()
 
 
 def parse_args(argv=None):
@@ -314,8 +324,19 @@ def wave_position_compact(row):
     if percentile is None:
         return "分位不足 · 位置待确认"
     if breakout > 0:
-        return f"100.0% · 突破前高+{breakout:.1f}%"
-    return f"{percentile:.1f}% · {_action_label(row)}"
+        return f"已突破前高 {breakout:.1f}%"
+    return f"{percentile:.1f}%，{_action_label(row)}"
+
+
+def stage_wave_text(row):
+    stage = str(row.get("trend_stage") or "")
+    passed = bool(row.get("stage_level_50_passed"))
+    level = num(row.get("stage_level_50"))
+    if stage == "uptrend":
+        return f"上涨阶段：上涨波段50%支撑{level}{'有效' if passed else '失效'}"
+    if stage == "pullback_recovery":
+        return f"回调修复阶段：{'已突破' if passed else '未突破'}回调50%趋势改变点{level}"
+    return "波段阶段待确认"
 
 
 def valuation_percentile_text(row):
@@ -343,11 +364,16 @@ def stock_line(row, include_value=True):
         f"行业：{esc(row.get('industry'), '待核验')}；"
         f"当前主流板块：{esc(row.get('mainline_boards'), '未命中')}；"
         f"{wave_position(row)}；"
-        f"本轮低点/前高={num(row.get('wave_low'))}/{num(row.get('wave_high'))}；"
-        f"50%/62.5%/75%价位={num(row.get('wave_level_50'))}/"
-        f"{num(row.get('wave_level_625'))}/{num(row.get('wave_level_75'))}；"
+        f"上涨起点/前高/回调低点={num(row.get('uptrend_wave_low'))}/"
+        f"{num(row.get('wave_high'))}/{num(row.get('wave_low'))}；"
+        f"上涨波段50%={num(row.get('uptrend_wave_level_50'))}；"
+        f"回调趋势改变点50%={num(row.get('wave_level_50'))}；"
+        f"回调62.5%/75%={num(row.get('wave_level_625'))}/{num(row.get('wave_level_75'))}；"
+        f"{stage_wave_text(row)}；"
         f"扣非同比{pct(row.get('earnings_yoy'))}，质量{num(row.get('quality_score'), 1)}"
     )
+    if bool(row.get("technical_available")):
+        base += f"；{technical_analysis(row)}"
     return base
 
 
@@ -435,6 +461,42 @@ def _risk_label(row):
     return "未见额外风险标签"
 
 
+def _divergence_label(value):
+    number = pd.to_numeric(value, errors="coerce")
+    if pd.isna(number) or int(number) == 0:
+        return "无"
+    return "底背离" if int(number) > 0 else "顶背离"
+
+
+def technical_analysis(row):
+    if not bool(row.get("technical_available")):
+        return "技术指标不可用（历史数据不足），不参与评分。"
+    kd_gap = pd.to_numeric(row.get("kd_gap"), errors="coerce")
+    gap_text = "未达极限"
+    if pd.notna(kd_gap) and abs(kd_gap) >= 20:
+        gap_text = f"开口{abs(kd_gap):.1f}≥20，短线按均值收敛风险处理"
+    ene_position = pd.to_numeric(row.get("ene_position"), errors="coerce")
+    ene_text = "ENE通道内"
+    if pd.notna(ene_position):
+        ene_text = "ENE上轨外，追高风险" if ene_position >= 100 else "ENE下轨外，关注止跌" if ene_position <= 0 else f"ENE通道{ene_position:.0f}%位置"
+    baseline_count = pd.to_numeric(row.get("volume_baseline_count"), errors="coerce")
+    baseline_count = int(baseline_count) if pd.notna(baseline_count) else 0
+    volume_text = (
+        f"基准量{baseline_count}/4：现量/5日均量={num(row.get('volume_ratio_ma5'),2)}，"
+        f"/10日均量={num(row.get('volume_ratio_ma10'),2)}，"
+        f"/5日扣抵量={num(row.get('volume_ratio_ref5'),2)}，"
+        f"/10日扣抵量={num(row.get('volume_ratio_ref10'),2)}"
+    )
+    return (
+        f"量化：行动{num(row.get('technical_action_score'),1)}/100，机会{num(row.get('technical_opportunity_score'),1)}，"
+        f"风险{num(row.get('technical_risk_score'),1)}，置信度{num(row.get('technical_confidence'),1)}；"
+        f"盘中KD高点背离={_divergence_label(row.get('kd_divergence'))}，RSI999={num(row.get('rsi999'),1)}"
+        f"/{_divergence_label(row.get('rsi_divergence'))}，MACD={_divergence_label(row.get('macd_divergence'))}；"
+        f"{gap_text}；{ene_text}；WR10/20={num(row.get('wr10'),1)}/{num(row.get('wr20'),1)}；"
+        f"BIAS10={num(row.get('bias10'),1)}%；{volume_text}。背离仅作警讯，不单独作为卖讯。"
+    )
+
+
 def _action_label(row):
     percentile, breakout = _wave_values(row)
     if percentile is not None:
@@ -476,48 +538,155 @@ def _push_style():
         "padding:10px;margin:8px 0}.warning{background:#fff7ed;border:1px solid "
         "#fdba74;border-radius:8px;padding:10px;margin:8px 0}table{border-collapse:"
         "collapse;width:100%;font-size:13px}th{background:#f3f4f6}th,td{padding:5px;"
-        "vertical-align:top}</style>"
+        "vertical-align:top}.danger{color:#b91c1c;font-weight:bold}.ok{color:#047857;"
+        "font-weight:bold}</style>"
     )
+
+
+def _kd_compact(row):
+    k_value = pd.to_numeric(row.get("kd_k_close"), errors="coerce")
+    d_value = pd.to_numeric(row.get("kd_d_close"), errors="coerce")
+    gap = pd.to_numeric(row.get("kd_gap"), errors="coerce")
+    warnings = []
+    if pd.notna(gap) and abs(float(gap)) >= 20:
+        direction = "偏热" if gap > 0 else "偏弱/超卖"
+        warnings.append(f"KD开口{abs(gap):.1f}≥20，{direction}，留意收敛")
+    divergences = [
+        name + _divergence_label(row.get(field))
+        for name, field in (
+            ("KD", "kd_divergence"),
+            ("RSI", "rsi_divergence"),
+            ("MACD", "macd_divergence"),
+        )
+        if _divergence_label(row.get(field)) != "无"
+    ]
+    if divergences:
+        warnings.append("、".join(divergences))
+    if not warnings:
+        return "暂无指标警讯"
+    return "<br>".join(f"<span class='danger'>{esc(item)}</span>" for item in warnings)
+
+
+def _dual_wave_compact(row):
+    stage = str(row.get("trend_stage") or "")
+    passed = bool(row.get("stage_level_50_passed"))
+    if stage == "uptrend":
+        state = "上涨阶段，支撑有效" if passed else "上涨阶段，支撑失效"
+    elif stage == "pullback_recovery":
+        state = "回调已过50%" if passed else "回调未过50%"
+    else:
+        state = "阶段待确认"
+    state_class = "ok" if passed else "danger"
+    close = pd.to_numeric(row.get("close"), errors="coerce")
+    pullback_level = pd.to_numeric(row.get("wave_level_50"), errors="coerce")
+    distance = (
+        (float(close) / float(pullback_level) - 1) * 100
+        if pd.notna(close) and pd.notna(pullback_level) and pullback_level > 0
+        else None
+    )
+    distance_text = ""
+    if distance is not None:
+        distance_text = (
+            f"<br>已高于突破价{distance:.1f}%"
+            if distance >= 0
+            else f"<br>距突破还差{abs(distance):.1f}%"
+        )
+    return (
+        f"上涨支撑价 {num(row.get('uptrend_wave_level_50'))}<br>"
+        f"回调突破价 {num(row.get('wave_level_50'))}"
+        f"{distance_text}<br><span class='{state_class}'>{state}</span>"
+    )
+
+
+def _volume_compact(row):
+    count = pd.to_numeric(row.get("volume_baseline_count"), errors="coerce")
+    count = int(count) if pd.notna(count) else 0
+    if count == 4:
+        return "<span class='ok'>上涨量能达标</span>"
+    if count == 3:
+        return "量能接近达标<br>还差1项"
+    if count == 2:
+        return "量能一般<br>2项未达"
+    return f"<span class='danger'>量能不足</span><br>{4-count}项未达"
+
+
+def _valuation_compact(row):
+    ratio = pd.to_numeric(row.get("price_to_value"), errors="coerce")
+    return "未采用价值线" if pd.isna(ratio) else f"价值线的 {float(ratio):.2f} 倍"
 
 
 def _compact_stock_table(frame, kind):
     if kind == "value":
-        headers = ("股票/代码", "现价÷价值线", "质量/100", "波段分位", "主要风险")
+        headers = ("股票与现价", "估值位置", "技术评分", "指标警讯", "波段关键价", "量能与位置")
     else:
-        headers = ("股票/代码", "质量/100", "命中主线/估值", "波段分位", "主要风险")
+        headers = ("股票与现价", "基本面质量", "技术评分", "指标警讯", "波段关键价", "量能与位置")
     parts = [
         "<table border='1' cellspacing='0' cellpadding='4'><thead><tr>",
         "".join(f"<th>{header}</th>" for header in headers),
         "</tr></thead><tbody>",
     ]
     for _, row in frame.iterrows():
-        stock = f"{esc(row.get('name', row.get('code')))}<br>{esc(row.get('code'))}"
+        stock = (
+            f"{esc(row.get('name', row.get('code')))}<br>{esc(row.get('code'))}"
+            f"<br>现价<b>{num(row.get('close'))}</b>"
+        )
         if kind == "value":
             cells = (
                 stock,
-                num(row.get("price_to_value"), 3),
-                num(row.get("quality_score"), 1),
-                esc(wave_position_compact(row)),
-                esc(_risk_label(row)),
+                _valuation_compact(row),
+                f"可操作性 {num(row.get('technical_action_score'),0)}<br>风险 {num(row.get('technical_risk_score'),0)}",
+                _kd_compact(row),
+                _dual_wave_compact(row),
+                f"{_volume_compact(row)}<br>回调修复 {esc(wave_position_compact(row))}",
             )
         else:
             cells = (
                 stock,
-                num(row.get("quality_score"), 1),
-                (
-                    esc(row.get("mainline_boards"), "未命中")
-                    + (
-                        f"<br>{esc(valuation_percentile_text(row))}"
-                        if valuation_percentile_text(row)
-                        else ""
-                    )
-                ),
-                esc(wave_position_compact(row)),
-                esc(_risk_label(row)),
+                f"质量 {num(row.get('quality_score'),0)}/100",
+                f"可操作性 {num(row.get('technical_action_score'),0)}<br>风险 {num(row.get('technical_risk_score'),0)}",
+                _kd_compact(row),
+                _dual_wave_compact(row),
+                f"{_volume_compact(row)}<br>回调修复 {esc(wave_position_compact(row))}",
             )
         parts.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
     parts.append("</tbody></table>")
     return "".join(parts)
+
+
+def _breakout_watch_pages(report_date, alerts, max_chars):
+    if not alerts:
+        return []
+    intro = (
+        _push_style()
+        + f"<h1>{esc(report_date)} 两个月突破强提醒</h1>"
+        + "<div class='warning'><b>独立追踪：</b>来源为过去两个月曾进入前两项选股的股票；"
+        "回调45%-50%为强提醒区；上穿50%后继续跟踪并累计突破次数，超过60%才停止提醒。"
+        "只有突破前高完成且脱离当前全部筛选才从追踪池剔除。</div>"
+    )
+    pages = []
+    offset = 0
+    while offset < len(alerts):
+        prefix = intro if offset == 0 else _push_style() + f"<h1>{esc(report_date)} 两个月突破强提醒（续）</h1>"
+        parts = [prefix, "<table border='1'><tr><th>股票与现价</th><th>突破状态</th><th>关键价位</th><th>当前筛选状态</th></tr>"]
+        start = offset
+        while offset < len(alerts):
+            item = alerts[offset]
+            row = (
+                f"<tr><td><b>{esc(item.get('name'))}</b><br>{esc(item.get('code'))}<br>现价<b>{num(item.get('close'))}</b></td>"
+                f"<td><span class='danger'>{esc(item.get('alert_level'))}</span><br>回调进度{num(item.get('recovery_pct'),1)}%"
+                f"<br>累计突破{int(item.get('crossing_count') or 0)}次</td>"
+                f"<td>上涨50%={num(item.get('uptrend_level_50'))}<br>回调50%={num(item.get('pullback_level_50'))}"
+                f"<br>前高={num(item.get('prior_high'))}</td>"
+                f"<td>{'是，继续跟踪' if item.get('in_current_selection') else '否，独立跟踪中'}</td></tr>"
+            )
+            candidate = "".join(parts) + row + "</table>"
+            if len(candidate) > max_chars and offset > start:
+                break
+            parts.append(row)
+            offset += 1
+        parts.append("</table>")
+        pages.append("".join(parts))
+    return pages
 
 
 def _priority_details(frame, include_value, limit):
@@ -527,7 +696,7 @@ def _priority_details(frame, include_value, limit):
     for _, row in frame.head(limit).iterrows():
         parts.append(
             f"<li>{stock_line(row, include_value=include_value)}。"
-            f"理由：{esc(row.get('selection_reason'))}</li>"
+            f"理由：{esc(row.get('selection_reason'))}<br>{esc(technical_analysis(row))}</li>"
         )
     parts.append("</ol>")
     return "".join(parts)
@@ -641,12 +810,25 @@ def build_push_reports(
     max_chars,
     top=5,
     formula_phase=RIGHT_SIDE_WAITING,
+    breakout_alerts=(),
 ):
+    # Page numbering is added after pagination; reserve enough room for it.
+    page_content_limit = max_chars - 32
     formula_status = render_formula_status(latest_formula)
     value_zones = values.get("wave_zone", pd.Series(dtype=str)).value_counts()
     normal_zones = normal.get("wave_zone", pd.Series(dtype=str)).value_counts()
     value_quality = int((pd.to_numeric(values.get("quality_score"), errors="coerce") >= 80).sum())
     normal_quality = int((pd.to_numeric(normal.get("quality_score"), errors="coerce") >= 80).sum())
+    value_gaps = pd.to_numeric(
+        values.get("kd_gap", pd.Series(index=values.index, dtype=float)),
+        errors="coerce",
+    )
+    normal_gaps = pd.to_numeric(
+        normal.get("kd_gap", pd.Series(index=normal.index, dtype=float)),
+        errors="coerce",
+    )
+    value_kd_extreme = int((value_gaps.abs() >= 20).sum())
+    normal_kd_extreme = int((normal_gaps.abs() >= 20).sum())
     industries = normal.get("industry", pd.Series(dtype=str)).fillna("未知").value_counts()
     top_industry = industries.index[0] if len(industries) else "未知"
     top_industry_count = int(industries.iloc[0]) if len(industries) else 0
@@ -674,8 +856,11 @@ def build_push_reports(
                 f"右侧启动 {zone_count(value_zones, '50%-62.5%右侧启动')}只；"
                 f"左侧观察 {zone_count(value_zones, '50%以下未确认')}只；"
                 f"质量分≥80有 {value_quality}只。</p>",
-                "<p><b>波段分位口径：</b>本轮下跌低点=0%，下跌前高=100%；50%/62.5%/75%"
-                "是从低点向前高修复的价格位置，不是全市场排名。</p>",
+                f"<p><b>KD开口：</b>|K-D|≥20有 {value_kd_extreme}只，逐股标红提示短线收敛风险。</p>",
+                "<p><b>双波段口径：</b>回调阶段先看“前高—回调低点”的50%，突破才有右侧意义；"
+                "突破前高进入上涨阶段后，改看“上涨起点—上涨高点”的50%支撑。完整名单逐股显示两条价位。</p>",
+                "<p><b>量能口径：</b>今日成交量同时高于5日均量、10日均量、5日前扣抵量和10日前扣抵量，"
+                "才显示“上涨量能达标”；接近达标或不足会直接写明差几项。</p>",
                 "<p><b>阅读方法：</b>现价÷价值线低不等于可以买；优先顺序是强修复/右侧确认 → "
                 "右侧启动 → 左侧观察，再核验质量与风险。</p>",
                 render_selection_changes(selection_diff, "1.基本价值线或附近"),
@@ -700,6 +885,9 @@ def build_push_reports(
                 f"<p>右侧确认 {zone_count(normal_zones, '62.5%以上确认')}只；"
                 f"右侧启动 {zone_count(normal_zones, '50%-62.5%右侧启动')}只；"
                 f"左侧观察 {zone_count(normal_zones, '50%以下未确认')}只。</p>",
+                f"<p><b>KD开口：</b>|K-D|≥20有 {normal_kd_extreme}只，逐股标红提示短线收敛风险。</p>",
+                "<p><b>表格读法：</b>正常指标只显示“暂无指标警讯”；出现KD极限开口或背离时才展开。"
+                "波段栏直接给出上涨支撑价、回调突破价以及距离。</p>",
                 render_selection_changes(selection_diff, "2.正常基本面选股"),
                 _priority_details(normal, "auto", top),
                 "<h3>完整名单（代码不会省略）</h3>",
@@ -717,14 +905,15 @@ def build_push_reports(
                 "板块数据超过7天不参与判断；缺失数据不会自动补成通过。</div>",
         ]
     )
-    pages = _paginate_stock_section(
+    pages = _breakout_watch_pages(report_date, breakout_alerts, page_content_limit)
+    pages.extend(_paginate_stock_section(
         value_intro,
         values,
         "value",
         value_ending,
         f"{report_date} 价值线完整名单（续）",
-        max_chars,
-    )
+        page_content_limit,
+    ))
     pages.extend(
         _paginate_stock_section(
             normal_intro,
@@ -732,7 +921,7 @@ def build_push_reports(
             "normal",
             normal_ending,
             f"{report_date} 基本面完整名单（续）",
-            max_chars,
+            page_content_limit,
         )
     )
     numbered = _number_push_pages(pages)
@@ -743,6 +932,22 @@ def build_push_reports(
         max_chars,
     )
     return numbered
+
+
+def _load_watch_kline(code, observation_date):
+    path = os.path.join(KLINE_CACHE_DIR, f"{str(code).replace('.', '_')}.csv")
+    try:
+        frame = pd.read_csv(path)
+    except (OSError, ValueError):
+        return pd.DataFrame()
+    if "date" not in frame.columns:
+        return pd.DataFrame()
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    cutoff = pd.Timestamp(observation_date).normalize()
+    frame = frame[frame["date"].dt.normalize() <= cutoff]
+    for column in ("high", "low", "close", "volume"):
+        frame[column] = pd.to_numeric(frame.get(column), errors="coerce")
+    return frame.dropna(subset=["date", "high", "low", "close"]).sort_values("date")
 
 
 def build_reports(
@@ -787,15 +992,43 @@ def build_reports(
     )
     values = stocks[stocks["strategy_part"] == "1.基本价值线或附近"].copy()
     normal = stocks[stocks["strategy_part"] == "2.正常基本面选股"].copy().head(normal_top)
-    values = values.sort_values(["price_to_value", "quality_score"], ascending=[True, False])
+    for frame in (values, normal):
+        frame["technical_action_score"] = pd.to_numeric(
+            frame.get("technical_action_score"), errors="coerce"
+        )
+        frame["technical_risk_score"] = pd.to_numeric(
+            frame.get("technical_risk_score"), errors="coerce"
+        )
+    value_sort = ["technical_action_score", "technical_risk_score", "price_to_value", "quality_score"]
+    values = values.sort_values(
+        value_sort,
+        ascending=[False, True, True, False],
+        na_position="last",
+    )
+    normal_sort = ["technical_action_score", "technical_risk_score"]
+    normal_ascending = [False, True]
     if {"layer_order", "fundamental_score"}.issubset(normal.columns):
-        normal = normal.sort_values(["layer_order", "fundamental_score"], ascending=[True, False])
+        normal_sort.extend(["layer_order", "fundamental_score"])
+        normal_ascending.extend([True, False])
+    normal = normal.sort_values(
+        normal_sort,
+        ascending=normal_ascending,
+        na_position="last",
+    )
     history = load_history(HISTORY_FILE)
     previous = history.previous_before(report_date)
     selection_diff = (
         compare_snapshots(previous, stocks.to_dict("records"))
         if previous is not None
         else None
+    )
+    pool = recent_pool(history, stocks.to_dict("records"), report_date)
+    breakout_watch_state, breakout_alerts = update_breakout_watch(
+        pool,
+        stocks.get("code", pd.Series(dtype=str)).astype(str),
+        report_date,
+        _load_watch_kline,
+        load_watch_state(BREAKOUT_WATCH_FILE),
     )
 
     formula = formula.assign(
@@ -861,6 +1094,7 @@ def build_reports(
         max_chars,
         top=top,
         formula_phase=formula_phase,
+        breakout_alerts=breakout_alerts,
     )
     return DailyReportBundle(
         report_date=report_date,
@@ -872,6 +1106,8 @@ def build_reports(
         sector_path=sector_path,
         selection_diff=selection_diff,
         formula_phase_state=formula_phase_state,
+        breakout_watch_state=breakout_watch_state,
+        breakout_alerts=tuple(breakout_alerts),
     )
 
 
@@ -903,6 +1139,8 @@ def main(argv=None):
     bundle.stocks.to_csv(output_path, index=False, encoding="utf-8-sig")
     save_snapshot(HISTORY_FILE, report_date, bundle.stocks.to_dict("records"))
     save_formula_phase_state(FORMULA_PHASE_FILE, bundle.formula_phase_state)
+    if bundle.breakout_watch_state:
+        save_watch_state(BREAKOUT_WATCH_FILE, bundle.breakout_watch_state)
     print(f"完整四项报告: {report_path}")
     print(f"PushPlus发送前预览: {push_preview_path}")
     print(f"前两项完整选股: {output_path}，共{len(bundle.stocks)}行")
@@ -910,6 +1148,7 @@ def main(argv=None):
         f"数据源: {bundle.fundamental_path} | {bundle.formula_path} | "
         f"{bundle.sector_path}"
     )
+    print(f"两个月突破强提醒: {len(bundle.breakout_alerts)}只")
     for index, content in enumerate(bundle.push_parts, start=1):
         print(f"PushPlus第{index}部分长度: {len(content)}")
     if args.no_push:

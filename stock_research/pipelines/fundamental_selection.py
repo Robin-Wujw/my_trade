@@ -12,6 +12,7 @@ import pandas as pd
 from stock_research.core.as_of import audit_source, write_metadata
 from stock_research.core.paths import PATHS
 from stock_research.indicators.waves import infer_downtrend_recovery, level_price
+from stock_research.indicators.technical_quant import technical_snapshot
 from stock_research.pipelines.factor_selection import classify_method
 from stock_research.strategies.fundamental_selection import (
     growth_risk,
@@ -101,7 +102,7 @@ def technical_fields(df):
     close = df["close"]
     volume = pd.to_numeric(df.get("volume"), errors="coerce").fillna(0)
     current = float(close.iloc[-1])
-    wave = infer_downtrend_recovery(df, lookback=240) or {}
+    wave = infer_downtrend_recovery(df, lookback=500) or {}
     ma_values = {
         period: float(close.tail(period).mean()) if len(close) >= period else None
         for period in [5, 10, 20, 60, 120, 240]
@@ -113,12 +114,23 @@ def technical_fields(df):
         "volume_ratio_5_20": float(volume.tail(5).mean() / volume.tail(20).mean()) if len(volume) >= 20 and volume.tail(20).mean() else None,
         "wave_high": wave.get("downtrend_high"),
         "wave_low": wave.get("downtrend_low"),
+        "uptrend_wave_low": wave.get("uptrend_low"),
+        "uptrend_wave_level_50": wave.get("uptrend_level_50"),
+        "close_wave_high": wave.get("close_wave_high"),
+        "close_uptrend_wave_low": wave.get("close_uptrend_low"),
+        "uptrend_close_level_50": wave.get("uptrend_close_level_50"),
+        "close_pullback_low": wave.get("close_pullback_low"),
+        "pullback_close_level_50": wave.get("pullback_close_level_50"),
+        "trend_stage": wave.get("trend_stage"),
+        "stage_level_50": wave.get("stage_level_50"),
+        "stage_level_50_passed": wave.get("stage_level_50_passed"),
         "wave_pct": wave.get("recovery_pct"),
         "wave_breakout_pct": wave.get("breakout_above_high_pct"),
         "wave_level_50": wave.get("recovery_level_50"),
         "wave_level_625": wave.get("recovery_level_625"),
         "wave_level_75": level_price(wave["downtrend_low"], wave["downtrend_high"], 75) if wave else None,
         "wave_zone": wave.get("recovery_zone", "波段不足"),
+        **technical_snapshot(df),
     }
     price_periods = []
     volume_periods = []

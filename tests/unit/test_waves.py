@@ -52,3 +52,55 @@ def test_downtrend_recovery_uses_high_before_later_low():
     assert result["recovery_level_50"] == 15.0
     assert result["recovery_level_625"] == 16.25
     assert result["recovery_zone"] == "50%-62.5%右侧启动"
+
+
+def test_wave_reports_prior_uptrend_and_pullback_midpoints_separately():
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=60),
+            "high": [15.0] * 10 + [37.2] * 10 + [30.0] * 40,
+            "low": [14.13] * 10 + [35.0] * 10 + [23.06] * 40,
+            "close": [14.5] * 10 + [37.0] * 10 + [25.0] * 40,
+        }
+    )
+
+    result = infer_downtrend_recovery(frame)
+
+    assert result["uptrend_level_50"] == 25.66
+    assert result["recovery_level_50"] == 30.13
+    assert result["uptrend_level_50"] != result["recovery_level_50"]
+    assert result["trend_stage"] == "pullback_recovery"
+    assert result["stage_level_50"] == result["recovery_level_50"]
+    assert result["stage_level_50_passed"] is False
+
+
+def test_default_window_keeps_an_uptrend_start_older_than_240_bars():
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-01", periods=320),
+            "high": [15.5] + [30.0] * 268 + [64.98] + [60.0] * 50,
+            "low": [14.92] + [20.0] * 268 + [60.0] + [39.9] * 50,
+            "close": [15.0] + [25.0] * 268 + [64.0] + [40.0] * 50,
+        }
+    )
+
+    result = infer_downtrend_recovery(frame)
+
+    assert result["uptrend_low"] == 14.92
+    assert result["downtrend_high"] == 64.98
+    assert result["uptrend_level_50"] == 39.95
+
+
+def test_breakout_clears_old_pullback_and_waits_for_a_new_cycle():
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=60),
+            "high": [20.0] * 10 + [18.0] * 49 + [22.0],
+            "low": [10.0] * 10 + [8.0] * 49 + [21.0],
+            "close": [15.0] * 10 + [12.0] * 49 + [21.0],
+        }
+    )
+
+    result = infer_downtrend_recovery(frame)
+
+    assert result is None
