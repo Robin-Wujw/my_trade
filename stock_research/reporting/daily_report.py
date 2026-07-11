@@ -35,7 +35,7 @@ RIGHT_SIDE_EXITED = "明确退出右侧阶段"
 class DailyReportBundle:
     report_date: str
     full_html: str
-    push_parts: tuple[str, str]
+    push_parts: tuple[str, ...]
     stocks: pd.DataFrame
     fundamental_path: str
     formula_path: str
@@ -277,25 +277,45 @@ def save_formula_phase_state(path, state):
 
 
 def wave_position(row):
-    value = row.get("wave_pct")
-    try:
-        value = float(value)
-    except (TypeError, ValueError):
+    percentile, breakout = _wave_values(row)
+    if percentile is None:
         return "波段位置数据不足"
-    if pd.isna(value):
-        return "波段位置数据不足"
-    if value > 100:
-        return f"波段分位{value:.1f}%（已突破前高100%）"
-    if value < 0:
-        return f"波段分位{value:.1f}%（低于本轮低点0%）"
-    return f"波段分位{value:.1f}%（低点=0%，下跌前高=100%）"
+    suffix = f"；突破前高+{breakout:.1f}%" if breakout > 0 else ""
+    return (
+        f"波段分位{percentile:.1f}%（低点=0%，下跌前高=100%）{suffix}"
+    )
+
+
+def _wave_values(row):
+    raw = pd.to_numeric(row.get("wave_pct"), errors="coerce")
+    explicit_breakout = pd.to_numeric(
+        row.get("wave_breakout_pct"), errors="coerce"
+    )
+    if pd.isna(raw):
+        return None, 0.0
+    raw = float(raw)
+    close = pd.to_numeric(row.get("close"), errors="coerce")
+    wave_high = pd.to_numeric(row.get("wave_high"), errors="coerce")
+    derived_breakout = (
+        max(0.0, (float(close) / float(wave_high) - 1) * 100)
+        if pd.notna(close) and pd.notna(wave_high) and float(wave_high) > 0
+        else max(0.0, raw - 100.0)
+    )
+    breakout = (
+        max(0.0, float(explicit_breakout))
+        if pd.notna(explicit_breakout)
+        else derived_breakout
+    )
+    return min(100.0, max(0.0, raw)), breakout
 
 
 def wave_position_compact(row):
-    value = pd.to_numeric(row.get("wave_pct"), errors="coerce")
-    if pd.isna(value):
+    percentile, breakout = _wave_values(row)
+    if percentile is None:
         return "分位不足 · 位置待确认"
-    return f"{float(value):.1f}% · {_action_label(row)}"
+    if breakout > 0:
+        return f"100.0% · 突破前高+{breakout:.1f}%"
+    return f"{percentile:.1f}% · {_action_label(row)}"
 
 
 def valuation_percentile_text(row):
@@ -416,9 +436,10 @@ def _risk_label(row):
 
 
 def _action_label(row):
-    percentile = pd.to_numeric(row.get("wave_pct"), errors="coerce")
-    if pd.notna(percentile):
-        percentile = float(percentile)
+    percentile, breakout = _wave_values(row)
+    if percentile is not None:
+        if breakout > 0:
+            return "突破前高"
         if percentile >= 75:
             return "强修复"
         if percentile >= 62.5:
@@ -459,24 +480,7 @@ def _push_style():
     )
 
 
-def _compact_stock_table(frame, kind, minimal=False):
-    if minimal:
-        headers = ("股票/代码", "价值比", "质量", "波段分位")
-        parts = [
-            "<table><thead><tr>",
-            "".join(f"<th>{header}</th>" for header in headers),
-            "</tr></thead><tbody>",
-        ]
-        for _, row in frame.iterrows():
-            cells = (
-                f"{esc(row.get('name', row.get('code')))}<br>{esc(row.get('code'))}",
-                num(row.get("price_to_value"), 3),
-                num(row.get("quality_score"), 0),
-                esc(wave_position_compact(row)),
-            )
-            parts.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
-        parts.append("</tbody></table>")
-        return "".join(parts)
+def _compact_stock_table(frame, kind):
     if kind == "value":
         headers = ("股票/代码", "现价÷价值线", "质量/100", "波段分位", "主要风险")
     else:
@@ -552,6 +556,81 @@ def validate_push_report(content, expected_codes, max_chars):
         raise ValueError(f"PushPlus正文遗漏股票代码: {', '.join(missing[:5])}")
 
 
+def _paginate_stock_section(
+    intro,
+    frame,
+    kind,
+    ending,
+    continuation_title,
+    max_chars,
+):
+    """Split a full-detail stock table across messages without dropping columns."""
+    if frame is None or frame.empty:
+        content = intro + _compact_stock_table(pd.DataFrame(), kind) + ending
+        validate_push_report(content, (), max_chars)
+        return [content]
+    pages = []
+    offset = 0
+    first = True
+    while offset < len(frame):
+        prefix = (
+            intro
+            if first
+            else _push_style()
+            + f"<h1>{esc(continuation_title)}</h1>"
+            + f"<p>接上条，从第{offset + 1}只继续；字段和风险说明不压缩。</p>"
+        )
+        low, high, best = 1, len(frame) - offset, 0
+        while low <= high:
+            middle = (low + high) // 2
+            chunk = frame.iloc[offset : offset + middle]
+            is_last = offset + middle >= len(frame)
+            candidate = (
+                prefix
+                + _compact_stock_table(chunk, kind)
+                + (ending if is_last else "<p>名单未完，下一条继续。</p>")
+            )
+            if len(candidate) <= max_chars:
+                best = middle
+                low = middle + 1
+            else:
+                high = middle - 1
+        if best == 0:
+            raise ValueError(
+                f"PushPlus单页固定说明已超过{max_chars}字符，无法容纳一行完整股票数据"
+            )
+        chunk = frame.iloc[offset : offset + best]
+        offset += best
+        is_last = offset >= len(frame)
+        pages.append(
+            prefix
+            + _compact_stock_table(chunk, kind)
+            + (ending if is_last else "<p>名单未完，下一条继续。</p>")
+        )
+        first = False
+    return pages
+
+
+def _number_push_pages(pages):
+    total = len(pages)
+    return tuple(
+        page.replace("<h1>", f"<h1>[{index}/{total}] ", 1)
+        for index, page in enumerate(pages, start=1)
+    )
+
+
+def validate_push_pages(pages, expected_codes, max_chars):
+    for content in pages:
+        if len(content) > max_chars:
+            raise ValueError(
+                f"PushPlus正文{len(content)}字符，超过{max_chars}字符上限"
+            )
+    combined = "".join(pages)
+    missing = [str(code) for code in expected_codes if str(code) not in combined]
+    if missing:
+        raise ValueError(f"PushPlus分页遗漏股票代码: {', '.join(missing[:5])}")
+
+
 def build_push_reports(
     report_date,
     values,
@@ -579,11 +658,10 @@ def build_push_reports(
     def zone_count(counts, name):
         return int(counts.get(name, 0))
 
-    def make_parts(detail_count, minimal_tables=False):
-        part1 = "".join(
-            [
+    value_intro = "".join(
+        [
                 _push_style(),
-                f"<h1>[1/2] {esc(report_date)} 今日结论与价值线池</h1>",
+                f"<h1>{esc(report_date)} 今日结论与价值线池</h1>",
                 "<div class='summary'><b>30秒结论</b><br>",
                 f"市场阶段：<b>{esc(formula_phase)}</b><br>{formula_status}</div>",
                 f"<div class='action'><b>今天怎么用：</b>{esc(_phase_guidance(formula_phase))}</div>",
@@ -601,17 +679,18 @@ def build_push_reports(
                 "<p><b>阅读方法：</b>现价÷价值线低不等于可以买；优先顺序是强修复/右侧确认 → "
                 "右侧启动 → 左侧观察，再核验质量与风险。</p>",
                 render_selection_changes(selection_diff, "1.基本价值线或附近"),
-                _priority_details(values, True, detail_count),
+                _priority_details(values, True, top),
                 "<h3>完整名单（代码不会省略）</h3>",
-                _compact_stock_table(values, "value", minimal=minimal_tables),
-                "<div class='warning'><b>边界：</b>价值线适用性仍需核验行业方法和财务口径；"
-                "左侧观察只表示价格位置较低，不是买入信号。</div>",
-            ]
-        )
-        part2 = "".join(
-            [
+        ]
+    )
+    value_ending = (
+        "<div class='warning'><b>边界：</b>价值线适用性仍需核验行业方法和财务口径；"
+        "左侧观察只表示价格位置较低，不是买入信号。</div>"
+    )
+    normal_intro = "".join(
+        [
                 _push_style(),
-                f"<h1>[2/2] {esc(report_date)} 基本面候选与主线</h1>",
+                f"<h1>{esc(report_date)} 基本面候选与主线</h1>",
                 "<div class='summary'><b>30秒结论</b><br>"
                 f"正常基本面候选 <b>{len(normal)}</b>只；质量分≥80有 <b>{normal_quality}</b>只；"
                 f"最多集中于 <b>{esc(top_industry)}</b>（{top_industry_count}只）。</div>",
@@ -622,9 +701,12 @@ def build_push_reports(
                 f"右侧启动 {zone_count(normal_zones, '50%-62.5%右侧启动')}只；"
                 f"左侧观察 {zone_count(normal_zones, '50%以下未确认')}只。</p>",
                 render_selection_changes(selection_diff, "2.正常基本面选股"),
-                _priority_details(normal, "auto", detail_count),
+                _priority_details(normal, "auto", top),
                 "<h3>完整名单（代码不会省略）</h3>",
-                _compact_stock_table(normal, "normal", minimal=minimal_tables),
+        ]
+    )
+    normal_ending = "".join(
+        [
                 "<h2>4. 主流板块</h2>",
                 "<p><b>分位说明：</b>股票表中的波段分位为精确数值；若显示估值历史分位，"
                 "它表示当前PE/PB在自身历史中的位置，两种分位不可混用。</p>",
@@ -633,26 +715,34 @@ def build_push_reports(
                 _sector_summary(top_sectors),
                 "<div class='warning'><b>边界：</b>异常同比需核验低基数、扭亏和一次性项目；"
                 "板块数据超过7天不参与判断；缺失数据不会自动补成通过。</div>",
-            ]
+        ]
+    )
+    pages = _paginate_stock_section(
+        value_intro,
+        values,
+        "value",
+        value_ending,
+        f"{report_date} 价值线完整名单（续）",
+        max_chars,
+    )
+    pages.extend(
+        _paginate_stock_section(
+            normal_intro,
+            normal,
+            "normal",
+            normal_ending,
+            f"{report_date} 基本面完整名单（续）",
+            max_chars,
         )
-        return part1, part2
-
-    rich_parts = make_parts(top)
-    try:
-        validate_push_report(rich_parts[0], values["code"], max_chars)
-        validate_push_report(rich_parts[1], normal["code"], max_chars)
-        return rich_parts
-    except ValueError:
-        compact_parts = make_parts(0)
-        try:
-            validate_push_report(compact_parts[0], values["code"], max_chars)
-            validate_push_report(compact_parts[1], normal["code"], max_chars)
-            return compact_parts
-        except ValueError:
-            minimal_parts = make_parts(0, minimal_tables=True)
-            validate_push_report(minimal_parts[0], values["code"], max_chars)
-            validate_push_report(minimal_parts[1], normal["code"], max_chars)
-            return minimal_parts
+    )
+    numbered = _number_push_pages(pages)
+    validate_push_pages(
+        numbered,
+        list(values.get("code", pd.Series(dtype=str)))
+        + list(normal.get("code", pd.Series(dtype=str))),
+        max_chars,
+    )
+    return numbered
 
 
 def build_reports(
@@ -806,9 +896,9 @@ def main(argv=None):
         handle.write(bundle.full_html)
     with open(push_preview_path, "w", encoding="utf-8") as handle:
         handle.write(
-            bundle.push_parts[0]
-            + "<hr style='margin:32px 0;border:0;border-top:3px solid #111827'>"
-            + bundle.push_parts[1]
+            "<hr style='margin:32px 0;border:0;border-top:3px solid #111827'>".join(
+                bundle.push_parts
+            )
         )
     bundle.stocks.to_csv(output_path, index=False, encoding="utf-8-sig")
     save_snapshot(HISTORY_FILE, report_date, bundle.stocks.to_dict("records"))
@@ -824,14 +914,10 @@ def main(argv=None):
         print(f"PushPlus第{index}部分长度: {len(content)}")
     if args.no_push:
         return
-    titles = (
-        f"[1/2] {report_date} 市场状态与价值线池",
-        f"[2/2] {report_date} 基本面候选与主线",
-    )
     results = []
-    for index, (title, content) in enumerate(
-        zip(titles, bundle.push_parts), start=1
-    ):
+    total_parts = len(bundle.push_parts)
+    for index, content in enumerate(bundle.push_parts, start=1):
+        title = f"[{index}/{total_parts}] {report_date} 每日选股报告"
         ok = send_pushplus(title, content)
         results.append(ok)
         print(f"PUSH_RESULT_{index}", ok)

@@ -6,6 +6,14 @@ import pandas as pd
 def calc_wave_pct(low, high, current):
     if high <= low:
         raise ValueError(f"高点({high})必须大于低点({low})")
+    raw = (current - low) / (high - low) * 100
+    return round(min(100.0, max(0.0, raw)), 2)
+
+
+def calc_wave_progress_pct(low, high, current):
+    """Unbounded recovery progress; use only to describe breaks beyond anchors."""
+    if high <= low:
+        raise ValueError(f"高点({high})必须大于低点({low})")
     return round((current - low) / (high - low) * 100, 2)
 
 
@@ -47,7 +55,9 @@ def infer_downtrend_recovery(df, lookback=240, cross_window=21, min_drawdown=0.1
     current = float(data.iloc[-1]["close"])
     level_50 = level_price(low, high, 50)
     level_625 = level_price(low, high, 62.5)
+    recovery_progress_pct = calc_wave_progress_pct(low, high, current)
     recovery_pct = calc_wave_pct(low, high, current)
+    breakout_above_high_pct = max(0.0, round((current / high - 1) * 100, 2))
     post_low = data.loc[low_pos:].copy()
 
     def crossed_recently(level):
@@ -76,6 +86,8 @@ def infer_downtrend_recovery(df, lookback=240, cross_window=21, min_drawdown=0.1
         "recovery_level_50": level_50,
         "recovery_level_625": level_625,
         "recovery_pct": recovery_pct,
+        "recovery_progress_pct": recovery_progress_pct,
+        "breakout_above_high_pct": breakout_above_high_pct,
         "recovery_zone": zone,
         "above_recovery_50": current >= level_50,
         "above_recovery_625": current >= level_625,

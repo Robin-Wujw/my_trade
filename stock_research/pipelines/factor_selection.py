@@ -1902,6 +1902,7 @@ def run_akshare_cache_fallback(top):
                 "wave_low": round(float(wave.get("downtrend_low")), 3) if wave.get("downtrend_low") is not None else None,
                 "wave_high": round(float(wave.get("downtrend_high")), 3) if wave.get("downtrend_high") is not None else None,
                 "wave_pct": round(float(wave_pct), 2) if wave_pct is not None else None,
+                "wave_breakout_pct": wave.get("breakout_above_high_pct"),
                 "wave_level_50": wave.get("recovery_level_50"),
                 "wave_level_625": wave.get("recovery_level_625"),
                 "wave_level_75": level_price(wave["downtrend_low"], wave["downtrend_high"], 75) if wave else None,

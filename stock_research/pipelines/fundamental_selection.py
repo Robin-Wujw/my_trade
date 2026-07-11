@@ -114,6 +114,7 @@ def technical_fields(df):
         "wave_high": wave.get("downtrend_high"),
         "wave_low": wave.get("downtrend_low"),
         "wave_pct": wave.get("recovery_pct"),
+        "wave_breakout_pct": wave.get("breakout_above_high_pct"),
         "wave_level_50": wave.get("recovery_level_50"),
         "wave_level_625": wave.get("recovery_level_625"),
         "wave_level_75": level_price(wave["downtrend_low"], wave["downtrend_high"], 75) if wave else None,

@@ -150,7 +150,11 @@ def test_daily_report_pushes_the_final_selection_html(monkeypatch, tmp_path):
     pushed = []
     stocks = pd.DataFrame([{"code": "sz.000001", "name": "平安银行"}])
     full_html = "<h1>最终选股结果</h1><p>平安银行</p>"
-    push_parts = ("<h1>第一部分</h1>", "<h1>第二部分</h1>")
+    push_parts = (
+        "<h1>第一部分</h1>",
+        "<h1>第二部分</h1>",
+        "<h1>第三部分</h1>",
+    )
     monkeypatch.setattr(daily_report, "REPORT_DIR", str(tmp_path))
     monkeypatch.setattr(daily_report, "SELECTION_DIR", str(tmp_path))
     monkeypatch.setattr(daily_report, "HISTORY_FILE", str(tmp_path / "history.json"))
@@ -177,8 +181,9 @@ def test_daily_report_pushes_the_final_selection_html(monkeypatch, tmp_path):
     daily_report.main([])
 
     assert pushed == [
-        ("[1/2] 2026-07-03 市场状态与价值线池", push_parts[0]),
-        ("[2/2] 2026-07-03 基本面候选与主线", push_parts[1]),
+        ("[1/3] 2026-07-03 每日选股报告", push_parts[0]),
+        ("[2/3] 2026-07-03 每日选股报告", push_parts[1]),
+        ("[3/3] 2026-07-03 每日选股报告", push_parts[2]),
     ]
 
 
@@ -254,11 +259,11 @@ def test_build_push_reports_keeps_every_stock_and_bounds_each_part():
     assert "70.0% · 右侧确认" in part2 and "两种分位不可混用" in part2
 
 
-def test_large_value_pool_keeps_codes_and_exact_wave_percentile_in_minimal_table():
+def test_large_value_pool_paginates_without_compressing_fields():
     values = make_stocks("V", 180, "1.基本价值线或附近")
     normal = make_stocks("N", 30, "2.正常基本面选股")
 
-    part1, _part2 = build_push_reports(
+    parts = build_push_reports(
         "2026-07-03",
         values,
         normal,
@@ -268,9 +273,28 @@ def test_large_value_pool_keeps_codes_and_exact_wave_percentile_in_minimal_table
         18000,
     )
 
-    assert len(part1) <= 18000
-    assert all(code in part1 for code in values["code"])
-    assert part1.count("70.0% · 右侧确认") == len(values)
+    combined = "".join(parts)
+    assert len(parts) > 2
+    assert all(len(part) <= 18000 for part in parts)
+    assert all(code in combined for code in values["code"])
+    assert all(code in combined for code in normal["code"])
+    assert combined.count("70.0% · 右侧确认") == len(values) + len(normal)
+    assert "字段和风险说明不压缩" in combined
+    assert "主要风险" in combined
+
+
+def test_old_unbounded_wave_progress_is_displayed_as_bounded_percentile():
+    row = pd.Series(
+        {
+            "wave_pct": 179.4,
+            "wave_zone": "75%以上：强修复",
+            "close": 25.0,
+            "wave_high": 20.0,
+        }
+    )
+
+    assert daily_report.wave_position_compact(row) == "100.0% · 突破前高+25.0%"
+    assert "波段分位179.4%" not in daily_report.wave_position(row)
 
 
 def test_selection_changes_are_separated_by_strategy_part():
