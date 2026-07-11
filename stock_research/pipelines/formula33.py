@@ -32,6 +32,7 @@ from datetime import datetime, timedelta
 
 from stock_research.api import akshare as ak
 from stock_research.api import baostock as bs
+from stock_research.api import tushare as ts_api
 from stock_research.api.retry import call_with_backoff
 import numpy as np
 import pandas as pd
@@ -93,7 +94,12 @@ def parse_args(argv=None):
     parser.add_argument("--limit", type=int, default=0, help="调试用，只处理前N只")
     parser.add_argument("--exclude-codes", default="", help="逗号分隔的股票代码，按截图/外部股票池复核时可排除")
     parser.add_argument("--maxtasksperchild", type=int, default=200, help="多进程模式下每个worker处理多少任务后重启")
-    parser.add_argument("--price-source", choices=["baostock", "akshare"], default="akshare", help="前复权K线来源")
+    parser.add_argument(
+        "--price-source",
+        choices=["auto", "tushare", "akshare", "baostock"],
+        default="auto",
+        help="前复权K线来源；auto 有权限时优先 Tushare，否则 AkShare",
+    )
     parser.add_argument("--metadata-source", choices=["akshare", "baostock", "auto"], default="akshare", help="交易日/股票池/上市日期来源，默认优先 AkShare")
     parser.add_argument("--min-mktcap", type=float, default=100.0, help="最低总市值，单位亿元")
     parser.add_argument("--min-list-days", type=int, default=300, help="最低上市天数")
@@ -702,30 +708,16 @@ def load_stock_basic_snapshot(observation_date, universe):
 
 
 def get_tushare_token():
-    token = os.environ.get("TUSHARE_TOKEN", "").strip()
-    if token:
-        return token
-    token_file = os.environ.get(
-        "TUSHARE_TOKEN_FILE", str(PATHS.secrets / "tushare_token")
-    )
-    try:
-        with open(token_file, "r", encoding="utf-8") as fh:
-            return fh.read().strip()
-    except OSError:
-        return ""
+    return ts_api.get_token()
 
 
 def load_market_caps_from_tushare(trade_date):
-    try:
-        import tushare as ts
-    except ImportError as exc:
-        raise RuntimeError("未安装 tushare，请先 pip install tushare") from exc
-    token = get_tushare_token()
-    if not token:
-        raise RuntimeError("未配置 TUSHARE_TOKEN 或 .tushare_token")
-    pro = ts.pro_api(token)
     ts_date = str(trade_date).replace("-", "")
-    df = pro.daily_basic(trade_date=ts_date, fields="ts_code,total_mv")
+    df = ts_api.query(
+        "daily_basic",
+        trade_date=ts_date,
+        fields="ts_code,total_mv",
+    )
     if df is None or df.empty:
         raise RuntimeError(f"tushare daily_basic 在 {trade_date} 无数据")
     caps = {}
@@ -1288,7 +1280,15 @@ def _missing_qfq_refresh_dates(cached, incremental, refreshed, start_date, end_d
 
 
 def _fetch_kline_range(source, code, start_date, end_date, retries, retry_delay):
-    loader = load_kline_akshare if source == "akshare" else load_kline_baostock
+    loaders = {
+        "tushare": load_kline_tushare,
+        "akshare": load_kline_akshare,
+        "baostock": load_kline_baostock,
+    }
+    try:
+        loader = loaders[source]
+    except KeyError as exc:
+        raise ValueError(f"unsupported K-line source: {source}") from exc
     return loader(
         code,
         start_date,
@@ -1610,6 +1610,93 @@ def load_kline_baostock(code, start_date, end_date, retries=4, retry_delay=1.5):
     if "tradestatus" in df.columns:
         df = df[df["tradestatus"] == "1"]
     return df
+
+
+def _to_tushare_code(code):
+    pure = pure_code(code)
+    if "." in str(code):
+        market = str(code).split(".", 1)[0].upper()
+    else:
+        market = "SH" if pure.startswith(("6", "9")) else "SZ"
+    return f"{pure}.{market}"
+
+
+def load_kline_tushare(code, start_date, end_date, retries=4, retry_delay=1.5):
+    """Load and locally calculate end-date anchored Tushare QFQ prices."""
+    ts_code = _to_tushare_code(code)
+    params = {
+        "ts_code": ts_code,
+        "start_date": str(start_date).replace("-", ""),
+        "end_date": str(end_date).replace("-", ""),
+        "retries": retries,
+        "retry_delay": retry_delay,
+    }
+    daily = ts_api.query(
+        "daily",
+        fields="ts_code,trade_date,open,high,low,close,vol",
+        **params,
+    )
+    factors = ts_api.query(
+        "adj_factor",
+        fields="ts_code,trade_date,adj_factor",
+        **params,
+    )
+    if daily.empty or factors.empty:
+        return pd.DataFrame()
+    merged = daily.merge(factors, on=["ts_code", "trade_date"], how="inner")
+    if merged.empty:
+        raise RuntimeError(f"{ts_code} Tushare 日线与复权因子没有重叠日期")
+    for column in ["open", "high", "low", "close", "vol", "adj_factor"]:
+        merged[column] = pd.to_numeric(merged[column], errors="coerce")
+    merged = merged.dropna(subset=["trade_date", "open", "high", "low", "close", "adj_factor"])
+    if merged.empty:
+        return pd.DataFrame()
+    anchor = merged.sort_values("trade_date")["adj_factor"].iloc[-1]
+    if not anchor:
+        raise RuntimeError(f"{ts_code} Tushare 复权因子无效")
+    ratio = merged["adj_factor"] / float(anchor)
+    for column in ["open", "high", "low", "close"]:
+        merged[column] = merged[column] * ratio
+    return pd.DataFrame({
+        "date": pd.to_datetime(merged["trade_date"], errors="coerce").dt.strftime("%Y-%m-%d"),
+        "code": code,
+        "open": merged["open"],
+        "high": merged["high"],
+        "low": merged["low"],
+        "close": merged["close"],
+        "volume": merged["vol"],
+    }).sort_values("date").reset_index(drop=True)
+
+
+def resolve_price_source(requested, start_date, end_date, retries, retry_delay):
+    if requested not in {"auto", "tushare"}:
+        return requested
+    if not get_tushare_token():
+        if requested == "tushare":
+            raise RuntimeError("--price-source tushare 需要配置 Tushare token")
+        print("未配置 Tushare token，前复权 K 线使用 AkShare")
+        return "akshare"
+    probe_start = max(
+        pd.to_datetime(start_date),
+        pd.to_datetime(end_date) - pd.DateOffset(days=10),
+    ).strftime("%Y-%m-%d")
+    try:
+        probe = load_kline_tushare(
+            "sz.000001",
+            probe_start,
+            end_date,
+            retries=retries,
+            retry_delay=retry_delay,
+        )
+        if probe.empty:
+            raise RuntimeError("能力探测返回空行情")
+        print("前复权 K 线来源: Tushare（daily + adj_factor）")
+        return "tushare"
+    except Exception as exc:
+        if requested == "tushare":
+            raise RuntimeError(f"Tushare 前复权能力探测失败: {exc}") from exc
+        print(f"Tushare 前复权权限或服务不可用，回退 AkShare: {exc}")
+        return "akshare"
 
 
 def load_kline_akshare(code, start_date, end_date, retries=4, retry_delay=1.5):
@@ -2273,6 +2360,13 @@ def main(argv=None):
                 "network_fetch=0"
             )
             return 0
+        price_source = resolve_price_source(
+            args.price_source,
+            start_date,
+            latest_date,
+            args.retries,
+            args.retry_delay,
+        )
         Database().initialize()
         print("DuckDB K线持久化已启用：每只股票查到后立即写入 raw.stock_kline_daily，并保留CSV缓存。")
         basic = load_stock_basic() if bs_available and args.metadata_source == "baostock" else pd.DataFrame()
@@ -2353,7 +2447,7 @@ def main(argv=None):
                 min_mktcap,
                 args.min_list_days,
                 args.sleep,
-                args.price_source,
+                price_source,
                 args.retries,
                 args.retry_delay,
                 args.debug_filters,
@@ -2367,12 +2461,12 @@ def main(argv=None):
         workers = max(1, args.workers)
         print(
             f"候选股票: {len(tasks)} | offset={args.offset} | limit={args.limit} | "
-            f"workers={workers} | price_source={args.price_source}"
+            f"workers={workers} | price_source={price_source}"
         )
         if workers > 1:
             if bs_available:
                 bs.logout()
-            initializer = init_worker if args.price_source == "baostock" else None
+            initializer = init_worker if price_source == "baostock" else None
             with multiprocessing.Pool(
                 processes=workers,
                 initializer=initializer,

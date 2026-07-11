@@ -73,7 +73,7 @@ def test_api_never_depends_on_strategy_or_pipeline():
 def test_pipelines_use_market_sdks_through_api_adapters():
     offenders = {}
     for path in ROOT.glob("stock_research/pipelines/*.py"):
-        direct = imports(path) & {"akshare", "baostock"}
+        direct = imports(path) & {"akshare", "baostock", "tushare"}
         if direct:
             offenders[path.name] = sorted(direct)
     assert offenders == {}

@@ -102,6 +102,49 @@ def test_cdr_kline_uses_akshare_tencent_qfq_route(monkeypatch):
     assert result["code"].tolist() == ["sh.689009", "sh.689009"]
 
 
+def test_tushare_kline_calculates_end_date_anchored_qfq(monkeypatch):
+    daily = pd.DataFrame({
+        "ts_code": ["000001.SZ", "000001.SZ"],
+        "trade_date": ["20260102", "20260105"],
+        "open": [10.0, 12.0],
+        "high": [11.0, 13.0],
+        "low": [9.0, 11.0],
+        "close": [10.0, 12.0],
+        "vol": [100.0, 120.0],
+    })
+    factors = pd.DataFrame({
+        "ts_code": ["000001.SZ", "000001.SZ"],
+        "trade_date": ["20260102", "20260105"],
+        "adj_factor": [1.0, 2.0],
+    })
+    monkeypatch.setattr(
+        formula33.ts_api,
+        "query",
+        lambda name, **_kwargs: daily if name == "daily" else factors,
+    )
+
+    result = formula33.load_kline_tushare(
+        "sz.000001", "2026-01-01", "2026-01-05", retries=1
+    )
+
+    assert result["date"].tolist() == ["2026-01-02", "2026-01-05"]
+    assert result["close"].tolist() == [5.0, 12.0]
+    assert result["volume"].tolist() == [100.0, 120.0]
+
+
+def test_auto_price_source_falls_back_without_tushare_qfq_permission(monkeypatch):
+    monkeypatch.setattr(formula33, "get_tushare_token", lambda: "configured")
+    monkeypatch.setattr(
+        formula33,
+        "load_kline_tushare",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("没有权限")),
+    )
+
+    assert formula33.resolve_price_source(
+        "auto", "2026-01-01", "2026-01-10", 1, 0
+    ) == "akshare"
+
+
 def test_duckdb_value_wins_over_stale_csv_for_the_same_trade_date(
     monkeypatch,
     tmp_path,

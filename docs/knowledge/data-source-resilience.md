@@ -2,7 +2,7 @@
 
 ## 范围与参考基线
 
-本文只讨论 AkShare、BaoStock 等外部数据源的连接、限流、异常结果、缓存和恢复，不评价或引入参考项目的选股策略。
+本文只讨论 Tushare、AkShare、BaoStock 等外部数据源的连接、限流、异常结果、缓存和恢复，不评价或引入参考项目的选股策略。
 
 - [tianjingle/zMain](https://github.com/tianjingle/zMain)，检查提交 `327b5c5ab1ce075f419471a002ebdb393594b148`
 - [sngyai/Sequoia-X](https://github.com/sngyai/Sequoia-X)，检查提交 `444c0db69ff36b46ef2b22ab265051d60c16029d`
@@ -39,6 +39,22 @@ Sequoia-X 的回填流程包含：
 
 ## 本次已实施改进
 
+### Tushare 优先行情源
+
+Formula33 的 `--price-source` 现在支持 `auto/tushare/akshare/baostock`，默认 `auto`。配置 token 后，启动时用一只股票的小窗口探测 `daily` 与 `adj_factor` 权限：两者均可用才选择 Tushare；无 token、无复权因子权限、接口异常或空结果时自动回退 AkShare。显式指定 `tushare` 时不会静默换源。
+
+Tushare 返回的不复权 OHLC 与复权因子在本地按“价格 × 当日因子 ÷ 请求截止日因子”计算前复权，保持当前 Formula33 的 QFQ 口径。增量请求造成锚点变化时，既有重叠检测会触发整窗刷新。
+
+本项目直接使用 Tushare 官方标准 HTTP 协议，不依赖额外 SDK。token 只从 `TUSHARE_TOKEN`、`TUSHARE_TOKEN_FILE` 或被 Git 忽略的 `var/secrets/tushare_token` 读取，不写入日志、缓存元数据和提交。
+
+官方权限表显示 120 积分档为每分钟 50 次、每天 8000 次且只开放不复权日线；复权行情还需要复权因子权限。默认 `TUSHARE_MIN_INTERVAL=1.25`，通过文件锁在所有 worker 之间共享，合计约 48 次/分钟，为 50 次限制留出余量。一次股票前复权窗口需要 `daily` 和 `adj_factor` 两次调用，因此首次全市场回填仍可能很慢或触及每日总量，后续由 DuckDB/CSV 增量缓存减少请求。
+
+相关官方说明：
+
+- [积分与频次权限对应表](https://tushare.pro/document/1?doc_id=290)
+- [A 股复权行情与计算口径](https://tushare.pro/document/2?doc_id=146)
+- [HTTP API 标准返回结构](https://www.tushare.pro/document/2?doc_id=130)
+
 ### 统一退避
 
 三个 pipeline 的重复线性退避已统一到 `stock_research.api.retry.call_with_backoff`：
@@ -55,10 +71,11 @@ Sequoia-X 的回填流程包含：
 
 AkShare 和 BaoStock adapter 增加线程安全、进程内最小请求间隔：
 
+- `TUSHARE_MIN_INTERVAL`，默认 `1.25` 秒，跨进程共享。
 - `AKSHARE_MIN_INTERVAL`，默认 `0.05` 秒。
 - `BAOSTOCK_MIN_INTERVAL`，默认 `0.02` 秒，仅限制 `query_*` 方法。
 
-可通过环境变量调大。多进程之间不共享令牌，因此总吞吐近似“单进程速率 × worker 数”；出现限流时应先降低 `workers`，再增大间隔。
+可通过环境变量调大。AkShare/BaoStock 是进程内限流，总吞吐近似“单进程速率 × worker 数”；Tushare 使用跨进程锁，worker 增加不会突破账号总频率。
 
 ### BaoStock 错误码与会话恢复
 
@@ -87,12 +104,13 @@ PowerShell 示例：
 ```powershell
 $env:AKSHARE_MIN_INTERVAL = "0.3"
 $env:BAOSTOCK_MIN_INTERVAL = "0.1"
-python -m apps.formula33 --workers 2 --retries 5 --retry-delay 2
+$env:TUSHARE_TOKEN_FILE = "D:\secure\tushare_token"
+python -m apps.formula33 --price-source auto --workers 2 --retries 5 --retry-delay 2
 ```
 
 ## 暂未实施
 
-- 未做跨进程全局令牌桶：当前默认 worker 较少，文件锁/IPC 的复杂度与死锁风险暂不划算。
+- AkShare/BaoStock 暂未做跨进程全局令牌桶；Tushare 因官方账号级 50 次/分钟限制，已经使用跨进程文件限流器。
 - 未对所有空表自动重试：没有交易、停牌、未上市也会产生合法空表。
 - 未引入长期熔断器：数据源存在多个端点和日期差异，进程级长时间熔断可能误伤恢复后的接口。
 - 未照搬固定“每 200 只重连”：本项目 `maxtasksperchild` 默认 200，会回收整个 BaoStock worker，连接清理更彻底。

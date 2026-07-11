@@ -1,6 +1,11 @@
 import pytest
 
-from stock_research.api.retry import RateLimiter, call_with_backoff, call_with_retry
+from stock_research.api.retry import (
+    FileRateLimiter,
+    RateLimiter,
+    call_with_backoff,
+    call_with_retry,
+)
 
 
 def test_retry_uses_exact_attempt_count_and_raises_last_error(monkeypatch):
@@ -66,3 +71,17 @@ def test_rate_limiter_waits_only_for_remaining_interval(monkeypatch):
     limiter.wait()
 
     assert sleeps == pytest.approx([0.3])
+
+
+def test_file_rate_limiter_persists_last_call_for_other_processes(monkeypatch, tmp_path):
+    clock = iter([100.0, 100.0, 100.2, 100.5])
+    sleeps = []
+    monkeypatch.setattr("stock_research.api.retry.time.time", lambda: next(clock))
+    monkeypatch.setattr("stock_research.api.retry.time.sleep", sleeps.append)
+    path = tmp_path / "provider.lock"
+
+    FileRateLimiter(0.5, path).wait()
+    FileRateLimiter(0.5, path).wait()
+
+    assert sleeps == pytest.approx([0.3])
+    assert float(path.read_text(encoding="ascii")) == pytest.approx(100.5)

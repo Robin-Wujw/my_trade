@@ -6,10 +6,22 @@ responsible for turning provider error codes into exceptions before returning.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from contextlib import contextmanager
+from pathlib import Path
 import random
 from threading import Lock
 import time
 from typing import Callable, Optional
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX path
+    msvcrt = None
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows path
+    fcntl = None
 
 
 TRANSIENT_ERROR_MARKERS = (
@@ -123,3 +135,59 @@ class RateLimiter:
             if delay > 0:
                 time.sleep(delay)
             self._last_call = time.monotonic()
+
+
+@contextmanager
+def _locked_rate_file(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+b")
+    try:
+        if handle.seek(0, 2) == 0:
+            handle.write(b"0\n")
+            handle.flush()
+        acquired = False
+        while not acquired:
+            try:
+                handle.seek(0)
+                if msvcrt is not None:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                elif fcntl is not None:  # pragma: no cover - POSIX path
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                acquired = True
+            except OSError:
+                time.sleep(0.01)
+        yield handle
+    finally:
+        if msvcrt is not None:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        elif fcntl is not None:  # pragma: no cover - POSIX path
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+@dataclass
+class FileRateLimiter:
+    """Cross-process minimum-interval limiter backed by a small lock file."""
+
+    min_interval: float
+    path: Path
+
+    def wait(self) -> None:
+        interval = max(0.0, float(self.min_interval))
+        if not interval:
+            return
+        with _locked_rate_file(Path(self.path)) as handle:
+            handle.seek(0)
+            try:
+                last_call = float(handle.read().decode("ascii").strip() or 0)
+            except (UnicodeDecodeError, ValueError):
+                last_call = 0.0
+            now = time.time()
+            delay = interval - (now - last_call)
+            if delay > 0:
+                time.sleep(delay)
+            handle.seek(0)
+            handle.truncate()
+            handle.write(f"{time.time():.6f}\n".encode("ascii"))
+            handle.flush()
