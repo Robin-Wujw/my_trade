@@ -14,6 +14,7 @@ The change protects correctness before publication. It does not attempt the larg
 - Reconcile the current sector-board membership snapshot in DuckDB.
 - Propagate top-level no-push behavior to fundamental coverage alerts.
 - Retry transient DuckDB K-line writes and reconcile partial CSV/database persistence.
+- Resume interrupted stock scans from per-stock cache and skip a completed same-date Formula33 run when its inputs still match.
 - Prevent the daily report from running after a critical sector-statistics failure.
 - Add focused unit and integration tests for each failure mode.
 
@@ -34,7 +35,9 @@ The change protects correctness before publication. It does not attempt the larg
 4. Sector output requires at least 95% fresh-board coverage. Stale rows do not count toward coverage and do not enter the output frame.
 5. `--no-push` suppresses final reports, failure alerts, factor messages, and fundamental coverage alerts.
 6. A fetched stock K-line is not considered durably persisted until the CSV cache and DuckDB agree, or the step reports a persistence failure.
-7. The daily report is not generated when Formula33, sector statistics, sector watch, or fundamental selection fails.
+7. A covered stock/date range causes no network request. A later observation date fetches only missing left or right date intervals.
+8. A completed Formula33 run can be reused only when observation date, strategy arguments, universe identity, and output artifacts match its completion manifest.
+9. The daily report is not generated when Formula33, sector statistics, sector watch, or fundamental selection fails.
 
 ## Design
 
@@ -113,7 +116,15 @@ Tests will execute the generated closures with spies and prove that no PushPlus 
 
 `load_kline_with_cache()` will compare CSV and DuckDB trade-date sets. When CSV contains dates absent from DuckDB, it upserts those rows even when the database is not empty. This repairs the observed one-day partial gap instead of only backfilling an entirely empty database.
 
+The union of valid CSV and DuckDB rows defines the covered date range for a stock. If that range already covers `start_date..end_date`, the loader returns locally without calling a market-data API. Otherwise it requests only the missing left interval and/or `cached_max + 1 day..end_date` right interval. A weekend rerun therefore makes zero per-stock K-line requests after Friday is cached; the next trading day requests only that new right-edge interval.
+
+Each successful stock response is persisted before the worker reports completion. If a run is cancelled after stock 2,000, a restart locally reuses those 2,000 stocks and continues network work for the uncovered remainder.
+
 Fresh API data is written to the CSV cache before the database attempt so it remains recoverable. If bounded database retries still fail, the stock result records a persistence failure and the Formula33 step exits nonzero after workers finish; it must not report a fully successful durable run.
+
+After a complete Formula33 run, the pipeline atomically writes a completion manifest under `var/state`. The manifest contains observation date, normalized Formula33 arguments, a stock-universe fingerprint, output paths, completion status, and summary counts. On a same-date rerun, an exact manifest and existing outputs return success immediately. A cancelled run has no completed manifest, and any argument, universe, code-version, or observation-date change invalidates reuse while retaining per-stock cache acceleration.
+
+Progress output distinguishes `local_hit`, `network_fetch`, `reconciled`, and `unavailable` counts so a resumed run proves that completed work was reused.
 
 ### 8. Daily Report Gate
 
@@ -155,8 +166,12 @@ Tests are written before implementation and cover:
 10. A missing benchmark or required limit-up date fails the gate.
 11. A transient DuckDB lock failure is retried and succeeds.
 12. A partial DuckDB history is repaired from the newer CSV cache.
-13. Exhausted persistence retries make Formula33 fail rather than silently succeed.
-14. Daily report is skipped when sector statistics fails.
+13. A fully covered stock range performs zero API calls.
+14. A one-day-later observation fetches only the right-edge date interval.
+15. A cancelled scan reuses completed stock caches and fetches only uncovered stocks.
+16. A matching same-date completion manifest skips Formula33; changed arguments or universe invalidate it.
+17. Exhausted persistence retries make Formula33 fail rather than silently succeed.
+18. Daily report is skipped when sector statistics fails.
 
 The final verification sequence is:
 
@@ -177,5 +192,8 @@ The production run passes only if all seven steps complete with current data. If
 3. Run the Tonghuashun preflight and require a current board list, current benchmark, and at least one current board history.
 4. Run one production no-push execution with PushPlus credentials disabled for the process.
 5. Require at least 95% current Tonghuashun board coverage and verify top-board constituents.
-6. Compare Formula33 CSV/DuckDB dates and sector coverage diagnostics.
-7. Re-enable scheduled execution only after a complete gated run succeeds.
+6. Run Formula33 twice for the same observation date and verify the second run reports a manifest hit with zero market-data calls.
+7. Simulate a cancelled partial scan and verify covered stocks are local hits on restart.
+8. Advance the observation date and verify requests start at the first missing date.
+9. Compare Formula33 CSV/DuckDB dates and sector coverage diagnostics.
+10. Re-enable scheduled execution only after a complete gated run succeeds.
