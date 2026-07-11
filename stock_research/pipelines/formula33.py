@@ -27,12 +27,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import multiprocessing
 import os
-import random
 import time
 from datetime import datetime, timedelta
 
 from stock_research.api import akshare as ak
 from stock_research.api import baostock as bs
+from stock_research.api.retry import call_with_backoff
 import numpy as np
 import pandas as pd
 from openpyxl import Workbook
@@ -113,21 +113,6 @@ def parse_args(argv=None):
     )
     parser.add_argument("--sample", action="store_true", help="生成离线样例，不访问网络")
     return parser.parse_args(argv)
-
-
-def call_with_backoff(func, label, retries=4, retry_delay=1.5):
-    last_exc = None
-    for attempt in range(1, max(1, retries) + 1):
-        try:
-            return func()
-        except Exception as exc:
-            last_exc = exc
-            if attempt >= retries:
-                break
-            wait = retry_delay * attempt + random.uniform(0, retry_delay)
-            print(f"{label} 请求失败: {exc} | 第 {attempt}/{retries} 次，{wait:.1f}s 后重试")
-            time.sleep(wait)
-    raise last_exc
 
 
 def _atomic_write_csv(frame, path):
@@ -1030,7 +1015,7 @@ def load_market_cap_snapshot(
 
 
 def init_worker():
-    bs.login()
+    bs.ensure_success(bs.login(), "BaoStock worker login")
 
 
 def kline_cache_path(source, code):
@@ -1598,21 +1583,28 @@ def load_kline_with_cache(
 
 def load_kline_baostock(code, start_date, end_date, retries=4, retry_delay=1.5):
     fields = "date,code,open,high,low,close,volume,tradestatus"
+    def query():
+        return bs.ensure_success(
+            bs.query_history_k_data_plus(
+                code,
+                fields,
+                start_date=start_date,
+                end_date=end_date,
+                frequency="d",
+                adjustflag=ADJUST_FLAG_QFQ,
+            ),
+            f"{code} BaoStock K-line",
+        )
+
     rs = call_with_backoff(
-        lambda: bs.query_history_k_data_plus(
-            code,
-            fields,
-            start_date=start_date,
-            end_date=end_date,
-            frequency="d",
-            adjustflag=ADJUST_FLAG_QFQ,
-        ),
+        query,
         f"{code} baostock K线",
         retries=retries,
         retry_delay=retry_delay,
+        on_retry=lambda _exc, _attempt: bs.reconnect(),
     )
     df = rs.get_data()
-    if rs.error_code != "0" or df.empty:
+    if df.empty:
         return pd.DataFrame()
     df.columns = rs.fields
     if "tradestatus" in df.columns:
@@ -1650,12 +1642,15 @@ def load_kline_akshare(code, start_date, end_date, retries=4, retry_delay=1.5):
         return df
 
     def fetch_daily():
-        return ak.stock_zh_a_daily(
+        result = ak.stock_zh_a_daily(
             symbol=daily_symbol,
             start_date=str(start_date).replace("-", ""),
             end_date=str(end_date).replace("-", ""),
             adjust="qfq",
         )
+        if result is None or result.empty:
+            raise RuntimeError("AkShare Sina K-line returned an empty result")
+        return result
 
     try:
         df = call_with_backoff(

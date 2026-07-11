@@ -8,6 +8,7 @@
 - [DuckDB 实际结构](knowledge/database-schema.md)：当前迁移真正创建的 7 张表及使用限制。
 - [观察日与时点规则](knowledge/point-in-time-data.md)：行情截断、观察日交易资格、财报和板块时点边界。
 - [每日流水线运维](knowledge/operations-runbook.md)：完整运行、增量续跑、结果验收、故障处理和正式推送门禁。
+- [数据源连接与容错改进](knowledge/data-source-resilience.md)：AkShare/BaoStock 的节流、退避、重连、异常结果和参考项目对照。
 
 ## 已验证基准
 

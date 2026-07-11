@@ -7,6 +7,8 @@ from threading import RLock
 
 import akshare as _sdk
 
+from .retry import RateLimiter
+
 
 PROXY_ENV_KEYS = (
     "HTTP_PROXY",
@@ -18,12 +20,14 @@ PROXY_ENV_KEYS = (
 )
 
 _PROXY_ENV_LOCK = RLock()
+_RATE_LIMITER = RateLimiter(float(os.environ.get("AKSHARE_MIN_INTERVAL", "0.05")))
 
 
 def _without_proxy(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
         with _PROXY_ENV_LOCK:
+            _RATE_LIMITER.wait()
             keys = (*PROXY_ENV_KEYS, "NO_PROXY", "no_proxy")
             saved = {key: os.environ.get(key) for key in keys}
             try:

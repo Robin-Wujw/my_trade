@@ -11,12 +11,12 @@ import argparse
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import hashlib
 import os
-import random
 import time
 from datetime import datetime
 
 from stock_research.api import akshare as ak
 from stock_research.api import ths
+from stock_research.api.retry import call_with_backoff
 import numpy as np
 import pandas as pd
 
@@ -56,21 +56,6 @@ def parse_args(argv=None):
     parser.add_argument("--workers", type=int, default=4, help="板块历史请求并发数")
     parser.add_argument("--as-of-date", default="", help="历史截止日YYYY-MM-DD；默认今天")
     return parser.parse_args(argv)
-
-
-def call_with_backoff(func, label, retries=4, retry_delay=2.0):
-    last_exc = None
-    for attempt in range(1, max(1, retries) + 1):
-        try:
-            return func()
-        except Exception as exc:
-            last_exc = exc
-            if attempt >= retries:
-                break
-            wait = retry_delay * attempt + random.uniform(0, retry_delay)
-            print(f"{label} 请求失败: {exc} | 第 {attempt}/{retries} 次，{wait:.1f}s 后重试")
-            time.sleep(wait)
-    raise last_exc
 
 
 def cache_path(kind, key):
