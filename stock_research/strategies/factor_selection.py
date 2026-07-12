@@ -20,6 +20,13 @@ CORE_BUCKET = "低估且高质量"
 WATCH_BUCKET = "观察池"
 
 
+def apply_deduction_to_trend(base_score, deduction):
+    """Let medium/long structure lead while short drag only times entry."""
+    raw = float((deduction or {}).get("ma_deduction_score") or 0)
+    adjustment = max(-15.0, min(15.0, raw * 0.20))
+    return max(0.0, min(100.0, float(base_score) + adjustment)), adjustment
+
+
 def is_low_value_candidate(row):
     method = row["method"]
     if method == "RIGHT":
@@ -92,6 +99,11 @@ def build_risk_flags(row):
         flags.append("流动性偏弱")
     if row.get("price_to_value") is not None and row["price_to_value"] < 0.30:
         flags.append("价值线折价异常需复核")
+    if int(row.get("long_ma_overhead_count") or 0) >= 2:
+        flags.append("两条以上中长下弯均线构成上方压力")
+    short_drag = int(row.get("short_ma_down_drag_count") or 0)
+    if short_drag:
+        flags.append(f"{short_drag}条短期均线扣高且量不足，等待放量")
     flags.extend(row.get("technical_flags_list", []))
     return "、".join(flags) if flags else "正常"
 

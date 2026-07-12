@@ -132,28 +132,10 @@ def technical_fields(df):
         "wave_zone": wave.get("recovery_zone", "波段不足"),
         **technical_snapshot(df),
     }
-    price_periods = []
-    volume_periods = []
-    combined_periods = []
-    latest_volume = float(volume.tail(5).mean()) if len(volume) >= 5 else float(volume.iloc[-1])
-    for period in [5, 10, 20, 60, 120, 240]:
-        if len(df) < period + 1:
-            continue
-        price_ok = current > float(close.iloc[-period - 1])
-        volume_ok = latest_volume > float(volume.iloc[-period - 1])
-        if price_ok:
-            price_periods.append(period)
-        if volume_ok:
-            volume_periods.append(period)
-        if price_ok and volume_ok:
-            combined_periods.append(period)
-    long_periods = {60, 120, 240}
-    fields["price_deduct_periods"] = "/".join(map(str, price_periods))
-    fields["volume_deduct_periods"] = "/".join(map(str, volume_periods))
-    fields["deduct_periods"] = "/".join(map(str, combined_periods))
-    fields["long_price_deduct_count"] = len(long_periods.intersection(price_periods))
-    fields["long_volume_deduct_count"] = len(long_periods.intersection(volume_periods))
-    fields["long_deduct_ready"] = fields["long_price_deduct_count"] >= 2 and fields["long_volume_deduct_count"] >= 2
+    price_periods = set(str(fields.get("price_deduct_periods", "")).split("/")) - {""}
+    volume_periods = set(str(fields.get("volume_deduct_periods", "")).split("/")) - {""}
+    fields["deduct_periods"] = "/".join(sorted(price_periods & volume_periods, key=int))
+    fields["long_price_deduct_count"] = len({"60", "120", "240"}.intersection(price_periods))
     long_mas = [ma_values[p] for p in [20, 60, 120, 240]]
     fields["full_bearish"] = all(value is not None for value in long_mas) and current < long_mas[0] < long_mas[1] < long_mas[2] < long_mas[3]
     return fields
@@ -360,6 +342,9 @@ def normal_rows(report_period, snapshot, names, mainline_boards, observation_dat
         wave_pct = pd.to_numeric(row.get("wave_pct"), errors="coerce")
         right_confirmed = pd.notna(wave_pct) and wave_pct >= 50
         long_deduct_ready = bool(row.get("long_deduct_ready"))
+        long_overhead_count = int(row.get("long_ma_overhead_count") or 0)
+        short_drag_count = int(row.get("short_ma_down_drag_count") or 0)
+        timing_eligible = not (long_overhead_count >= 2 and short_drag_count >= 2)
         full_bearish = bool(row.get("full_bearish"))
         if full_bearish and fixed_pool_member:
             strategy_layer = "固定基本面池·技术面暂不满足"
@@ -388,14 +373,17 @@ def normal_rows(report_period, snapshot, names, mainline_boards, observation_dat
         if source.get("method") == "VALUE" and pd.notna(current_ptv):
             valuation_score = max(0.0, 5.0 * (1 - min(current_ptv, 3.0) / 3.0))
         performance_score = quality * 0.45 + min(max(yoy, 0), 1) * 25 + pd.to_numeric(row.get("liquidity_score"), errors="coerce") * 0.10
+        deduction_score = float(np.clip(pd.to_numeric(row.get("ma_deduction_score"), errors="coerce") * 0.08, -8, 8))
         row["fundamental_score"] = round(
-            performance_score + (15 if is_mainline else 0) + structure_score + valuation_score,
+            performance_score + (15 if is_mainline else 0) + structure_score + valuation_score + deduction_score,
             2,
         )
+        row["deduction_score"] = round(deduction_score, 2)
+        row["timing_eligible"] = timing_eligible
         row["strategy_layer"] = strategy_layer
         row["is_mainline"] = is_mainline
         row["right_confirmed"] = right_confirmed
-        row["signal_eligible"] = strategy_layer not in {
+        row["signal_eligible"] = timing_eligible and strategy_layer not in {
             "固定基本面池·等待技术确认",
             "固定基本面池·技术面暂不满足",
         }

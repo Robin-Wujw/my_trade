@@ -20,7 +20,9 @@ import pandas as pd
 
 from stock_research.api.pushplus import send_pushplus
 from stock_research.core.paths import PATHS
+from stock_research.indicators.technical_quant import moving_average_deduction_snapshot
 from stock_research.indicators.waves import infer_downtrend_recovery, level_price
+from stock_research.strategies.factor_selection import apply_deduction_to_trend
 from stock_research.reporting.diff import (
     build_diff_html,
     load_last_result,
@@ -619,6 +621,14 @@ def get_technical_metrics(df):
     if not price_deduct_ok:
         flags.append("5/10日扣抵价未完全站上")
 
+    deduction = moving_average_deduction_snapshot(df["close"], df["volume"])
+    if deduction.get("long_ma_overhead_count", 0) >= 2:
+        flags.append("两条以上中长下弯均线构成上方压力")
+    if deduction.get("short_ma_down_drag_count", 0):
+        flags.append(
+            f"{deduction['short_ma_down_drag_count']}条短期均线扣高且量不足"
+        )
+
     ene_pos = "上轨" if close >= ene_upper else ("下轨" if close <= ene_lower else "轨道内")
     baseline_text = "满足" if vol_baseline_ok else "不足"
     technical_ref = (
@@ -632,6 +642,7 @@ def get_technical_metrics(df):
         "kd_k": latest_k,
         "kd_d": latest_d,
         "rsi999": latest_rsi,
+        **deduction,
     }
 
 
@@ -867,6 +878,7 @@ def get_history_metrics(code, today_str):
     if ret20 is not None and ret20 > 0.45:
         trend_score -= 15
     trend_score = clamp(trend_score)
+    trend_score, deduction_adjustment = apply_deduction_to_trend(trend_score, technical)
 
     liquidity_score = score_direct(np.log10(avg_amount20) if avg_amount20 and avg_amount20 > 0 else None, 7.0, 9.5)
 
@@ -881,6 +893,7 @@ def get_history_metrics(code, today_str):
         "ma60": ma60,
         "avg_amount20": avg_amount20,
         "trend_score": trend_score,
+        "deduction_adjustment": deduction_adjustment,
         "liquidity_score": liquidity_score,
         "mainline": mainline,
         "technical": technical,
@@ -1710,6 +1723,14 @@ def score_stock(code, name, industry, method, today_str, year, quarter, value_mi
         "technical_ref": technical.get("technical_ref", ""),
         "technical_flags": technical.get("technical_flags", "正常"),
         "technical_flags_list": technical.get("technical_flags_list", []),
+        "ma_deduction_score": technical.get("ma_deduction_score", 0),
+        "deduction_adjustment": history.get("deduction_adjustment", 0),
+        "long_ma_support_periods": technical.get("long_ma_support_periods", ""),
+        "long_ma_upward_pull_periods": technical.get("long_ma_upward_pull_periods", ""),
+        "long_ma_overhead_periods": technical.get("long_ma_overhead_periods", ""),
+        "short_ma_down_drag_periods": technical.get("short_ma_down_drag_periods", ""),
+        "long_ma_overhead_count": technical.get("long_ma_overhead_count", 0),
+        "short_ma_down_drag_count": technical.get("short_ma_down_drag_count", 0),
         "kd_k": technical.get("kd_k"),
         "kd_d": technical.get("kd_d"),
         "rsi999": technical.get("rsi999"),
@@ -1836,25 +1857,11 @@ def run_akshare_cache_fallback(top):
             volume_ratio = volume5 / volume20 if volume20 > 0 else 1.0
             high20 = float(close.tail(20).max())
             drawdown20 = last_close / high20 - 1 if high20 > 0 else 0
-            deduct_periods = []
-            price_deduct_periods = []
-            volume_deduct_periods = []
-            available_periods = []
-            latest_volume = float(volume.iloc[-1])
-            for period in [5, 10, 20, 60, 120, 240]:
-                if len(df) < period + 2:
-                    continue
-                available_periods.append(period)
-                deduct_close = float(close.iloc[-(period + 1)])
-                deduct_volume = float(volume.iloc[-(period + 1)])
-                price_up = last_close > deduct_close
-                volume_up = latest_volume > deduct_volume
-                if price_up:
-                    price_deduct_periods.append(period)
-                if volume_up:
-                    volume_deduct_periods.append(period)
-                if price_up and volume_up:
-                    deduct_periods.append(period)
+            deduction = moving_average_deduction_snapshot(close, volume)
+            available_periods = list(deduction.get("ma_deduction_details", {}))
+            price_deduct_periods = str(deduction.get("price_deduct_periods", "")).split("/")
+            volume_deduct_periods = str(deduction.get("volume_deduct_periods", "")).split("/")
+            deduct_periods = sorted((set(price_deduct_periods) & set(volume_deduct_periods)) - {""}, key=int)
 
             wave = infer_downtrend_recovery(df, lookback=240) or {}
             wave_pct = wave.get("recovery_pct")
@@ -1877,7 +1884,9 @@ def run_akshare_cache_fallback(top):
             trend_score = 25 if last_close > ma20 > ma60 else 16 if last_close > ma20 else 6
             momentum_score = float(np.clip(ret20 * 110 + ret60 * 40 + 8, 0, 20))
             liquidity_score = float(np.clip((volume_ratio - 0.7) * 16.67, 0, 10))
-            deduct_score = 25.0 * len(deduct_periods) / max(1, len(available_periods))
+            # Neutral deduction structure starts at 12.5/25. Long MA support
+            # and upward pull dominate; short downward drag can reduce rank.
+            deduct_score = float(np.clip(12.5 + deduction.get("ma_deduction_score", 0) * 0.25, 0, 25))
             total_score = round(trend_score + momentum_score + liquidity_score + deduct_score + wave_score, 2)
             code = filename[:-4].replace("_", ".", 1)
             rows.append({
@@ -1899,6 +1908,11 @@ def run_akshare_cache_fallback(top):
                 "deduct_periods": "/".join(map(str, deduct_periods)),
                 "price_deduct_periods": "/".join(map(str, price_deduct_periods)),
                 "volume_deduct_periods": "/".join(map(str, volume_deduct_periods)),
+                "long_ma_support_periods": deduction.get("long_ma_support_periods", ""),
+                "long_ma_upward_pull_periods": deduction.get("long_ma_upward_pull_periods", ""),
+                "long_ma_overhead_periods": deduction.get("long_ma_overhead_periods", ""),
+                "short_ma_down_drag_periods": deduction.get("short_ma_down_drag_periods", ""),
+                "ma_deduction_score": deduction.get("ma_deduction_score", 0),
                 "wave_low": round(float(wave.get("downtrend_low")), 3) if wave.get("downtrend_low") is not None else None,
                 "wave_high": round(float(wave.get("downtrend_high")), 3) if wave.get("downtrend_high") is not None else None,
                 "wave_pct": round(float(wave_pct), 2) if wave_pct is not None else None,

@@ -32,6 +32,85 @@ def _last(series: pd.Series):
     return None if pd.isna(value) else float(value)
 
 
+def moving_average_deduction_snapshot(
+    close: pd.Series,
+    volume: pd.Series,
+    periods=(5, 10, 20, 60, 120, 240),
+    proximity_pct: float = 0.05,
+) -> dict:
+    """Quantify MA deduction, volume confirmation, support and drag."""
+    prices = pd.to_numeric(close, errors="coerce")
+    volumes = pd.to_numeric(volume, errors="coerce")
+    if prices.empty:
+        return {}
+    current_price = float(prices.iloc[-1])
+    current_volume = float(volumes.iloc[-1]) if len(volumes) and pd.notna(volumes.iloc[-1]) else 0.0
+    details = {}
+    support_periods, upward_pull_periods, overhead_periods = [], [], []
+    price_up_periods, volume_up_periods, short_down_drag_periods = [], [], []
+
+    for period in periods:
+        if len(prices) < period + 1:
+            continue
+        deduct_price = float(prices.iloc[-period - 1])
+        deduct_volume = float(volumes.iloc[-period - 1]) if pd.notna(volumes.iloc[-period - 1]) else 0.0
+        ma = float(prices.tail(period).mean())
+        price_rising = current_price > deduct_price
+        volume_rising = current_volume > deduct_volume
+        distance = current_price / ma - 1 if ma > 0 else np.nan
+        near = pd.notna(distance) and abs(distance) <= proximity_pct
+        support = bool(price_rising and near and distance >= 0)
+        upward_pull = bool(price_rising and near and distance < 0)
+        overhead = bool(not price_rising and near and distance < 0)
+        volume_ratio = current_volume / deduct_volume if deduct_volume > 0 else None
+        details[str(period)] = {
+            "ma": round(ma, 4), "deduct_price": round(deduct_price, 4),
+            "price_rising": price_rising,
+            "distance_pct": None if pd.isna(distance) else round(distance * 100, 2),
+            "deduct_volume": deduct_volume, "volume_rising": volume_rising,
+            "volume_ratio": None if volume_ratio is None else round(volume_ratio, 3),
+            "support": support, "upward_pull": upward_pull,
+            "overhead_pressure": overhead,
+        }
+        if price_rising:
+            price_up_periods.append(period)
+        if volume_rising:
+            volume_up_periods.append(period)
+        if support:
+            support_periods.append(period)
+        if upward_pull:
+            upward_pull_periods.append(period)
+        if overhead:
+            overhead_periods.append(period)
+        if period <= 20 and not price_rising and not volume_rising:
+            short_down_drag_periods.append(period)
+
+    long_periods = {60, 120, 240}
+    long_support = long_periods.intersection(support_periods)
+    long_upward_pull = long_periods.intersection(upward_pull_periods)
+    long_overhead = long_periods.intersection(overhead_periods)
+    long_volume_up = long_periods.intersection(volume_up_periods)
+    structure_score = (18 * len(long_support) + 12 * len(long_upward_pull)
+                       + 5 * len(long_volume_up) - 16 * len(long_overhead)
+                       - 6 * len(short_down_drag_periods))
+    return {
+        "ma_deduction_details": details,
+        "price_deduct_periods": "/".join(map(str, price_up_periods)),
+        "volume_deduct_periods": "/".join(map(str, volume_up_periods)),
+        "long_ma_support_periods": "/".join(map(str, sorted(long_support))),
+        "long_ma_upward_pull_periods": "/".join(map(str, sorted(long_upward_pull))),
+        "long_ma_overhead_periods": "/".join(map(str, sorted(long_overhead))),
+        "short_ma_down_drag_periods": "/".join(map(str, short_down_drag_periods)),
+        "long_ma_support_count": len(long_support),
+        "long_ma_upward_pull_count": len(long_upward_pull),
+        "long_ma_overhead_count": len(long_overhead),
+        "long_volume_deduct_count": len(long_volume_up),
+        "short_ma_down_drag_count": len(short_down_drag_periods),
+        "ma_deduction_score": int(min(100, max(-100, structure_score))),
+        "long_deduct_ready": len(long_support | long_upward_pull) >= 2 and len(long_volume_up) >= 2,
+    }
+
+
 def _divergence(price: pd.Series, indicator: pd.Series, reset: pd.Series | None = None, lookback: int = 60):
     """Compare the latest point with the previous local extreme in the active cycle."""
     work = pd.DataFrame({"price": price, "indicator": indicator}).dropna().tail(lookback)
@@ -116,6 +195,7 @@ def technical_snapshot(frame: pd.DataFrame) -> dict:
         "volume_above_ref10": current_volume > volume_ref10,
     }
     volume_baseline_count = sum(volume_checks.values())
+    deduction = moving_average_deduction_snapshot(close, volume)
 
     kd_gap = _last(k - d)
     kd_gap_extreme = abs(kd_gap) >= 20 if kd_gap is not None else False
@@ -166,6 +246,7 @@ def technical_snapshot(frame: pd.DataFrame) -> dict:
         "base_volume_ratio": None if pd.isna(base_volume_ratio) else round(base_volume_ratio, 3),
         "volume_baseline_ok": volume_baseline_ok,
         "volume_baseline_count": volume_baseline_count,
+        **deduction,
         **volume_checks,
         "volume_ratio_ma5": round(current_volume / volume_ma5, 3) if volume_ma5 > 0 else None,
         "volume_ratio_ma10": round(current_volume / volume_ma10, 3) if volume_ma10 > 0 else None,

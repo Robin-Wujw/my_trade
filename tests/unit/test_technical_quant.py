@@ -1,6 +1,6 @@
 import pandas as pd
 
-from stock_research.indicators.technical_quant import technical_snapshot
+from stock_research.indicators.technical_quant import moving_average_deduction_snapshot, technical_snapshot
 
 
 def make_bars(count=40):
@@ -41,3 +41,24 @@ def test_snapshot_rejects_insufficient_history():
 
     assert result["technical_available"] is False
     assert "need 20" in result["technical_reason"]
+
+
+def test_ma_deduction_separates_long_support_from_short_down_drag():
+    close = pd.Series([100.0] * 180 + [90.0] + [90.0] * 40 + [98.0] * 19 + [97.0])
+    volume = pd.Series([1000.0] * 221 + [2000.0] * 19 + [900.0])
+
+    result = moving_average_deduction_snapshot(close, volume)
+
+    assert "60" in result["long_ma_support_periods"]
+    assert result["short_ma_down_drag_count"] >= 1
+    assert result["ma_deduction_details"]["60"]["support"] is True
+
+
+def test_ma_deduction_marks_rising_long_ma_below_price_as_upward_pull():
+    close = pd.Series([100.0] * 62 + [50.0] + [120.0] * 59 + [110.0])
+    volume = pd.Series([100.0] * 122 + [200.0])
+
+    result = moving_average_deduction_snapshot(close, volume, periods=(60,), proximity_pct=1.0)
+
+    assert result["long_ma_upward_pull_periods"] == "60"
+    assert result["long_ma_support_periods"] == ""

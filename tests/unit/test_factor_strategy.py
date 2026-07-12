@@ -1,12 +1,38 @@
 import pytest
 
 from stock_research.strategies.factor_selection import (
+    apply_deduction_to_trend,
     build_risk_flags,
     calc_high_quality_score,
     calc_low_value_score,
     calc_total_score,
     classify_selection_bucket,
 )
+
+
+def test_deduction_adjustment_is_bounded_and_medium_long_led():
+    improved, bonus = apply_deduction_to_trend(70, {"ma_deduction_score": 90})
+    weakened, penalty = apply_deduction_to_trend(70, {"ma_deduction_score": -90})
+
+    assert improved == 85
+    assert bonus == 15
+    assert weakened == 55
+    assert penalty == -15
+
+
+def test_deduction_risks_explain_pressure_and_entry_timing():
+    row = {
+        "method": "RIGHT", "selection_bucket": "高质量趋势",
+        "valuation_score": 80, "quality_score": 80, "trend_score": 75,
+        "liquidity_score": 60, "price_to_value": None,
+        "long_ma_overhead_count": 2, "short_ma_down_drag_count": 2,
+        "technical_flags_list": [],
+    }
+
+    flags = build_risk_flags(row)
+
+    assert "中长下弯均线" in flags
+    assert "等待放量" in flags
 
 
 def test_factor_bucket_and_scores_keep_current_rules():
