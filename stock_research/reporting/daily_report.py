@@ -24,6 +24,7 @@ from stock_research.reporting.breakout_watch import (
     save_watch_state,
     update_breakout_watch,
 )
+from stock_research.reporting.trade_reminders import build_trade_reminders, load_trade_plans
 
 
 SELECTION_DIR = str(PATHS.selection_exports)
@@ -32,6 +33,7 @@ REPORT_DIR = str(PATHS.report_exports)
 HISTORY_FILE = str(PATHS.state / "daily_selection_history.json")
 FORMULA_PHASE_FILE = str(PATHS.state / "formula33_right_side_phase.json")
 BREAKOUT_WATCH_FILE = str(PATHS.state / "two_month_breakout_watch.json")
+TRADE_PLAN_FILE = str(PATHS.project_root / "config" / "trade_plans.json")
 KLINE_CACHE_DIR = str(PATHS.cache / "formula33_kline" / "akshare")
 FORMULA_PHASE_VERSION = 2
 RIGHT_SIDE_WAITING = "等待右侧阶段"
@@ -53,6 +55,7 @@ class DailyReportBundle:
     formula_phase_state: dict | None = None
     breakout_watch_state: dict | None = None
     breakout_alerts: tuple[dict, ...] = ()
+    trade_reminders: tuple[dict, ...] = ()
 
 
 def parse_args(argv=None):
@@ -686,7 +689,7 @@ def _breakout_watch_pages(report_date, alerts, max_chars):
                 f"<tr><td><b>{esc(item.get('name'))}</b><br>{esc(item.get('code'))}<br>现价<b>{num(item.get('close'))}</b></td>"
                 f"<td><span class='danger'>{esc(item.get('alert_level'))}</span><br>回调进度{num(item.get('recovery_pct'),1)}%"
                 f"<br>累计突破{int(item.get('crossing_count') or 0)}次</td>"
-                f"<td>上涨50%={num(item.get('uptrend_level_50'))}<br>回调50%={num(item.get('pullback_level_50'))}"
+                f"<td>上涨波段50%支撑位={num(item.get('uptrend_level_50'))}<br>回调波段50%突破位={num(item.get('pullback_level_50'))}"
                 f"<br>前高={num(item.get('prior_high'))}</td>"
                 f"<td>{'是，继续跟踪' if item.get('in_current_selection') else '否，独立跟踪中'}</td></tr>"
             )
@@ -698,6 +701,33 @@ def _breakout_watch_pages(report_date, alerts, max_chars):
         parts.append("</table>")
         pages.append("".join(parts))
     return pages
+
+
+def _trade_reminder_pages(report_date, reminders, max_chars):
+    if not reminders:
+        return []
+    intro = (
+        _push_style() + f"<h1>{esc(report_date)} 买卖临近提醒</h1>"
+        + "<div class='warning'><b>口径：</b>显式计划才是买卖提醒；选股自动命中只列为待制定计划的候选。"
+        "默认在距离目标价2%以内提前提醒，实际成交仍按计划规则核对。</div>"
+    )
+    rows = [intro, "<table border='1'><tr><th>股票</th><th>提醒</th><th>现价/目标</th><th>距离</th></tr>"]
+    for item in reminders:
+        size = item.get("position_pct")
+        detail = esc(item.get("message"))
+        if size is not None:
+            detail += f"<br>计划仓位{num(size, 1)}%"
+        rows.append(
+            f"<tr><td><b>{esc(item.get('name'))}</b><br>{esc(item.get('code'))}</td>"
+            f"<td>{esc(item.get('kind'))}<br>{detail}</td>"
+            f"<td>{num(item.get('close'))} / {num(item.get('target'))}</td>"
+            f"<td>{num(item.get('distance_pct'), 1)}%</td></tr>"
+        )
+    rows.append("</table>")
+    content = "".join(rows)
+    if len(content) > max_chars:
+        raise ValueError("买卖临近提醒超过单页限制，请缩小候选范围")
+    return [content]
 
 
 def _priority_details(frame, include_value, limit):
@@ -822,6 +852,7 @@ def build_push_reports(
     top=5,
     formula_phase=RIGHT_SIDE_WAITING,
     breakout_alerts=(),
+    trade_reminders=(),
 ):
     # Page numbering is added after pagination; reserve enough room for it.
     page_content_limit = max_chars - 32
@@ -916,7 +947,8 @@ def build_push_reports(
                 "板块数据超过7天不参与判断；缺失数据不会自动补成通过。</div>",
         ]
     )
-    pages = _breakout_watch_pages(report_date, breakout_alerts, page_content_limit)
+    pages = _trade_reminder_pages(report_date, trade_reminders, page_content_limit)
+    pages.extend(_breakout_watch_pages(report_date, breakout_alerts, page_content_limit))
     pages.extend(_paginate_stock_section(
         value_intro,
         values,
@@ -1041,6 +1073,12 @@ def build_reports(
         _load_watch_kline,
         load_watch_state(BREAKOUT_WATCH_FILE),
     )
+    trade_reminders = build_trade_reminders(
+        stocks,
+        report_date,
+        _load_watch_kline,
+        load_trade_plans(TRADE_PLAN_FILE),
+    )
 
     formula = formula.assign(
         date=pd.to_datetime(formula["date"], errors="coerce")
@@ -1060,6 +1098,15 @@ def build_reports(
         "四部分分别判断，不用短期动量补齐名单。</p>"
     )
     full_parts = [heading]
+    if trade_reminders:
+        full_parts.append("<h2>买卖临近提醒</h2><ul>")
+        for item in trade_reminders:
+            full_parts.append(
+                f"<li><b>{esc(item.get('name'))} {esc(item.get('code'))}</b>："
+                f"{esc(item.get('kind'))}，{esc(item.get('message'))}；"
+                f"现价{num(item.get('close'))}，目标{num(item.get('target'))}。</li>"
+            )
+        full_parts.append("</ul>")
     full_parts.append(
         render_stock_section(
             "1. 基本价值线或附近（适用股票全量）",
@@ -1106,6 +1153,7 @@ def build_reports(
         top=top,
         formula_phase=formula_phase,
         breakout_alerts=breakout_alerts,
+        trade_reminders=trade_reminders,
     )
     return DailyReportBundle(
         report_date=report_date,
@@ -1119,6 +1167,7 @@ def build_reports(
         formula_phase_state=formula_phase_state,
         breakout_watch_state=breakout_watch_state,
         breakout_alerts=tuple(breakout_alerts),
+        trade_reminders=tuple(trade_reminders),
     )
 
 
@@ -1160,6 +1209,7 @@ def main(argv=None):
         f"{bundle.sector_path}"
     )
     print(f"两个月突破强提醒: {len(bundle.breakout_alerts)}只")
+    print(f"买卖临近提醒: {len(bundle.trade_reminders)}条")
     for index, content in enumerate(bundle.push_parts, start=1):
         print(f"PushPlus第{index}部分长度: {len(content)}")
     if args.no_push:
@@ -1179,7 +1229,11 @@ def main(argv=None):
     results = []
     total_parts = len(bundle.push_parts)
     for index, content in enumerate(bundle.push_parts, start=1):
-        title = f"[{index}/{total_parts}] {report_date} 每日选股报告"
+        title = (
+            f"[{index}/{total_parts}] {report_date} 持仓与观察提醒"
+            if index == 1 and bundle.trade_reminders
+            else f"[{index}/{total_parts}] {report_date} 每日选股报告"
+        )
         ok = send_pushplus(title, content)
         results.append(ok)
         print(f"PUSH_RESULT_{index}", ok)

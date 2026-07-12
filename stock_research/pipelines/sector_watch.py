@@ -55,6 +55,10 @@ def parse_args(argv=None):
     parser.add_argument("--fallback-sample", action="store_true", help="真实板块接口失败时自动生成离线样例，避免每日流程中断")
     parser.add_argument("--workers", type=int, default=4, help="板块历史请求并发数")
     parser.add_argument("--as-of-date", default="", help="历史截止日YYYY-MM-DD；默认今天")
+    parser.add_argument(
+        "--allow-missing-limit-up", action="store_true",
+        help="历史回建时允许涨停池缺失；仅输出不含涨停扩散的基础主线分并明确标记partial",
+    )
     return parser.parse_args(argv)
 
 
@@ -730,13 +734,20 @@ def main(argv=None, repository=None, logger=None, provider=None):
         .strftime("%Y-%m-%d")
         .tolist()
     )
-    limit_up_counts = load_limit_up_counts(
-        args.limit_up_days,
-        as_of_date,
-        date_keys=benchmark_dates,
-        retries=args.retries,
-        retry_delay=args.retry_delay,
-    )
+    limit_up_complete = True
+    try:
+        limit_up_counts = load_limit_up_counts(
+            args.limit_up_days,
+            as_of_date,
+            date_keys=benchmark_dates,
+            retries=args.retries,
+            retry_delay=args.retry_delay,
+        )
+    except RuntimeError:
+        if not args.allow_missing_limit_up:
+            raise
+        limit_up_counts = {}
+        limit_up_complete = False
 
     board_names = boards["board_name"].tolist()
     board_code_by_name = dict(zip(boards["board_name"], boards["board_code"]))
@@ -899,6 +910,7 @@ def main(argv=None, repository=None, logger=None, provider=None):
             print_sector_report(df, path, args.top)
             return
         raise SystemExit("无有效板块数据")
+    df["score_status"] = "complete" if limit_up_complete else "partial_missing_limit_up"
     df = df.sort_values(["final_score", "mainline_score", "ret5"], ascending=False)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     observation_stamp = observation_date.strftime("%Y%m%d")
@@ -922,7 +934,8 @@ def main(argv=None, repository=None, logger=None, provider=None):
     except Exception as exc:
         print(f"主流板块成分获取失败，停止板块观察输出: {exc}")
         raise SystemExit(2) from exc
-    df = apply_constituent_limit_up_counts(df, constituents, limit_date_keys)
+    if limit_up_complete:
+        df = apply_constituent_limit_up_counts(df, constituents, limit_date_keys)
     df = df.sort_values(["final_score", "mainline_score", "ret5"], ascending=False)
     df.to_csv(path, index=False, encoding="utf-8-sig")
     print_sector_report(df, path, args.top)

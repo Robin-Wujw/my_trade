@@ -10,6 +10,8 @@
 - [每日流水线运维](knowledge/operations-runbook.md)：完整运行、增量续跑、结果验收、故障处理和正式推送门禁。
 - [数据源连接与容错改进](knowledge/data-source-resilience.md)：AkShare/BaoStock 的节流、退避、重连、异常结果和参考项目对照。
 - [结果输出阅读指南](knowledge/output-guide.md)：Formula33、每日选股和板块结果先看什么、字段是什么意思、哪些不能直接当买入信号。
+- [均线均量扣抵思想](knowledge/ma-volume-deduction.md)：扣抵方向、支撑压力、周期分工和项目量化映射。
+- [持仓建仓、止损与分仓止盈体系](knowledge/position-entry-exit-system.md)：显式网格、左转右、独立止损、分仓止盈和提醒配置。
 
 日报新增的技术量化、双波段关键价和两个月突破追踪均以 [结果输出阅读指南](knowledge/output-guide.md) 为展示口径，以根目录 [STRATEGY.md](../STRATEGY.md) 为计算口径。
 
