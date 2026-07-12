@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "proximity_pct": 0.02,
+  "plans": {
+    "sh.600699": {
+      "name": "均胜电子",
+      "start_date": "2026-01-01",
+      "value_line": 23.304102355619484,
+      "right_position_pct": 0.15,
+      "grid": [
+        {"buy_price": 23.3, "sell_price": 25.3, "position_pct": 0.06, "core": true},
+        {"buy_price": 22.3, "sell_price": 23.3, "position_pct": 0.06},
+        {"buy_price": 21.3, "sell_price": 22.3, "position_pct": 0.06},
+        {"buy_price": 20.3, "sell_price": 21.3, "position_pct": 0.06},
+        {"buy_price": 19.3, "sell_price": 20.3, "position_pct": 0.06}
+      ]
+    }
+  }
+}
