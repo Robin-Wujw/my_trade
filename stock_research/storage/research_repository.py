@@ -74,7 +74,21 @@ class ResearchRepository:
 
     def persist_candidate_snapshots(self, snapshots: dict, *, version: str) -> int:
         rows = []
+        coverage_rows = []
         for date, candidates in snapshots.items():
+            eligible_count = sum(bool(candidate.get("signal_eligible", True)) for candidate in candidates)
+            coverage_rows.append({
+                "observation_date": pd.Timestamp(date),
+                "snapshot_version": str(version),
+                "candidate_count": int(len(candidates)),
+                "signal_eligible_count": int(eligible_count),
+                "payload_json": _json({
+                    "date": date,
+                    "version": version,
+                    "candidate_count": int(len(candidates)),
+                    "signal_eligible_count": int(eligible_count),
+                }),
+            })
             for candidate in candidates:
                 rows.append({
                     "observation_date": pd.Timestamp(date),
@@ -87,15 +101,31 @@ class ResearchRepository:
                     "selection_reason": str(candidate.get("selection_reason") or ""),
                     "report_period": pd.to_datetime(candidate.get("report_period"), errors="coerce"),
                     "signal_eligible": bool(candidate.get("signal_eligible", True)),
+                    "trade_basis_score": pd.to_numeric(candidate.get("trade_basis_score"), errors="coerce"),
+                    "trade_basis_reason": str(candidate.get("trade_basis_reason") or ""),
+                    "technical_alignment": str(candidate.get("technical_alignment") or ""),
+                    "ima_web_validation": str(candidate.get("ima_web_validation") or ""),
+                    "validation_sources_json": _json(candidate.get("validation_sources") or []),
                     "payload_json": _json(candidate),
                 })
         frame = pd.DataFrame(rows)
+        coverage = pd.DataFrame(coverage_rows)
         dates = sorted(pd.Timestamp(value) for value in snapshots)
         if not dates:
             return 0
         connection = self.database.connect()
         connection.execute("BEGIN TRANSACTION")
         try:
+            self._replace_frame(
+                connection,
+                "derived.candidate_snapshot_coverage",
+                coverage,
+                """
+                DELETE FROM derived.candidate_snapshot_coverage
+                WHERE snapshot_version = ? AND observation_date >= ? AND observation_date <= ?
+                """,
+                [str(version), dates[0], dates[-1]],
+            )
             self._replace_frame(
                 connection,
                 "derived.candidate_snapshots",
@@ -179,6 +209,9 @@ class ResearchRepository:
             "transaction_cost_amount": event.get("transaction_cost_amount"),
             "profit_loss_amount": event.get("profit_loss_amount"),
             "reason": str(event.get("reason") or ""),
+            "selection_reason": str(event.get("selection_reason") or ""),
+            "trade_basis_reason": str(event.get("trade_basis_reason") or ""),
+            "technical_alignment": str(event.get("technical_alignment") or ""),
             "payload_json": _json(event),
         } for sequence, event in enumerate(result.get("trade_ledger") or [], 1)])
         positions = pd.DataFrame([{

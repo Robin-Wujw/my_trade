@@ -1082,6 +1082,10 @@ def run_portfolio_backtest(
                     lot_rounded=size < requested_size - 1e-9 and not cash_limited,
                     board_lot_size=board_lot_size(code),
                     selection_reason=current_candidates[code].get("selection_reason"),
+                    trade_basis_score=current_candidates[code].get("trade_basis_score"),
+                    trade_basis_reason=current_candidates[code].get("trade_basis_reason"),
+                    technical_alignment=current_candidates[code].get("technical_alignment"),
+                    ima_web_validation=current_candidates[code].get("ima_web_validation"),
                     **structure_metadata,
                 )
 

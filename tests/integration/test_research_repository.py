@@ -17,8 +17,12 @@ def test_research_repository_persists_candidates_formula_and_backtest(tmp_path):
         "2026-01-05": [{
             "code": "sh.600000", "name": "浦发银行", "selection_rank": 1,
             "candidate_score": 99, "report_period": "2025-09-30",
-            "signal_eligible": True,
-        }]
+            "signal_eligible": True, "trade_basis_score": 7,
+            "trade_basis_reason": "MA20/MA60同步上扬",
+            "technical_alignment": "trade_ready",
+            "ima_web_validation": "aligned",
+        }],
+        "2026-01-06": [],
     }, version="test-v1") == 1
     assert repository.persist_formula_history(pd.DataFrame([{
         "date": "2026-01-05", "phase": "active", "window_up_streak": 5,
@@ -35,6 +39,9 @@ def test_research_repository_persists_candidates_formula_and_backtest(tmp_path):
             "trade_side": "买入", "quantity": 100, "execution_price": 10,
             "trade_amount": 1000, "transaction_cost_amount": 5,
             "profit_loss_amount": -5, "reason": "test",
+            "selection_reason": "主流标准基本面模型入选",
+            "trade_basis_reason": "MA20/MA60同步上扬",
+            "technical_alignment": "trade_ready",
         }],
         "final_positions": [{
             "code": "sh.600000", "name": "浦发银行", "quantity": 100,
@@ -50,10 +57,42 @@ def test_research_repository_persists_candidates_formula_and_backtest(tmp_path):
             table: connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
             for table in [
                 "raw.fundamental_metrics", "derived.candidate_snapshots",
+                "derived.candidate_snapshot_coverage",
                 "derived.formula33_phase", "derived.backtest_runs",
                 "derived.backtest_trades", "derived.backtest_positions",
             ]
         }
     finally:
         connection.close()
-    assert set(counts.values()) == {1}
+    assert counts["derived.candidate_snapshot_coverage"] == 2
+    assert {value for key, value in counts.items() if key != "derived.candidate_snapshot_coverage"} == {1}
+    connection = database.connect(read_only=True)
+    try:
+        row = connection.execute(
+            """
+            SELECT trade_basis_score, technical_alignment, ima_web_validation
+            FROM derived.candidate_snapshots
+            """
+        ).fetchone()
+        trade = connection.execute(
+            """
+            SELECT selection_reason, trade_basis_reason, technical_alignment
+            FROM derived.backtest_trades
+            """
+        ).fetchone()
+        coverage = connection.execute(
+            """
+            SELECT observation_date, candidate_count
+            FROM derived.candidate_snapshot_coverage
+            ORDER BY observation_date
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+    assert row == (7.0, "trade_ready", "aligned")
+    assert trade == (
+        "主流标准基本面模型入选",
+        "MA20/MA60同步上扬",
+        "trade_ready",
+    )
+    assert [item[1] for item in coverage] == [1, 0]

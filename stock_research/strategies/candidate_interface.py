@@ -38,7 +38,14 @@ def normalize_candidate(candidate):
         price_to_value = _number(row.get("price_to_value"))
         if price_to_value is not None and 0.80 <= price_to_value <= 1.08:
             valuation_bonus = max(0.0, 5.0 * (1.08 - price_to_value) / 0.28)
-        original_score = quality + min(max(growth, 0.0), 1.0) * 20.0 + mainline_bonus + valuation_bonus
+        trade_basis_bonus = _number(row.get("trade_basis_score")) or 0.0
+        original_score = (
+            quality
+            + min(max(growth, 0.0), 1.0) * 20.0
+            + mainline_bonus
+            + valuation_bonus
+            + min(max(trade_basis_bonus, 0.0), 12.0)
+        )
     row["candidate_score"] = round(original_score, 6)
     row["selection_reason"] = str(
         row.get("selection_reason")

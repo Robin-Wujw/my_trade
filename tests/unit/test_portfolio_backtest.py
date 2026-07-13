@@ -3,6 +3,7 @@ import pytest
 
 from apps.portfolio_backtest import (
     default_data_end_date,
+    load_candidate_snapshots,
     validate_backtest_input_coverage,
 )
 from stock_research.indicators.price_structure import (
@@ -10,7 +11,10 @@ from stock_research.indicators.price_structure import (
     structure_price,
     trend_amplitude_valid,
 )
-from stock_research.strategies.historical_candidates import report_period_for
+from stock_research.strategies.historical_candidates import (
+    _trade_basis_snapshot,
+    report_period_for,
+)
 from stock_research.strategies.candidate_interface import normalize_candidate_snapshots
 from stock_research.strategies.portfolio_backtest import (
     _affordable_buy_notional,
@@ -81,6 +85,26 @@ def test_unified_candidate_pool_applies_gates_caps_growth_and_keeps_top_ten():
     assert not {"LOWQ", "LOWG", "SMALL"} & {item["code"] for item in selected}
     # Growth above 100% is capped: adjacent rows differ by quality, not giant yoy.
     assert selected[0]["candidate_score"] - selected[1]["candidate_score"] == pytest.approx(1)
+
+
+def test_trade_basis_snapshot_scores_visible_ma_volume_and_breakout_setup():
+    dates = pd.bdate_range("2026-01-01", periods=80)
+    closes = [10 + index * 0.03 for index in range(79)] + [13.0]
+    frame = pd.DataFrame({
+        "open": closes,
+        "high": [value + 0.1 for value in closes],
+        "low": [value - 0.1 for value in closes],
+        "close": closes,
+        "volume": [1000] * 79 + [1800],
+    }, index=dates)
+
+    result = _trade_basis_snapshot(frame, dates[-1])
+
+    assert result["trade_basis_score"] >= 7
+    assert result["technical_alignment"] == "trade_ready"
+    assert result["near_21d_close_high"] is True
+    assert "MA20/MA60同步上扬" in result["trade_basis_reason"]
+    assert result["ima_web_validation"] == "aligned"
 
 
 def breakout_bars():
@@ -605,3 +629,11 @@ def test_backtest_input_coverage_must_match_between_candidates_and_formula():
             pd.DataFrame({"date": ["2026-07-09"]}),
             "2026-07-10",
         )
+
+
+def test_empty_candidate_snapshot_file_loads_as_zero_candidates(tmp_path):
+    (tmp_path / "candidates_2024-09-24.csv").write_text("", encoding="utf-8")
+
+    snapshots = load_candidate_snapshots(tmp_path, "2024-09-24", "2024-09-24")
+
+    assert snapshots == {"2024-09-24": []}

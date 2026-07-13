@@ -41,6 +41,50 @@ def _number(value, digits=2):
     return round(number, digits)
 
 
+def _signed_money(value) -> str:
+    number = _number(value)
+    if number is None:
+        return ""
+    return f"{number:+,.2f}元"
+
+
+def _action_summary(event: dict, side: str, quantity: int, holdings_after: int) -> str:
+    name = str(event.get("name") or event.get("code") or "")
+    code = str(event.get("code") or "")
+    price = _number(event.get("execution_price", event.get("price")), 3)
+    amount = _number(event.get("trade_amount"))
+    amount_text = "" if amount is None else f"{amount:,.2f}元"
+    cash = _signed_money(event.get("cash_change_amount"))
+    if side == "买入":
+        return (
+            f"买入{name}({code}) {quantity}股，成交价{price}，"
+            f"成交金额{amount_text}，现金{cash}，交易后持股{holdings_after}股"
+        )
+    pnl = _number(event.get("profit_loss_amount"))
+    pct = _number(event.get("profit_loss_pct"), 4)
+    result = "盈利" if pnl is not None and pnl >= 0 else "亏损"
+    position = "清仓" if holdings_after <= 0 else f"剩余{holdings_after}股"
+    pct_text = "" if pct is None else f"，收益率{pct:+.2f}%"
+    return (
+        f"卖出{name}({code}) {quantity}股，成交价{price}，"
+        f"成交金额{amount_text}，现金{cash}，本次{result}{_signed_money(pnl)}"
+        f"{pct_text}，{position}"
+    )
+
+
+def _trade_result(side: str, event: dict) -> str:
+    if side == "买入":
+        cost = _number(event.get("transaction_cost_amount"))
+        return f"建仓成本{cost:,.2f}元" if cost is not None else "建仓"
+    pnl = _number(event.get("profit_loss_amount"))
+    pct = _number(event.get("profit_loss_pct"), 4)
+    if pnl is None:
+        return "平仓"
+    label = "盈利" if pnl >= 0 else "亏损"
+    pct_text = "" if pct is None else f" ({pct:+.2f}%)"
+    return f"{label}{pnl:,.2f}元{pct_text}"
+
+
 def build_readable_trade_frame(trade_ledger) -> pd.DataFrame:
     """Convert the engine ledger to a compact chronological buy/sell statement."""
     rows = []
@@ -51,6 +95,7 @@ def build_readable_trade_frame(trade_ledger) -> pd.DataFrame:
         quantity = int(round(float(event.get("quantity") or 0)))
         signed = quantity if side == "买入" else -quantity
         holdings[code] = holdings.get(code, 0) + signed
+        holdings_after = holdings[code]
         pnl = _number(event.get("profit_loss_amount"))
         rows.append({
             "序号": sequence,
@@ -58,6 +103,8 @@ def build_readable_trade_frame(trade_ledger) -> pd.DataFrame:
             "股票": str(event.get("name") or code),
             "代码": code,
             "买卖": side,
+            "操作摘要": _action_summary(event, side, quantity, holdings_after),
+            "交易结果": _trade_result(side, event),
             "成交价": _number(event.get("execution_price", event.get("price")), 3),
             "数量(股)": quantity,
             "成交金额(元)": _number(event.get("trade_amount")),
@@ -65,9 +112,11 @@ def build_readable_trade_frame(trade_ledger) -> pd.DataFrame:
             "买卖理由": readable_reason(event.get("reason")),
             "本次已实现盈亏(元)": pnl,
             "本次收益率(%)": _number(event.get("profit_loss_pct"), 4) if side == "卖出" else None,
-            "交易后持股(股)": holdings[code],
+            "交易后持股(股)": holdings_after,
+            "持仓状态": "清仓" if holdings_after <= 0 else f"持有{holdings_after}股",
             "现金变化(元)": _number(event.get("cash_change_amount")),
             "选股理由": str(event.get("selection_reason") or "") if side == "买入" else "",
+            "买卖依据对照": str(event.get("trade_basis_reason") or event.get("selection_reason") or ""),
             "结构比例": _number(event.get("structure_ratio"), 4),
             "锚点低/高": (
                 f"{event.get('anchor_low')} / {event.get('anchor_high')}"
@@ -118,16 +167,15 @@ def render_trade_report_markdown(result: dict) -> str:
         lines.append("本区间没有成交。")
     else:
         lines.extend([
-            "| # | 日期 | 股票 | 买卖 | 成交 | 数量 | 成交金额 | 成本 | 本次盈亏 | 交易后持股 | 理由 |",
-            "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+            "| # | 日期 | 买卖动作 | 结果 | 理由 |",
+            "|---:|---|---|---|---|",
         ])
         for row in ledger.to_dict("records"):
             reason = str(row["买卖理由"]).replace("|", "/")
+            action = str(row["操作摘要"]).replace("|", "/")
+            result_text = str(row["交易结果"]).replace("|", "/")
             lines.append(
-                f"| {row['序号']} | {row['日期']} | {row['股票']}（{row['代码']}） | "
-                f"{row['买卖']} | {row['成交价']} | {row['数量(股)']} | "
-                f"{_money(row['成交金额(元)'])} | {_money(row['手续费税费滑点(元)'])} | "
-                f"{_money(row['本次已实现盈亏(元)'])} | {row['交易后持股(股)']} | {reason} |"
+                f"| {row['序号']} | {row['日期']} | {action} | {result_text} | {reason} |"
             )
     lines.extend(["", "## 最终持仓", ""])
     positions = result.get("final_positions") or []

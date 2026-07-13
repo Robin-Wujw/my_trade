@@ -272,6 +272,42 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        version=6,
+        name="candidate_basis_and_query_indexes",
+        statements=(
+            "ALTER TABLE derived.candidate_snapshots ADD COLUMN trade_basis_score DOUBLE",
+            "ALTER TABLE derived.candidate_snapshots ADD COLUMN trade_basis_reason VARCHAR",
+            "ALTER TABLE derived.candidate_snapshots ADD COLUMN technical_alignment VARCHAR",
+            "ALTER TABLE derived.candidate_snapshots ADD COLUMN ima_web_validation VARCHAR",
+            "ALTER TABLE derived.candidate_snapshots ADD COLUMN validation_sources_json VARCHAR",
+            "ALTER TABLE derived.backtest_trades ADD COLUMN selection_reason VARCHAR",
+            "ALTER TABLE derived.backtest_trades ADD COLUMN trade_basis_reason VARCHAR",
+            "ALTER TABLE derived.backtest_trades ADD COLUMN technical_alignment VARCHAR",
+            "CREATE INDEX IF NOT EXISTS idx_stock_kline_source_date_code ON raw.stock_kline_daily (source, trade_date, code)",
+            "CREATE INDEX IF NOT EXISTS idx_candidate_snapshot_version_date ON derived.candidate_snapshots (snapshot_version, observation_date)",
+            "CREATE INDEX IF NOT EXISTS idx_formula33_phase_version_date ON derived.formula33_phase (version, observation_date)",
+            "CREATE INDEX IF NOT EXISTS idx_backtest_trades_run_date ON derived.backtest_trades (run_id, trade_date)",
+        ),
+    ),
+    Migration(
+        version=7,
+        name="candidate_snapshot_coverage",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS derived.candidate_snapshot_coverage (
+                observation_date DATE NOT NULL,
+                snapshot_version VARCHAR NOT NULL,
+                candidate_count INTEGER NOT NULL,
+                signal_eligible_count INTEGER NOT NULL,
+                payload_json VARCHAR NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (observation_date, snapshot_version)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_candidate_snapshot_coverage_version_date ON derived.candidate_snapshot_coverage (snapshot_version, observation_date)",
+        ),
+    ),
 )
 
 

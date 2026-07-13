@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+from pandas.errors import EmptyDataError
 
 from stock_research.core.paths import PATHS
 from stock_research.reporting.backtest_trade_report import (
@@ -25,9 +26,11 @@ def load_candidate_snapshots(directory, start_date, end_date):
         date = pd.to_datetime(path.stem.removeprefix("candidates_"), errors="coerce")
         if pd.isna(date) or not start <= date.normalize() <= end:
             continue
-        snapshots[date.strftime("%Y-%m-%d")] = pd.read_csv(
-            path, dtype={"code": str}, low_memory=False,
-        ).to_dict("records")
+        try:
+            frame = pd.read_csv(path, dtype={"code": str}, low_memory=False)
+        except EmptyDataError:
+            frame = pd.DataFrame()
+        snapshots[date.strftime("%Y-%m-%d")] = frame.to_dict("records")
     return snapshots
 
 

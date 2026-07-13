@@ -38,6 +38,8 @@ def test_initialize_creates_schemas_and_is_idempotent(tmp_path):
         (3, "stock_kline_persistence", "test"),
         (4, "provider_aware_sector_storage", "test"),
         (5, "research_backtest_persistence", "test"),
+        (6, "candidate_basis_and_query_indexes", "test"),
+        (7, "candidate_snapshot_coverage", "test"),
     ]
     assert {
         ("ops", "schema_migrations"),

@@ -35,8 +35,11 @@ def test_readable_trade_report_tracks_holdings_and_reasons():
 
     frame = build_readable_trade_frame(result["trade_ledger"])
     assert frame["交易后持股(股)"].tolist() == [100, 0]
+    assert frame.iloc[0]["操作摘要"].startswith("买入浦发银行(sh.600000) 100股")
+    assert frame.iloc[1]["交易结果"] == "盈利89.00元 (+8.90%)"
+    assert frame.iloc[1]["持仓状态"] == "清仓"
     assert frame.iloc[0]["买卖理由"] == "回调波段50%向上突破；盘中突破成交"
     markdown = render_trade_report_markdown(result)
     assert "每次买卖流水" in markdown
-    assert "浦发银行（sh.600000）" in markdown
+    assert "买入浦发银行(sh.600000) 100股" in markdown
     assert "期末空仓" in markdown

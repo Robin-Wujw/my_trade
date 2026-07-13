@@ -16,6 +16,39 @@ from stock_research.strategies.candidate_interface import normalize_candidate_sn
 
 SNAPSHOT_VERSION = "unified-selection-v3"
 MAX_MAINLINE_AGE_DAYS = 31
+CANDIDATE_SNAPSHOT_COLUMNS = [
+    "date", "code", "name", "close", "value_line", "quality_score",
+    "earnings_yoy", "mktcap", "report_period", "snapshot_version",
+    "financial_point_in_time", "price_to_value", "mainline_snapshot_date",
+    "mainline_snapshot_fresh", "mainline_boards", "trade_basis_score",
+    "trade_basis_reason", "technical_alignment", "ma20_rising",
+    "ma60_rising", "above_ma20", "near_ma20", "near_21d_close_high",
+    "known_volume_ratio", "volume_deduction_periods", "ima_web_validation",
+    "validation_sources", "strategy_part", "candidate_score",
+    "historical_adjustment_check", "candidate_source", "signal_eligible",
+    "selection_reason", "selection_rank",
+]
+
+
+IMA_WEB_VALIDATION_SOURCES = [
+    {
+        "source_type": "ima",
+        "title": "均线均量扣抵思想",
+        "rule": "扣抵方向、均线支撑和量能确认只能作为结构证据，不能单独生成买卖信号",
+    },
+    {
+        "source_type": "web",
+        "title": "东方财富作者页：白白胖胖0",
+        "url": "https://i.eastmoney.com/2920015446601888",
+        "rule": "市场结构、量、价格、技术指标按优先级互相验证",
+    },
+    {
+        "source_type": "web",
+        "title": "均线均量扣抵基础公式",
+        "url": "https://caifuhao.eastmoney.com/news/20220502203427525523430",
+        "rule": "移动平均方向由新值和扣抵值关系决定",
+    },
+]
 
 
 def _load_mainline_snapshots(directory):
@@ -68,19 +101,100 @@ def _load_prices(kline_directory, codes, start_date, end_date):
         market = "sh" if code.startswith(("6", "9")) else "sz"
         path = Path(kline_directory) / f"{market}_{code}.csv"
         try:
-            frame = pd.read_csv(path, usecols=["date", "close", "volume"])
+            frame = pd.read_csv(path, usecols=["date", "open", "high", "low", "close", "volume"])
         except (OSError, ValueError):
             continue
         frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-        frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
-        frame["volume"] = pd.to_numeric(frame["volume"], errors="coerce")
+        for column in ("open", "high", "low", "close", "volume"):
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
         frame = frame[
             (frame["date"] >= pd.Timestamp(start_date))
             & (frame["date"] <= pd.Timestamp(end_date))
         ].dropna(subset=["date", "close"])
         if not frame.empty:
-            result[code] = frame.set_index("date")[["close", "volume"]]
+            result[code] = frame.set_index("date")[["open", "high", "low", "close", "volume"]]
     return result
+
+
+def _trade_basis_snapshot(price_frame: pd.DataFrame, date) -> dict:
+    """Score model candidates with only information visible at observation close."""
+    history = price_frame.loc[:date].copy()
+    if history.empty:
+        return {
+            "trade_basis_score": 0.0,
+            "trade_basis_reason": "缺少观察日行情，等待补数",
+            "technical_alignment": "missing_price",
+        }
+    close = history["close"].astype(float)
+    volume = history["volume"].astype(float)
+    latest_close = float(close.iloc[-1])
+    latest_volume = float(volume.iloc[-1]) if pd.notna(volume.iloc[-1]) else 0.0
+
+    def ma(period: int):
+        return close.rolling(period).mean()
+
+    ma20 = ma(20)
+    ma60 = ma(60)
+    volume5 = volume.rolling(5).mean()
+    volume10 = volume.rolling(10).mean()
+    latest_ma20 = ma20.iloc[-1] if len(ma20) else pd.NA
+    latest_ma60 = ma60.iloc[-1] if len(ma60) else pd.NA
+    ma20_rising = len(ma20) > 5 and pd.notna(latest_ma20) and latest_ma20 > ma20.iloc[-6]
+    ma60_rising = len(ma60) > 5 and pd.notna(latest_ma60) and latest_ma60 > ma60.iloc[-6]
+    above_ma20 = pd.notna(latest_ma20) and latest_close >= float(latest_ma20)
+    near_ma20 = (
+        pd.notna(latest_ma20)
+        and latest_ma20 > 0
+        and abs(latest_close / float(latest_ma20) - 1.0) <= 0.05
+    )
+    prior_high = close.iloc[:-1].tail(21).max() if len(close) > 21 else pd.NA
+    near_breakout = pd.notna(prior_high) and prior_high > 0 and latest_close >= float(prior_high) * 0.97
+    volume_base = max(
+        float(volume5.iloc[-2]) if len(volume5) > 1 and pd.notna(volume5.iloc[-2]) else 0.0,
+        float(volume10.iloc[-2]) if len(volume10) > 1 and pd.notna(volume10.iloc[-2]) else 0.0,
+    )
+    volume_ratio = latest_volume / volume_base if volume_base > 0 else 0.0
+    deduction_periods = [period for period in (5, 10, 20) if len(volume) > period and latest_volume > volume.iloc[-period - 1]]
+
+    score = 0.0
+    reasons = []
+    if ma20_rising and ma60_rising:
+        score += 4.0
+        reasons.append("MA20/MA60同步上扬")
+    elif ma20_rising:
+        score += 2.0
+        reasons.append("MA20上扬")
+    if above_ma20:
+        score += 2.0
+        reasons.append("收盘站上MA20")
+    elif near_ma20 and ma20_rising:
+        score += 2.0
+        reasons.append("贴近上扬MA20支撑")
+    if near_breakout:
+        score += 3.0
+        reasons.append("距离21日收盘高点3%以内")
+    if volume_ratio >= 1.2:
+        score += 2.0
+        reasons.append(f"量能高于5/10日基准{volume_ratio:.2f}倍")
+    if len(deduction_periods) >= 2:
+        score += 1.0
+        reasons.append("多周期均量扣低走高")
+
+    alignment = "trade_ready" if score >= 7 else "watch" if score >= 4 else "fundamental_only"
+    return {
+        "trade_basis_score": round(score, 3),
+        "trade_basis_reason": "；".join(reasons) or "基本面入选，等待价格/量能买点",
+        "technical_alignment": alignment,
+        "ma20_rising": bool(ma20_rising),
+        "ma60_rising": bool(ma60_rising),
+        "above_ma20": bool(above_ma20),
+        "near_ma20": bool(near_ma20),
+        "near_21d_close_high": bool(near_breakout),
+        "known_volume_ratio": round(volume_ratio, 4),
+        "volume_deduction_periods": ",".join(map(str, deduction_periods)),
+        "ima_web_validation": "aligned" if score >= 4 else "needs_price_confirmation",
+        "validation_sources": IMA_WEB_VALIDATION_SOURCES,
+    }
 
 
 def build_historical_candidate_snapshots(
@@ -110,8 +224,14 @@ def build_historical_candidate_snapshots(
         research_repository.persist_fundamentals(financial)
     mainline_snapshots = _load_mainline_snapshots(mainline_directory)
     codes = set().union(*(rows.keys() for rows in financial.values()))
-    prices = _load_prices(kline_directory, codes, start, end)
-    calendar = sorted({date.normalize() for frame in prices.values() for date in frame.index})
+    price_start = start - pd.Timedelta(days=420)
+    prices = _load_prices(kline_directory, codes, price_start, end)
+    calendar = sorted({
+        date.normalize()
+        for frame in prices.values()
+        for date in frame.index
+        if start <= date.normalize() <= end
+    })
     snapshots = {}
     for date in calendar:
         period = report_period_for(date)
@@ -156,6 +276,8 @@ def build_historical_candidate_snapshots(
                 "mainline_snapshot_fresh": mainline_fresh,
                 "mainline_boards": mainline_members.get(code, ""),
             }
+            trade_basis = _trade_basis_snapshot(price_frame, date)
+            base.update(trade_basis)
             if (
                 not pd.isna(value_line)
                 and value_line > 0
@@ -167,20 +289,35 @@ def build_historical_candidate_snapshots(
                 value_rows.append({
                     **base,
                     "strategy_part": "1.基本价值线或附近",
-                    "candidate_score": float(quality) + min(max(float(yoy), 0.0), 1.0) * 20,
+                    "candidate_score": (
+                        float(quality)
+                        + min(max(float(yoy), 0.0), 1.0) * 20
+                        + float(trade_basis["trade_basis_score"])
+                    ),
                     "historical_adjustment_check": "price_to_value_between_0.80_and_1.08",
                     "candidate_source": "value_model",
                     "signal_eligible": True,
-                    "selection_reason": "基本价值线模型入选",
+                    "selection_reason": (
+                        "基本价值线模型入选；"
+                        f"{trade_basis['trade_basis_reason']}"
+                    ),
                 })
             if code in mainline_members and quality >= 70 and yoy >= 0.10 and market_cap >= 100:
                 normal_rows.append({
                     **base,
                     "strategy_part": "2.正常基本面选股",
-                    "candidate_score": float(quality) + min(max(float(yoy), 0.0), 1.0) * 20 + 15,
+                    "candidate_score": (
+                        float(quality)
+                        + min(max(float(yoy), 0.0), 1.0) * 20
+                        + 15
+                        + float(trade_basis["trade_basis_score"])
+                    ),
                     "candidate_source": "standard_mainline",
                     "signal_eligible": True,
-                    "selection_reason": "主流标准基本面模型入选",
+                    "selection_reason": (
+                        "主流标准基本面模型入选；"
+                        f"{trade_basis['trade_basis_reason']}"
+                    ),
                 })
         normal_rows.sort(key=lambda item: (-item["candidate_score"], item["code"]))
         by_code = {item["code"]: item for item in value_rows}
@@ -209,6 +346,8 @@ def save_historical_candidate_snapshots(output_directory, snapshots, *, start_da
     manifest_rows = []
     for date, rows in sorted(snapshots.items()):
         frame = pd.DataFrame(rows)
+        if frame.empty:
+            frame = pd.DataFrame(columns=CANDIDATE_SNAPSHOT_COLUMNS)
         path = target / f"candidates_{date}.csv"
         temporary = path.with_suffix(".csv.tmp")
         frame.to_csv(temporary, index=False, encoding="utf-8-sig")
