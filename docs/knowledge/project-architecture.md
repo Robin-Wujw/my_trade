@@ -20,7 +20,7 @@ var/              本地运行数据根目录，整体忽略提交
 
 - `api`：外部数据接口、PushPlus 和连接处理；
 - `core`：路径、配置、完成清单、控制台和分步日志；
-- `storage`：DuckDB 初始化、迁移、K 线和板块仓储；
+- `storage`：DuckDB初始化、迁移、K线/板块仓储及研究回测持久化；
 - `market`：行情、板块和股票数据访问；
 - `indicators`：不联网的指标计算；
 - `strategies`：Formula33、基本面和板块规则；
@@ -99,13 +99,13 @@ Excel/CSV + formula33_completion.json
 `ProjectPaths` 统一管理运行路径：
 
 - `var/cache`：可复用的增量数据和快照；
-- `var/data/my_trade.duckdb`：当前 7 张实际表；
+- `var/data/my_trade.duckdb`：当前13张应用表；
 - `var/state`：完成清单、断点、日报比较基线和两个月突破追踪状态；
 - `var/exports`：市场、选股和日报导出；
 - `var/logs`：运行日志；
 - `var/secrets`：本地凭证。
 
-当前生产是“文件缓存与导出 + DuckDB 部分持久化”的混合状态。DuckDB 已持久化 Formula33 日线、板块和基础运行表，但没有财务事实、派生选股、报告正文或完整全链路运行记录表。不得把目标架构描述成现状。
+当前生产是“文件缓存与导出 + DuckDB结构化持久化”的混合状态。DuckDB已保存Formula33日线、板块、基础运行表、按报告期的财务指标、逐日候选、Formula33阶段、回测运行、逐笔成交和期末持仓；HTML/Markdown报告正文及完整七步生产运行记录仍以文件、完成清单和日志为准。
 
 ## 8. 生产不变量
 

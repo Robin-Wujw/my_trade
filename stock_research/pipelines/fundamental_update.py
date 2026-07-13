@@ -16,6 +16,7 @@ from stock_research.api import akshare as ak
 
 from stock_research.api.pushplus import send_pushplus
 from stock_research.core.as_of import write_metadata
+from stock_research.core.financial_period import latest_visible_report_period
 from stock_research.core.paths import PATHS
 from stock_research.indicators.factors import score_direct
 from stock_research.pipelines.factor_selection import (
@@ -50,18 +51,6 @@ def parse_args(argv=None):
     parser.add_argument("--output", default="")
     parser.add_argument("--alert", action="store_true", help="覆盖率不足时发送PushPlus告警")
     return parser.parse_args(argv)
-
-
-def latest_visible_report_period(as_of_date):
-    date = pd.Timestamp(as_of_date)
-    year = date.year
-    if date >= pd.Timestamp(year=year, month=10, day=31):
-        return f"{year}-09-30"
-    if date >= pd.Timestamp(year=year, month=8, day=31):
-        return f"{year}-06-30"
-    if date >= pd.Timestamp(year=year, month=4, day=30):
-        return f"{year}-03-31"
-    return f"{year - 1}-09-30"
 
 
 def financial_path(code, report_period):

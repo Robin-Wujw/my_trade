@@ -50,6 +50,34 @@ def test_kline_repository_upserts_and_loads_stock_kline(tmp_path):
     ]
 
 
+def test_kline_repository_loads_multiple_codes_in_one_batch(tmp_path):
+    database = Database(tmp_path / "my_trade.duckdb", code_version="test")
+    database.initialize()
+    repository = KlineRepository(database, lock_path=tmp_path / "kline.lock")
+    for code, close in [("sh.600000", 10.5), ("sz.000001", 12.5)]:
+        repository.upsert_stock_kline(
+            "akshare",
+            code,
+            pd.DataFrame([{
+                "date": "2026-07-09", "open": close, "high": close + 1,
+                "low": close - 1, "close": close, "volume": 1000,
+                "tradestatus": "1",
+            }]),
+        )
+
+    loaded = repository.load_stock_klines(
+        "akshare",
+        ["sz.000001", "sh.600000", "missing"],
+        start_date="2026-07-09",
+        end_date="2026-07-09",
+    )
+
+    assert loaded[["code", "close"]].to_dict("records") == [
+        {"code": "sh.600000", "close": 10.5},
+        {"code": "sz.000001", "close": 12.5},
+    ]
+
+
 def test_kline_repository_load_uses_process_lock(tmp_path, monkeypatch):
     database = Database(tmp_path / "my_trade.duckdb", code_version="test")
     database.initialize()

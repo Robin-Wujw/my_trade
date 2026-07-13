@@ -19,6 +19,7 @@ from stock_research.strategies.fundamental_selection import (
     quality_detail,
     value_method_reason,
 )
+from stock_research.strategies.candidate_interface import normalize_candidate_snapshots
 
 
 VALUE_CACHE_DIR = str(PATHS.cache / "q1_value")
@@ -464,6 +465,13 @@ def main(argv=None):
     combined = pd.concat([values, normal], ignore_index=True, sort=False)
     if combined.empty:
         raise SystemExit(f"观察日 {observation_date_text} 没有生成每日基本面候选")
+    combined = pd.DataFrame(
+        normalize_candidate_snapshots(
+            {observation_date_text: combined.to_dict("records")}
+        )[observation_date_text]
+    )
+    if combined.empty:
+        raise SystemExit(f"观察日 {observation_date_text} 没有候选通过统一交易准入")
     result_dates = set(combined["date"].dropna().astype(str))
     if result_dates != {observation_date_text}:
         raise SystemExit(

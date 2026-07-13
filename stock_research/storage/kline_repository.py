@@ -102,36 +102,55 @@ class KlineRepository:
                     time.sleep(delay)
         raise RuntimeError("unreachable")  # pragma: no cover
 
-    def upsert_stock_kline(self, source: str, code: str, frame: pd.DataFrame) -> int:
-        if frame is None or frame.empty:
-            return 0
+    @staticmethod
+    def _normalized_frame(source: str, code: str, frame: pd.DataFrame) -> pd.DataFrame:
+        if frame is None or frame.empty or "date" not in frame.columns:
+            return pd.DataFrame(columns=[
+                "source", "code", "trade_date", "open", "high", "low",
+                "close", "volume", "tradestatus",
+            ])
         data = frame.copy()
-        if "date" not in data.columns:
-            return 0
-        data["date"] = pd.to_datetime(data["date"], errors="coerce")
+        data["trade_date"] = pd.to_datetime(data["date"], errors="coerce").dt.normalize()
         for column in ["open", "high", "low", "close", "volume"]:
-            if column in data.columns:
-                data[column] = pd.to_numeric(data[column], errors="coerce")
-            else:
-                data[column] = pd.NA
+            data[column] = pd.to_numeric(data.get(column), errors="coerce")
         if "tradestatus" not in data.columns:
-            data["tradestatus"] = pd.NA
-        rows = []
-        for _, row in data.dropna(subset=["date", "high", "low", "close"]).iterrows():
-            rows.append(
-                [
-                    str(source),
-                    str(code),
-                    row["date"].date(),
-                    None if pd.isna(row["open"]) else float(row["open"]),
-                    None if pd.isna(row["high"]) else float(row["high"]),
-                    None if pd.isna(row["low"]) else float(row["low"]),
-                    None if pd.isna(row["close"]) else float(row["close"]),
-                    None if pd.isna(row["volume"]) else float(row["volume"]),
-                    None if pd.isna(row["tradestatus"]) else str(row["tradestatus"]),
-                ]
+            data["tradestatus"] = None
+        data["tradestatus"] = data["tradestatus"].astype("string")
+        data["source"] = str(source)
+        data["code"] = str(code)
+        columns = [
+            "source", "code", "trade_date", "open", "high", "low",
+            "close", "volume", "tradestatus",
+        ]
+        return (
+            data.dropna(subset=["trade_date", "high", "low", "close"])[columns]
+            .drop_duplicates(["source", "code", "trade_date"], keep="last")
+            .reset_index(drop=True)
+        )
+
+    @staticmethod
+    def _bulk_insert(connection, data: pd.DataFrame) -> None:
+        if data.empty:
+            return
+        connection.register("incoming_stock_kline", data)
+        try:
+            connection.execute(
+                """
+                INSERT INTO raw.stock_kline_daily (
+                    source, code, trade_date, open, high, low, close, volume,
+                    tradestatus, updated_at
+                )
+                SELECT source, code, trade_date, open, high, low, close, volume,
+                       tradestatus, CURRENT_TIMESTAMP
+                FROM incoming_stock_kline
+                """
             )
-        if not rows:
+        finally:
+            connection.unregister("incoming_stock_kline")
+
+    def upsert_stock_kline(self, source: str, code: str, frame: pd.DataFrame) -> int:
+        data = self._normalized_frame(source, code, frame)
+        if data.empty:
             return 0
 
         def write_rows():
@@ -141,23 +160,20 @@ class KlineRepository:
                 connection = self.database.connect()
                 connection.execute("BEGIN TRANSACTION")
                 transaction_started = True
-                for row in rows:
+                connection.register("incoming_stock_kline_keys", data[["source", "code", "trade_date"]])
+                try:
                     connection.execute(
                         """
-                        DELETE FROM raw.stock_kline_daily
-                        WHERE source = ? AND code = ? AND trade_date = ?
-                        """,
-                        row[:3],
-                    )
-                    connection.execute(
+                        DELETE FROM raw.stock_kline_daily AS stored
+                        USING incoming_stock_kline_keys AS incoming
+                        WHERE stored.source = incoming.source
+                          AND stored.code = incoming.code
+                          AND stored.trade_date = incoming.trade_date
                         """
-                        INSERT INTO raw.stock_kline_daily (
-                            source, code, trade_date, open, high, low,
-                            close, volume, tradestatus, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                        """,
-                        row,
                     )
+                finally:
+                    connection.unregister("incoming_stock_kline_keys")
+                self._bulk_insert(connection, data)
                 connection.execute("COMMIT")
                 transaction_started = False
             except Exception:
@@ -172,7 +188,7 @@ class KlineRepository:
                     connection.close()
 
         self._with_lock_retry(write_rows)
-        return len({row[2] for row in rows})
+        return int(data["trade_date"].nunique())
 
     def replace_stock_kline_range(
         self,
@@ -189,37 +205,13 @@ class KlineRepository:
         if pd.isna(start) or pd.isna(end) or start > end:
             raise ValueError(f"invalid K-line replace range: {start_date}..{end_date}")
 
-        data = frame.copy() if frame is not None else pd.DataFrame()
-        if not data.empty and "date" not in data.columns:
+        raw_data = frame.copy() if frame is not None else pd.DataFrame()
+        if not raw_data.empty and "date" not in raw_data.columns:
             raise ValueError("K-line replacement frame has no date column")
-        if not data.empty:
-            data["date"] = pd.to_datetime(data["date"], errors="coerce")
-            data = data[(data["date"] >= start) & (data["date"] <= end)]
-            for column in ["open", "high", "low", "close", "volume"]:
-                if column in data.columns:
-                    data[column] = pd.to_numeric(data[column], errors="coerce")
-                else:
-                    data[column] = pd.NA
-            if "tradestatus" not in data.columns:
-                data["tradestatus"] = pd.NA
-
-        rows = []
-        for _, row in data.dropna(
-            subset=["date", "high", "low", "close"]
-        ).iterrows():
-            rows.append(
-                [
-                    str(source),
-                    str(code),
-                    row["date"].date(),
-                    None if pd.isna(row["open"]) else float(row["open"]),
-                    None if pd.isna(row["high"]) else float(row["high"]),
-                    None if pd.isna(row["low"]) else float(row["low"]),
-                    None if pd.isna(row["close"]) else float(row["close"]),
-                    None if pd.isna(row["volume"]) else float(row["volume"]),
-                    None if pd.isna(row["tradestatus"]) else str(row["tradestatus"]),
-                ]
-            )
+        if not raw_data.empty:
+            raw_data["date"] = pd.to_datetime(raw_data["date"], errors="coerce")
+            raw_data = raw_data[(raw_data["date"] >= start) & (raw_data["date"] <= end)]
+        data = self._normalized_frame(source, code, raw_data)
 
         def replace_rows():
             connection = None
@@ -236,16 +228,7 @@ class KlineRepository:
                     """,
                     [str(source), str(code), start.date(), end.date()],
                 )
-                for row in rows:
-                    connection.execute(
-                        """
-                        INSERT INTO raw.stock_kline_daily (
-                            source, code, trade_date, open, high, low,
-                            close, volume, tradestatus, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                        """,
-                        row,
-                    )
+                self._bulk_insert(connection, data)
                 connection.execute("COMMIT")
                 transaction_started = False
             except Exception:
@@ -260,7 +243,7 @@ class KlineRepository:
                     connection.close()
 
         self._with_lock_retry(replace_rows)
-        return len({row[2] for row in rows})
+        return int(data["trade_date"].nunique())
 
     def load_stock_kline(
         self,
@@ -288,5 +271,48 @@ class KlineRepository:
         frame = self._with_lock_retry(read_rows)
         if frame.empty:
             return frame
+        frame["date"] = pd.to_datetime(frame.pop("trade_date"), errors="coerce").dt.strftime("%Y-%m-%d")
+        return frame[["date", "code", "open", "high", "low", "close", "volume", "tradestatus"]]
+
+    def load_stock_klines(
+        self,
+        source: str,
+        codes,
+        *,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        """Load a portfolio universe with one DuckDB scan and one connection."""
+        normalized_codes = sorted({str(code) for code in codes if str(code)})
+        if not normalized_codes:
+            return pd.DataFrame(columns=[
+                "date", "code", "open", "high", "low", "close", "volume", "tradestatus",
+            ])
+
+        def read_rows():
+            connection = self.database.connect(read_only=True)
+            code_frame = pd.DataFrame({"code": normalized_codes})
+            connection.register("requested_stock_codes", code_frame)
+            try:
+                return connection.execute(
+                    """
+                    SELECT stored.trade_date, stored.code, stored.open, stored.high,
+                           stored.low, stored.close, stored.volume, stored.tradestatus
+                    FROM raw.stock_kline_daily AS stored
+                    INNER JOIN requested_stock_codes AS requested USING (code)
+                    WHERE stored.source = ?
+                      AND stored.trade_date >= ? AND stored.trade_date <= ?
+                    ORDER BY stored.code, stored.trade_date
+                    """,
+                    [str(source), start_date, end_date],
+                ).fetchdf()
+            finally:
+                connection.close()
+
+        frame = self._with_lock_retry(read_rows)
+        if frame.empty:
+            return pd.DataFrame(columns=[
+                "date", "code", "open", "high", "low", "close", "volume", "tradestatus",
+            ])
         frame["date"] = pd.to_datetime(frame.pop("trade_date"), errors="coerce").dt.strftime("%Y-%m-%d")
         return frame[["date", "code", "open", "high", "low", "close", "volume", "tradestatus"]]

@@ -178,6 +178,100 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        version=5,
+        name="research_backtest_persistence",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS raw.fundamental_metrics (
+                code VARCHAR NOT NULL,
+                report_period DATE NOT NULL,
+                quality_score DOUBLE,
+                earnings_yoy DOUBLE,
+                market_cap DOUBLE,
+                value_line DOUBLE,
+                payload_json VARCHAR NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (code, report_period)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS derived.candidate_snapshots (
+                observation_date DATE NOT NULL,
+                snapshot_version VARCHAR NOT NULL,
+                code VARCHAR NOT NULL,
+                name VARCHAR,
+                selection_rank INTEGER,
+                candidate_score DOUBLE,
+                candidate_source VARCHAR,
+                selection_reason VARCHAR,
+                report_period DATE,
+                signal_eligible BOOLEAN,
+                payload_json VARCHAR NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (observation_date, snapshot_version, code)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS derived.formula33_phase (
+                observation_date DATE NOT NULL,
+                version VARCHAR NOT NULL,
+                phase VARCHAR NOT NULL,
+                window_up_streak INTEGER,
+                window_down_streak INTEGER,
+                payload_json VARCHAR NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (observation_date, version)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS derived.backtest_runs (
+                run_id VARCHAR PRIMARY KEY,
+                requested_start DATE NOT NULL,
+                actual_start DATE,
+                end_date DATE NOT NULL,
+                initial_capital DOUBLE NOT NULL,
+                final_return_pct DOUBLE,
+                maximum_drawdown_pct DOUBLE,
+                final_cash DOUBLE,
+                summary_json VARCHAR NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS derived.backtest_trades (
+                run_id VARCHAR NOT NULL,
+                sequence INTEGER NOT NULL,
+                trade_date DATE NOT NULL,
+                code VARCHAR NOT NULL,
+                name VARCHAR,
+                trade_side VARCHAR NOT NULL,
+                quantity DOUBLE NOT NULL,
+                execution_price DOUBLE,
+                trade_amount DOUBLE,
+                transaction_cost_amount DOUBLE,
+                profit_loss_amount DOUBLE,
+                reason VARCHAR,
+                payload_json VARCHAR NOT NULL,
+                PRIMARY KEY (run_id, sequence)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS derived.backtest_positions (
+                run_id VARCHAR NOT NULL,
+                code VARCHAR NOT NULL,
+                name VARCHAR,
+                quantity DOUBLE,
+                cost DOUBLE,
+                close DOUBLE,
+                market_value DOUBLE,
+                unrealized_pnl_amount DOUBLE,
+                payload_json VARCHAR NOT NULL,
+                PRIMARY KEY (run_id, code)
+            )
+            """,
+        ),
+    ),
 )
 
 

@@ -37,6 +37,7 @@ def test_initialize_creates_schemas_and_is_idempotent(tmp_path):
         (2, "sector_persistence", "test"),
         (3, "stock_kline_persistence", "test"),
         (4, "provider_aware_sector_storage", "test"),
+        (5, "research_backtest_persistence", "test"),
     ]
     assert {
         ("ops", "schema_migrations"),
@@ -46,6 +47,7 @@ def test_initialize_creates_schemas_and_is_idempotent(tmp_path):
         ("raw", "sector_boards"),
         ("raw", "sector_board_history"),
         ("raw", "stock_kline_daily"),
+        ("raw", "fundamental_metrics"),
     } <= tables
 
 

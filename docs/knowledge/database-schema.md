@@ -2,11 +2,11 @@
 
 ## 1. 当前边界
 
-数据库文件固定为 `var/data/my_trade.duckdb`。迁移代码当前只创建 4 个 schema 和 7 张应用表；其中 `core`、`derived` schema 目前没有表。
+数据库文件固定为 `var/data/my_trade.duckdb`。迁移代码当前创建4个schema和13张应用表；`core`保留为后续规范化实体层，`derived`已保存候选、Formula33阶段与回测结果。
 
-生产仍使用 `var/cache` 的增量文件缓存，并输出 CSV、Excel 和 HTML。DuckDB 当前只覆盖运行基础、板块和股票日线持久化，不是全部业务数据的唯一事实源。
+生产仍使用 `var/cache` 的增量文件缓存，并输出CSV、Excel、HTML和Markdown。DuckDB是批量历史查询和结构化研究结果的事实源；报告正文、完成清单与可恢复的接口缓存仍保留在文件系统。
 
-## 2. 实际 7 张表
+## 2. 实际13张表
 
 | 表 | 用途 | 主键 |
 |---|---|---|
@@ -17,8 +17,14 @@
 | `raw.sector_boards` | 板块名称、代码、分组和来源 | `board_name` |
 | `raw.sector_board_history` | 按来源保存的板块日线 | `board_name, trade_date, source` |
 | `raw.stock_kline_daily` | 按来源保存的股票日线 | `source, code, trade_date` |
+| `raw.fundamental_metrics` | 按报告期保存财务选股指标及原始载荷 | `code, report_period` |
+| `derived.candidate_snapshots` | 逐观察日统一候选与排名 | `observation_date, snapshot_version, code` |
+| `derived.formula33_phase` | 逐观察日Formula33阶段与连续计数 | `observation_date, version` |
+| `derived.backtest_runs` | 回测区间、资金、收益、回撤及摘要 | `run_id` |
+| `derived.backtest_trades` | 回测逐笔真实成交 | `run_id, sequence` |
+| `derived.backtest_positions` | 回测期末持仓 | `run_id, code` |
 
-除这 7 张表外，文档不约定任何尚未落地的表或视图。
+除这13张表外，文档不约定任何尚未落地的表或视图。
 
 ## 3. 表字段
 
@@ -91,10 +97,17 @@ volume, tradestatus, updated_at
 
 Formula33 将前复权日线按股票和交易日增量写入该表。复权和提供方口径必须由 `source` 明确区分，不能把未复权数据写成同一来源覆盖。
 
+### 财务与派生研究表
+
+`raw.fundamental_metrics`保存`quality_score/earnings_yoy/market_cap/value_line`及完整`payload_json`。`derived.candidate_snapshots`保存统一候选接口、排名、报告期和原始载荷；`derived.formula33_phase`保存每日阶段与上下行连续计数。
+
+`derived.backtest_runs`保存一次回测摘要；`derived.backtest_trades`按序号保存股票、买卖方向、成交数量、价格、金额、费用、盈亏与原因；`derived.backtest_positions`保存期末股数、成本、市值和浮盈。可读的CSV/Markdown报告仍同时写入`var/backtests`。
+
 ## 4. 写入规则
 
-- 网络抓取可以并发，DuckDB 写入通过仓储集中提交；
-- 日线和板块历史按主键增量 upsert，不因一次接口失败删除已有数据；
+- 网络抓取可以并发，DuckDB写入通过仓储集中提交；
+- 日线组合读取使用单连接批量扫描，日线写入使用DataFrame批量事务，不逐行开连接；
+- 日线和板块历史按主键增量upsert，不因一次接口失败删除已有数据；
 - 板块读取必须检查实际最后交易日、最少历史行数和来源；
 - Formula33 文件缓存与 DuckDB 日线必须保持相同前复权口径；
 - 测试使用独立临时数据库，不能写入生产库；

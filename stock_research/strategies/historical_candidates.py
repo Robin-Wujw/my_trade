@@ -7,23 +7,15 @@ from pathlib import Path
 
 import pandas as pd
 
+from stock_research.core.financial_period import (
+    latest_visible_report_period,
+    visible_report_periods,
+)
+from stock_research.strategies.candidate_interface import normalize_candidate_snapshots
 
-SNAPSHOT_VERSION = "mainline-left-manual-v2"
+
+SNAPSHOT_VERSION = "unified-selection-v3"
 MAX_MAINLINE_AGE_DAYS = 31
-
-
-def _load_manual_candidates(path):
-    if not path or not Path(path).exists():
-        return {}
-    try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return {}
-    return {
-        str(item.get("code") or "").split(".")[-1].zfill(6): str(item.get("name") or "")
-        for item in payload.get("stocks") or []
-        if item.get("code")
-    }
 
 
 def _load_mainline_snapshots(directory):
@@ -54,8 +46,7 @@ def _load_mainline_snapshots(directory):
 
 
 def report_period_for(date) -> str:
-    observation = pd.Timestamp(date).normalize()
-    return "2025-06-30" if observation <= pd.Timestamp("2026-04-30") else "2026-03-31"
+    return latest_visible_report_period(date)
 
 
 def _load_financial_cache(directory, report_period):
@@ -100,8 +91,8 @@ def build_historical_candidate_snapshots(
     kline_directory,
     universe_path,
     mainline_directory=None,
-    manual_candidates_path=None,
     max_mainline_age_days=MAX_MAINLINE_AGE_DAYS,
+    research_repository=None,
 ):
     start = pd.Timestamp(start_date).normalize()
     end = pd.Timestamp(end_date).normalize()
@@ -110,14 +101,15 @@ def build_historical_candidate_snapshots(
         str(row["code"]).split(".")[-1]: str(row.get("code_name") or row["code"])
         for _, row in universe.iterrows()
     }
-    periods = sorted({report_period_for(start), report_period_for(end)})
+    periods = visible_report_periods(start, end)
     financial = {
         period: _load_financial_cache(value_cache_directory, period)
         for period in periods
     }
-    manual = _load_manual_candidates(manual_candidates_path)
+    if research_repository is not None:
+        research_repository.persist_fundamentals(financial)
     mainline_snapshots = _load_mainline_snapshots(mainline_directory)
-    codes = set().union(*(rows.keys() for rows in financial.values()), manual.keys())
+    codes = set().union(*(rows.keys() for rows in financial.values()))
     prices = _load_prices(kline_directory, codes, start, end)
     calendar = sorted({date.normalize() for frame in prices.values() for date in frame.index})
     snapshots = {}
@@ -168,25 +160,27 @@ def build_historical_candidate_snapshots(
                 not pd.isna(value_line)
                 and value_line > 0
                 and 0.80 <= close / value_line <= 1.08
-                and quality >= 50
-                and yoy >= 0
+                and quality >= 70
+                and yoy >= 0.10
                 and market_cap >= 100
             ):
                 value_rows.append({
                     **base,
                     "strategy_part": "1.基本价值线或附近",
-                    "candidate_score": float(quality) + max(0.0, float(yoy)) * 10,
+                    "candidate_score": float(quality) + min(max(float(yoy), 0.0), 1.0) * 20,
                     "historical_adjustment_check": "price_to_value_between_0.80_and_1.08",
-                    "candidate_source": "left_value",
-                    "allow_right": False,
+                    "candidate_source": "value_model",
+                    "signal_eligible": True,
+                    "selection_reason": "基本价值线模型入选",
                 })
             if code in mainline_members and quality >= 70 and yoy >= 0.10 and market_cap >= 100:
                 normal_rows.append({
                     **base,
                     "strategy_part": "2.正常基本面选股",
-                    "candidate_score": float(quality) + min(max(float(yoy), 0.0), 1.0) * 20,
+                    "candidate_score": float(quality) + min(max(float(yoy), 0.0), 1.0) * 20 + 15,
                     "candidate_source": "standard_mainline",
-                    "allow_right": True,
+                    "signal_eligible": True,
+                    "selection_reason": "主流标准基本面模型入选",
                 })
         normal_rows.sort(key=lambda item: (-item["candidate_score"], item["code"]))
         by_code = {item["code"]: item for item in value_rows}
@@ -195,36 +189,17 @@ def build_historical_candidate_snapshots(
             if existing:
                 existing.update({
                     "strategy_part": "1.基本价值线或附近 + 2.主流标准选股",
-                    "candidate_source": "left_value+standard_mainline",
-                    "allow_right": True,
+                    "candidate_source": "value_model+standard_mainline",
+                    "signal_eligible": True,
                     "mainline_boards": item["mainline_boards"],
                     "candidate_score": max(existing["candidate_score"], item["candidate_score"]),
                 })
             else:
                 by_code[item["code"]] = item
-        for code, manual_name in manual.items():
-            market_code = ("sh." if code.startswith(("6", "9")) else "sz.") + code
-            if market_code in by_code:
-                by_code[market_code]["allow_right"] = True
-                by_code[market_code]["candidate_source"] += "+manual"
-                continue
-            metrics = financial.get(period, {}).get(code)
-            price_frame = prices.get(code)
-            if metrics is None or price_frame is None or date not in price_frame.index:
-                continue
-            close = float(price_frame.loc[date]["close"])
-            by_code[market_code] = {
-                "date": date.strftime("%Y-%m-%d"), "code": market_code,
-                "name": manual_name or names.get(code, code), "close": close,
-                "report_period": period, "snapshot_version": SNAPSHOT_VERSION,
-                "financial_point_in_time": False, "strategy_part": "3.人工候选",
-                "candidate_score": float(pd.to_numeric(metrics.get("quality_score"), errors="coerce") or 0),
-                "candidate_source": "manual", "allow_right": True,
-                "mainline_snapshot_date": None if mainline_date is None else mainline_date.strftime("%Y-%m-%d"),
-                "mainline_snapshot_fresh": mainline_fresh,
-                "mainline_boards": mainline_members.get(code, ""),
-            }
-        snapshots[date.strftime("%Y-%m-%d")] = list(by_code.values())
+        selected = normalize_candidate_snapshots(
+            {date.strftime("%Y-%m-%d"): list(by_code.values())}
+        )[date.strftime("%Y-%m-%d")]
+        snapshots[date.strftime("%Y-%m-%d")] = selected
     return snapshots
 
 
@@ -239,15 +214,14 @@ def save_historical_candidate_snapshots(output_directory, snapshots, *, start_da
         frame.to_csv(temporary, index=False, encoding="utf-8-sig")
         temporary.replace(path)
         report_period = rows[0]["report_period"] if rows else report_period_for(date)
-        right_count = sum(bool(row.get("allow_right")) for row in rows)
+        eligible_count = sum(bool(row.get("signal_eligible", True)) for row in rows)
         mainline_date = next((row.get("mainline_snapshot_date") for row in rows if row.get("mainline_snapshot_date")), None)
         mainline_fresh = any(bool(row.get("mainline_snapshot_fresh")) for row in rows)
         manifest_rows.append({
             "date": date,
             "report_period": report_period,
             "candidate_count": len(rows),
-            "right_candidate_count": right_count,
-            "left_only_candidate_count": len(rows) - right_count,
+            "signal_eligible_count": eligible_count,
             "mainline_snapshot_date": mainline_date,
             "mainline_snapshot_fresh": mainline_fresh,
             "financial_point_in_time": False,
@@ -259,13 +233,12 @@ def save_historical_candidate_snapshots(output_directory, snapshots, *, start_da
         "requested_end": str(end_date),
         "snapshot_count": len(manifest_rows),
         "financial_point_in_time": False,
-        "candidate_pool_formula": "(standard selection AND fresh mainline constituents) UNION left value candidates UNION manual watch list",
+        "candidate_pool_formula": "every selection model emits the same candidate interface; no manual candidate injection",
         "selection_standard": {
-            "value": "0.80 <= price/value_line <= 1.08, quality >= 50, yoy >= 0, mktcap >= 100",
+            "value": "0.80 <= price/value_line <= 1.08, quality >= 70, yoy >= 0.10, mktcap >= 100",
             "normal": "quality >= 70, yoy >= 0.10, mktcap >= 100, and member of a fresh dated mainline snapshot",
-            "right": "standard fundamental selection intersected with a fresh dated mainline constituent snapshot, plus manual candidates",
-            "left_execution": "value candidates have allow_right=false and require an explicit calibrated trade plan",
-            "manual": "watch_stocks.json candidates have allow_right=true but still require a technical entry signal",
+            "execution": "all signal_eligible model candidates use the same structure, position and exit engine",
+            "manual": "watch lists and trade plans cannot inject candidates",
             "mainline_max_age_days": MAX_MAINLINE_AGE_DAYS,
         },
         "point_in_time_note": (

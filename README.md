@@ -54,7 +54,7 @@ var/              缓存、数据库、状态、日志和导出（不提交）
 
 ## 持仓与观察股快速提醒
 
-在 `config/watch_stocks.json` 中维护少量持仓或观察股票，在 `config/trade_plans.json` 中维护需要执行的显式网格和仓位计划。快速分析不运行全市场选股：
+在 `config/watch_stocks.json` 中维护少量持仓或观察股票。该清单只服务快速提醒，不能把股票注入生产或回测候选池；`config/trade_plans.json` 只允许为选股模型已经选中的股票补充事先配置的结构锚点。快速分析不运行全市场选股：
 
 ```powershell
 & 'D:\ActionsRunner\my-trade\python\python.exe' -m apps.quick_watch
@@ -72,11 +72,22 @@ var/              缓存、数据库、状态、日志和导出（不提交）
 & 'D:\ActionsRunner\my-trade\python\python.exe' -m apps.portfolio_backtest --start-date 2026-01-01 --end-date 2026-07-10
 ```
 
-冻结第一个交易日的选股结果、不再加入新候选时，增加 `--candidate-mode fixed-first`；默认 `rolling` 使用逐日快照。默认总持股最多5只、右侧最多3只且总仓不超过100%；`--max-positions` 是用于研究的更严格总持股上限，不应误作右侧上限。
+Python 3.11及以上可安装独立的vectorbt核算后端，并对现有策略引擎产生的每笔成交做共享现金重放：
+
+```powershell
+python -m pip install -e ".[vectorbt]"
+python -m apps.portfolio_backtest --start-date 2026-01-01 --vectorbt-cross-check
+```
+
+交叉验证不会重新计算候选、结构锚点或50%/62.5%/75%信号；两套引擎消费完全相同的成交事件，以便把信号差异与现金、费用、部分成交和净值核算差异分开。结果写入常规summary的`vectorbt_cross_check`，逐日对账另存为`*_vectorbt_equity.csv`。详见 `docs/vectorbt-cross-validation.md`。
+
+每次组合回测还会输出 `*_买卖流水.csv` 和 `*_买卖报告.md`，按时间列出股票名称、买卖方向、成交价、股数、成交金额、费用、买卖理由、已实现盈亏与交易后持股，并在末尾列出期末现金和最终持仓。
+
+冻结第一个交易日的选股结果、不再加入新候选时，增加 `--candidate-mode fixed-first`；默认 `rolling` 使用逐日快照。默认最多持有3只且总仓不超过100%；`--max-positions` 可用于研究更严格的持股数量上限。
 
 组合回测默认先断点补齐区间内每日主流板块排名并重建候选快照；已有合格日期直接跳过。历史涨停扩散缺失时只生成明确标记的基础主线分，历史成分使用当前接口代理并保留非严格时点声明。只有已人工验证全部输入时才使用 `--no-refresh-inputs`。持仓与观察股快速分析同样先补个股行情并校验对应数据日的主流快照，门禁失败时不生成买卖意见。
 
-研究快照保存在 `var/backtests/candidate_snapshots/mainline-left-manual-v2/`，每个交易日一个 CSV，并由 `manifest.json` 记录报告期、右侧可用数、左侧观察数、主流快照日期和时点限制。右侧候选为“标准基本面选股与新鲜主流成分的交集”，再并入 `config/watch_stocks.json` 人工观察清单；价值线候选默认只有左侧权限，只有 `config/trade_plans.json` 中经过复权校准的显式网格才能成交。收盘后形成的候选和Formula33状态从下一交易日才生效。财务缓存没有完整公告修订历史，因此结果仍标记为研究回测。
+研究快照保存在 `var/backtests/candidate_snapshots/unified-selection-v3/`。所有选股模型统一输出 `code/name/candidate_score/selection_reason/signal_eligible`，不存在价值线左侧、普通右侧或人工候选三套执行入口。统一门槛为质量分≥70、扣非增长≥10%、市值≥100亿元；增长评分最多按100%计，主线成员加分后每日只保留前10。买卖模型对这些候选统一应用结构锚点、50%/62.5%/75%信号、仓位和止盈止损。收盘后形成的候选和Formula33状态从下一交易日生效。财务缓存没有完整公告修订历史，因此结果仍标记为研究回测。
 
 ## Formula33 缓存与断点
 
@@ -93,7 +104,7 @@ var/              缓存、数据库、状态、日志和导出（不提交）
 ## 运行数据
 
 - `var/cache/`：AkShare 行情、财务、板块缓存和 Formula33 快照。
-- `var/data/my_trade.duckdb`：当前已落地的迁移、运行基础表、板块和日线持久化。
+- `var/data/my_trade.duckdb`：运行基础、板块、股票日线、财务快照、候选快照、Formula33阶段与回测成交/持仓。
 - `var/state/`：完成清单、断点和上一交易日结果。
 - `var/exports/market/`：Formula33 与市场结构结果。
 - `var/exports/selection/`：因子和基本面选股结果。
@@ -101,7 +112,7 @@ var/              缓存、数据库、状态、日志和导出（不提交）
 - `var/logs/`：生产运行日志。
 - `var/secrets/`：本地凭证；生产优先读取环境变量。
 
-DuckDB 当前只有文档列出的 7 张实际表，生产仍同时使用文件缓存和 CSV/Excel/HTML 产物；不能把尚未落地的目标表或查询服务当成现状。
+DuckDB 当前由5个迁移版本创建13张应用表。行情组合读取使用一次批量查询，行情写入使用批量事务；生产仍保留文件缓存和 CSV/Excel/HTML/Markdown 产物作为恢复与人工审阅入口。详见 `docs/knowledge/database-schema.md`。
 
 ## 验证
 
