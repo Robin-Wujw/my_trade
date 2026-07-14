@@ -146,6 +146,30 @@ def test_formula_summary_populates_all_21_rolling_rows():
     assert summary["window_trend_slope"].notna().all()
 
 
+def test_formula_summary_normalizes_timestamp_hit_dates():
+    dates = pd.bdate_range("2024-09-24", periods=70)
+    hits = pd.DataFrame(
+        [
+            {
+                "signal_type": "XG",
+                "date": date,
+                "code": f"sz.{index:06d}",
+            }
+            for index, date in enumerate(dates)
+        ]
+    )
+
+    summary = formula33.build_formula_summary(
+        hits,
+        dates.strftime("%Y-%m-%d").tolist(),
+        output_days=60,
+    )
+
+    assert summary["window_unique_count"].notna().all()
+    assert summary.iloc[-1]["window_unique_count"] == 21
+    assert summary.iloc[-1]["technical_unique_count"] == 21
+
+
 def test_status_distinguishes_traded_suspended_and_unavailable():
     assert classify_observation_status("2026-07-02", "2026-07-02") == "traded"
     assert (

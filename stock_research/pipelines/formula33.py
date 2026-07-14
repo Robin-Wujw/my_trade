@@ -2101,6 +2101,12 @@ def build_formula_summary(
     else:
         xg_hits = hits[hits["signal_type"] == "XG"].copy()
         base_hits = hits[hits["signal_type"] == "BASE"].copy()
+        xg_hits["date"] = pd.to_datetime(
+            xg_hits["date"], errors="coerce",
+        ).dt.strftime("%Y-%m-%d")
+        base_hits["date"] = pd.to_datetime(
+            base_hits["date"], errors="coerce",
+        ).dt.strftime("%Y-%m-%d")
         xg_counts = xg_hits.groupby("date").size().to_dict()
         base_counts = base_hits.groupby("date").size().to_dict()
 
@@ -2110,6 +2116,9 @@ def build_formula_summary(
     compatibility["base_count"] = compatibility["date"].map(
         lambda date: int(base_counts.get(date, 0))
     )
+    compatibility["date"] = pd.to_datetime(
+        compatibility["date"], errors="coerce",
+    ).dt.strftime("%Y-%m-%d")
     compatibility = compatibility.tail(output_days).reset_index(drop=True)
     rolling = build_window_trend(
         xg_hits,
@@ -2120,6 +2129,22 @@ def build_formula_summary(
         current_statuses=current_statuses,
     )
     summary = compatibility.merge(rolling, on="date", how="left")
+    zero_columns = [
+        "window_unique_count",
+        "technical_unique_count",
+        "tradable_unique_count",
+        "window_change",
+        "window_up_streak",
+        "window_down_streak",
+        "trend_up_streak",
+        "trend_down_streak",
+    ]
+    for column in zero_columns:
+        summary[column] = pd.to_numeric(summary[column], errors="coerce").fillna(0).astype(int)
+    summary["window_trend_slope"] = pd.to_numeric(
+        summary["window_trend_slope"], errors="coerce",
+    ).fillna(0.0)
+    summary["trend_signal"] = summary["trend_signal"].fillna("neutral")
     return summary[
         [
             "date",
@@ -2392,15 +2417,24 @@ def main(argv=None):
         effective_end_date = resolve_auto_end_date(
             args.end_date, args.data_ready_time
         )
+        calendar_extra_days = args.history_days + 90
+        if args.start_date:
+            requested_start = pd.to_datetime(args.start_date, errors="coerce")
+            requested_end = pd.to_datetime(effective_end_date, errors="coerce")
+            if pd.notna(requested_start) and pd.notna(requested_end):
+                calendar_extra_days = max(
+                    calendar_extra_days,
+                    int((requested_end.normalize() - requested_start.normalize()).days) + 30,
+                )
         raw_trade_dates = (
-            get_trade_dates(calculation_days + 5, args.history_days + 90)
+            get_trade_dates(calculation_days + 5, calendar_extra_days)
             if bs_available and args.metadata_source in ("baostock", "auto")
             else []
         )
         if len(raw_trade_dates) < calculation_days:
             raw_trade_dates = get_trade_dates_akshare(
                 calculation_days + 5,
-                args.history_days + 90,
+                calendar_extra_days,
                 required_through=effective_end_date,
             )
         if not raw_trade_dates or (
@@ -2659,10 +2693,11 @@ def main(argv=None):
             market_cap_xg_hits = hits_df[
                 hits_df["signal_type"] == "MARKET_CAP_XG"
             ]
+            formal_window_dates = trade_dates[-21:]
             window_base_unique = int(
-                base_hits[base_hits["date"].isin(output_dates)]["code"].nunique()
+                base_hits[base_hits["date"].isin(formal_window_dates)]["code"].nunique()
             )
-            window_xg_hits = xg_hits[xg_hits["date"].isin(output_dates)].copy()
+            window_xg_hits = xg_hits[xg_hits["date"].isin(formal_window_dates)].copy()
             technical_unique_xg_hits, eligible_unique_xg_hits = select_window_unique_hits(
                 window_xg_hits,
                 statuses_df,
@@ -2671,7 +2706,7 @@ def main(argv=None):
             window_xg_unique = int(unique_xg_hits["code"].nunique())
             window_xg_technical_unique = int(technical_unique_xg_hits["code"].nunique())
             window_market_cap_hits = market_cap_xg_hits[
-                market_cap_xg_hits["date"].isin(output_dates)
+                market_cap_xg_hits["date"].isin(formal_window_dates)
             ].copy()
             (
                 market_cap_technical_unique_xg_hits,
@@ -2793,9 +2828,9 @@ def main(argv=None):
         print(f"Excel已保存: {xlsx_path}")
         print(f"CSV已保存: {csv_path}")
         print(summary.to_string(index=False))
-        print(f"最近{len(output_dates)}个交易日BASE去重股票数: {window_base_unique}")
+        print(f"最近21个交易日BASE去重股票数: {window_base_unique}")
         print(
-            f"最近{len(output_dates)}个交易日XG可交易技术去重股票数: "
+            "最近21个交易日XG可交易技术去重股票数: "
             f"{window_xg_unique}"
         )
         print(

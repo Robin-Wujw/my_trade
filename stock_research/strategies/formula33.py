@@ -102,7 +102,7 @@ def build_window_trend(
         "trend_down_streak",
         "trend_signal",
     ]
-    required_dates = window * 2 + output_days - 2
+    required_dates = window
     if len(dates) < required_dates:
         return pd.DataFrame(columns=columns)
 

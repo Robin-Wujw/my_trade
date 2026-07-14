@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 from pandas.errors import EmptyDataError
 
+from stock_research.core.financial_period import visible_report_periods
 from stock_research.core.paths import PATHS
 from stock_research.reporting.backtest_trade_report import (
     build_readable_trade_frame,
@@ -16,6 +17,48 @@ from stock_research.reporting.backtest_trade_report import (
 from stock_research.reporting.trade_reminders import load_trade_plans
 from stock_research.storage import Database, KlineRepository, ResearchRepository
 from stock_research.strategies.portfolio_backtest import run_portfolio_backtest
+
+
+MIN_FINANCIAL_CACHE_FILES = 1_500
+
+
+def _code_to_kline_cache_name(code):
+    text = str(code).strip()
+    if "." in text:
+        market, symbol = text.split(".", 1)
+    else:
+        symbol = text.zfill(6)
+        market = "sh" if symbol.startswith(("6", "9")) else "sz"
+    return f"{market}_{symbol}.csv"
+
+
+def _latest_stock_basic_snapshot(snapshot_directory, end_date):
+    target = pd.Timestamp(end_date).normalize()
+    candidates = []
+    for path in Path(snapshot_directory).glob("stock_basic_*.csv"):
+        date = pd.to_datetime(path.stem.removeprefix("stock_basic_"), errors="coerce")
+        if pd.notna(date) and date.normalize() <= target:
+            candidates.append((date.normalize(), path))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def _load_ipo_dates(stock_basic_path):
+    if not stock_basic_path:
+        return {}
+    try:
+        frame = pd.read_csv(stock_basic_path, dtype={"code": str})
+    except (OSError, ValueError, EmptyDataError):
+        return {}
+    if not {"code", "ipoDate"}.issubset(frame.columns):
+        return {}
+    dates = pd.to_datetime(frame["ipoDate"], errors="coerce")
+    return {
+        str(code): date.normalize()
+        for code, date in zip(frame["code"].astype(str), dates)
+        if pd.notna(date)
+    }
 
 
 def load_candidate_snapshots(directory, start_date, end_date):
@@ -65,6 +108,244 @@ def load_price_frames(codes, directory, *, start_date=None, end_date=None):
     return frames
 
 
+def summarize_kline_cache_coverage(
+    kline_directory,
+    universe_path,
+    start_date,
+    end_date,
+    *,
+    stock_basic_path=None,
+):
+    """Return a cheap full-universe K-line coverage summary for backtest inputs."""
+    try:
+        universe = pd.read_csv(universe_path, dtype={"code": str})
+    except (OSError, ValueError, EmptyDataError):
+        universe = pd.DataFrame()
+    if universe.empty or "code" not in universe:
+        return {
+            "universe_count": 0,
+            "missing_file_count": 0,
+            "missing_start_count": 0,
+            "missing_end_count": 0,
+            "invalid_file_count": 0,
+            "sample": [],
+            "complete": False,
+        }
+    start = pd.Timestamp(start_date).normalize()
+    end = pd.Timestamp(end_date).normalize()
+    summary = {
+        "universe_count": int(universe["code"].dropna().nunique()),
+        "missing_file_count": 0,
+        "missing_start_count": 0,
+        "post_ipo_start_count": 0,
+        "missing_end_count": 0,
+        "no_trade_end_count": 0,
+        "invalid_file_count": 0,
+        "sample": [],
+        "complete": True,
+    }
+    directory = Path(kline_directory)
+    ipo_dates = _load_ipo_dates(stock_basic_path)
+    for code in universe["code"].dropna().astype(str).drop_duplicates():
+        path = directory / _code_to_kline_cache_name(code)
+        reason = ""
+        if not path.is_file():
+            summary["missing_file_count"] += 1
+            reason = "missing_file"
+        else:
+            try:
+                dates = pd.read_csv(path, usecols=["date"], low_memory=False)
+                parsed = pd.to_datetime(dates["date"], errors="coerce").dropna()
+            except (OSError, ValueError, EmptyDataError):
+                parsed = pd.Series(dtype="datetime64[ns]")
+            if parsed.empty:
+                summary["invalid_file_count"] += 1
+                reason = "invalid_file"
+            else:
+                min_date = parsed.min().normalize()
+                max_date = parsed.max().normalize()
+                if min_date > start:
+                    ipo_date = ipo_dates.get(code)
+                    if ipo_date is not None and ipo_date > start:
+                        summary["post_ipo_start_count"] += 1
+                    else:
+                        summary["missing_start_count"] += 1
+                        reason = f"starts_{min_date:%Y-%m-%d}"
+                elif max_date < end:
+                    marker = path.with_name(path.name + ".no-trade.json")
+                    try:
+                        marker_payload = json.loads(marker.read_text(encoding="utf-8"))
+                    except (OSError, ValueError, TypeError):
+                        marker_payload = {}
+                    marker_date = pd.to_datetime(
+                        marker_payload.get("observation_date"), errors="coerce",
+                    )
+                    if pd.notna(marker_date) and marker_date.normalize() == end:
+                        summary["no_trade_end_count"] += 1
+                    else:
+                        summary["missing_end_count"] += 1
+                        reason = f"ends_{max_date:%Y-%m-%d}"
+        if reason:
+            summary["complete"] = False
+            if len(summary["sample"]) < 10:
+                summary["sample"].append(f"{code}:{reason}")
+    return summary
+
+
+def invalidate_formula33_manifest_if_kline_cache_incomplete(
+    *,
+    manifest_path,
+    kline_directory,
+    universe_path,
+    start_date,
+    end_date,
+):
+    stock_basic_path = _latest_stock_basic_snapshot(
+        Path(universe_path).parent / "formula33_snapshots",
+        end_date,
+    )
+    coverage = summarize_kline_cache_coverage(
+        kline_directory,
+        universe_path,
+        start_date,
+        end_date,
+        stock_basic_path=stock_basic_path,
+    )
+    if coverage["complete"]:
+        print(
+            "[portfolio_backtest][preflight] K-line cache covers requested "
+            f"range for {coverage['universe_count']} symbols",
+            flush=True,
+        )
+        return coverage
+    path = Path(manifest_path)
+    if path.exists():
+        path.unlink()
+    print(
+        "[portfolio_backtest][preflight] K-line cache is incomplete; "
+        "Formula33 manifest was invalidated so the refresh will auto-fetch "
+        "missing bars. "
+        f"missing_file={coverage['missing_file_count']} "
+        f"missing_start={coverage['missing_start_count']} "
+        f"missing_end={coverage['missing_end_count']} "
+        f"invalid={coverage['invalid_file_count']} "
+        f"sample={coverage['sample']}",
+        flush=True,
+    )
+    return coverage
+
+
+def repair_formula33_kline_metadata(source, universe_path):
+    from stock_research.pipelines import formula33
+
+    try:
+        universe = pd.read_csv(universe_path, dtype={"code": str})
+    except (OSError, ValueError, EmptyDataError):
+        return {"checked": 0, "repaired": 0}
+    checked = repaired = 0
+    for code in universe.get("code", pd.Series(dtype=str)).dropna().astype(str).drop_duplicates():
+        frame = formula33.load_cached_kline(source, code)
+        if frame.empty:
+            continue
+        checked += 1
+        if not formula33.kline_cache_metadata_matches(source, code, frame):
+            formula33.save_kline_cache_metadata(source, code, frame)
+            repaired += 1
+    print(
+        "[portfolio_backtest][preflight] Formula33 K-line metadata checked "
+        f"{checked} symbols; repaired={repaired}",
+        flush=True,
+    )
+    return {"checked": checked, "repaired": repaired}
+
+
+def report_period_visible_date(report_period):
+    period = pd.Timestamp(report_period).normalize()
+    year = int(period.year)
+    if period.month == 3 and period.day == 31:
+        return pd.Timestamp(year=year, month=4, day=30)
+    if period.month == 6 and period.day == 30:
+        return pd.Timestamp(year=year, month=8, day=31)
+    if period.month == 9 and period.day == 30:
+        return pd.Timestamp(year=year, month=10, day=31)
+    if period.month == 12 and period.day == 31:
+        return pd.Timestamp(year=year + 1, month=4, day=30)
+    return period
+
+
+def financial_cache_file_count(directory, report_period):
+    suffix = pd.Timestamp(report_period).strftime("%Y%m%d")
+    return sum(1 for _path in Path(directory).glob(f"*_{suffix}.json"))
+
+
+def ensure_financial_cache_for_backtest(args):
+    from stock_research.pipelines import fundamental_update
+
+    periods = visible_report_periods(args.start_date, args.end_date)
+    if not periods:
+        raise RuntimeError("no visible financial report periods found for backtest range")
+    for period in periods:
+        count = financial_cache_file_count(PATHS.cache / "q1_value", period)
+        if count >= MIN_FINANCIAL_CACHE_FILES:
+            print(
+                "[portfolio_backtest][preflight] financial cache "
+                f"{period} files={count}",
+                flush=True,
+            )
+            continue
+        visible_date = report_period_visible_date(period)
+        as_of_date = max(pd.Timestamp(args.start_date), visible_date)
+        if as_of_date > pd.Timestamp(args.end_date):
+            as_of_date = pd.Timestamp(args.end_date)
+        print(
+            "[portfolio_backtest][preflight] financial cache missing or thin; "
+            f"auto-fetch period={period} current_files={count} "
+            f"as_of={as_of_date:%Y-%m-%d}",
+            flush=True,
+        )
+        try:
+            fundamental_update.main([
+                "--report-period", period,
+                "--as-of-date", as_of_date.strftime("%Y-%m-%d"),
+                "--max-updates", "0",
+                "--workers", "4",
+                "--retries", "3",
+            ])
+        except SystemExit as exc:
+            if exc.code not in (None, 0):
+                raise RuntimeError(
+                    f"financial cache auto-fetch failed for {period} with exit {exc.code}"
+                ) from exc
+        refreshed_count = financial_cache_file_count(PATHS.cache / "q1_value", period)
+        if refreshed_count < MIN_FINANCIAL_CACHE_FILES:
+            raise RuntimeError(
+                "financial cache remains incomplete after auto-fetch: "
+                f"period={period} files={refreshed_count} "
+                f"minimum={MIN_FINANCIAL_CACHE_FILES}"
+            )
+        print(
+            "[portfolio_backtest][preflight] financial cache ready "
+            f"{period} files={refreshed_count}",
+            flush=True,
+        )
+
+
+def candidate_manifest_empty_dates(candidate_directory):
+    path = Path(candidate_directory) / "manifest.json"
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return []
+    rows = manifest.get("snapshots", [])
+    if not isinstance(rows, list):
+        return []
+    return [
+        str(row.get("date"))
+        for row in rows
+        if int(row.get("candidate_count") or 0) <= 0
+    ]
+
+
 def default_data_end_date(now=None):
     """Return the latest session whose daily bar should already be available."""
     current = pd.Timestamp(now or pd.Timestamp.now())
@@ -74,6 +355,22 @@ def default_data_end_date(now=None):
     elif current.hour < 16:
         target = target - pd.offsets.BDay(1)
     return target.strftime("%Y-%m-%d")
+
+
+def formula33_refresh_window_args(start_date, end_date):
+    """Size Formula33's calendar and history windows to cover a backtest range."""
+    start = pd.Timestamp(start_date).normalize()
+    end = pd.Timestamp(end_date).normalize()
+    if start > end:
+        raise ValueError(f"invalid date range: {start_date}..{end_date}")
+    calendar_days = max(0, (end - start).days)
+    # Formula33 uses lookback for output rows and history-days for both raw
+    # calendar depth and per-symbol K-line depth.  Keep both large enough for
+    # the requested range while leaving the model's own indicator warmup intact.
+    return {
+        "lookback": max(21, calendar_days + 30),
+        "history_days": 420,
+    }
 
 
 def refresh_backtest_inputs(args):
@@ -86,16 +383,28 @@ def refresh_backtest_inputs(args):
     from stock_research.pipelines import formula33
     from stock_research.core.completion_manifest import CompletionManifest
 
+    kline_coverage = invalidate_formula33_manifest_if_kline_cache_incomplete(
+        manifest_path=formula33.FORMULA33_MANIFEST_FILE,
+        kline_directory=PATHS.cache / "formula33_kline" / "akshare",
+        universe_path=PATHS.cache / "stock_universe.csv",
+        start_date=args.start_date,
+        end_date=args.end_date,
+    )
+    if kline_coverage["complete"]:
+        repair_formula33_kline_metadata("akshare", PATHS.cache / "stock_universe.csv")
+    formula_window = formula33_refresh_window_args(args.start_date, args.end_date)
     print(
         "[portfolio_backtest][refresh] first refresh full-market K-lines "
-        f"through {args.end_date}",
+        f"through {args.end_date} "
+        f"lookback={formula_window['lookback']} "
+        f"history_days={formula_window['history_days']}",
         flush=True,
     )
     formula33.main([
         "--start-date", args.start_date,
         "--end-date", args.end_date,
-        "--lookback", "21",
-        "--history-days", "420",
+        "--lookback", str(formula_window["lookback"]),
+        "--history-days", str(formula_window["history_days"]),
         "--workers", "8",
         "--maxtasksperchild", "1000",
         "--retries", "3",
@@ -121,6 +430,7 @@ def refresh_backtest_inputs(args):
         f"{args.end_date}",
         flush=True,
     )
+    ensure_financial_cache_for_backtest(args)
 
     # Candidate dates come from the refreshed K-line calendar.  Build once to
     # establish that calendar, rebuild matching dated mainline snapshots, then
@@ -132,20 +442,30 @@ def refresh_backtest_inputs(args):
         "--output-directory", args.candidate_directory,
     ]
     rebuild_candidate_history.main(candidate_args)
-    print(
-        "[portfolio_backtest][refresh] rebuild missing dated mainline snapshots",
-        flush=True,
-    )
-    rebuild_mainline_history.main([
-        "--start-date", args.start_date,
-        "--end-date", args.end_date,
-        "--candidate-directory", args.candidate_directory,
-    ])
-    print(
-        "[portfolio_backtest][refresh] rebuild candidates with refreshed mainline",
-        flush=True,
-    )
-    rebuild_candidate_history.main(candidate_args)
+    empty_candidate_dates = candidate_manifest_empty_dates(args.candidate_directory)
+    if empty_candidate_dates:
+        print(
+            "[portfolio_backtest][refresh] candidate history has empty days; "
+            f"rebuild mainline fallback count={len(empty_candidate_dates)} "
+            f"sample={empty_candidate_dates[:10]}",
+            flush=True,
+        )
+        rebuild_mainline_history.main([
+            "--start-date", args.start_date,
+            "--end-date", args.end_date,
+            "--candidate-directory", args.candidate_directory,
+        ])
+        print(
+            "[portfolio_backtest][refresh] rebuild candidates with refreshed mainline",
+            flush=True,
+        )
+        rebuild_candidate_history.main(candidate_args)
+    else:
+        print(
+            "[portfolio_backtest][refresh] candidate history is non-empty "
+            "for every trade day; skip slow mainline fallback rebuild",
+            flush=True,
+        )
     print("[portfolio_backtest][refresh] rebuild Formula33 phase history", flush=True)
     rebuild_formula_history.main([
         "--start-date", args.start_date,

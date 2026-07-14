@@ -2,8 +2,14 @@ import pandas as pd
 import pytest
 
 from apps.portfolio_backtest import (
+    candidate_manifest_empty_dates,
     default_data_end_date,
+    financial_cache_file_count,
+    formula33_refresh_window_args,
+    invalidate_formula33_manifest_if_kline_cache_incomplete,
     load_candidate_snapshots,
+    report_period_visible_date,
+    summarize_kline_cache_coverage,
     validate_backtest_input_coverage,
 )
 from stock_research.indicators.price_structure import (
@@ -616,6 +622,13 @@ def test_default_data_end_date_waits_until_daily_bar_is_ready():
     assert default_data_end_date("2026-07-12 18:00") == "2026-07-10"
 
 
+def test_formula33_refresh_window_covers_long_backtest_range():
+    window = formula33_refresh_window_args("2024-09-24", "2026-07-13")
+
+    assert window["lookback"] >= 680
+    assert window["history_days"] == 420
+
+
 def test_backtest_input_coverage_must_match_between_candidates_and_formula():
     snapshots = {"2026-07-10": [{"code": "A"}]}
     formula = pd.DataFrame({"date": ["2026-07-09", "2026-07-10"]})
@@ -666,6 +679,105 @@ def test_required_financial_periods_must_exist_for_candidate_history():
             "2024-06-30": {},
             "2024-09-30": {"600000": {"quality_score": 80}},
         })
+
+
+def test_kline_preflight_invalidates_manifest_when_cache_starts_late(tmp_path):
+    universe = tmp_path / "stock_universe.csv"
+    universe.write_text("code\nsh.600000\nsz.000001\n", encoding="utf-8")
+    kline_dir = tmp_path / "kline"
+    kline_dir.mkdir()
+    pd.DataFrame({"date": ["2024-09-25", "2024-09-26"]}).to_csv(
+        kline_dir / "sh_600000.csv", index=False,
+    )
+    pd.DataFrame({"date": ["2024-09-24", "2024-09-26"]}).to_csv(
+        kline_dir / "sz_000001.csv", index=False,
+    )
+    manifest = tmp_path / "formula33.json"
+    manifest.write_text("{}", encoding="utf-8")
+
+    coverage = invalidate_formula33_manifest_if_kline_cache_incomplete(
+        manifest_path=manifest,
+        kline_directory=kline_dir,
+        universe_path=universe,
+        start_date="2024-09-24",
+        end_date="2024-09-26",
+    )
+
+    assert coverage["complete"] is False
+    assert coverage["missing_start_count"] == 1
+    assert not manifest.exists()
+
+
+def test_kline_coverage_summary_accepts_complete_cache(tmp_path):
+    universe = tmp_path / "stock_universe.csv"
+    universe.write_text("code\nsh.600000\n", encoding="utf-8")
+    kline_dir = tmp_path / "kline"
+    kline_dir.mkdir()
+    pd.DataFrame({"date": ["2024-09-24", "2024-09-26"]}).to_csv(
+        kline_dir / "sh_600000.csv", index=False,
+    )
+
+    coverage = summarize_kline_cache_coverage(
+        kline_dir, universe, "2024-09-24", "2024-09-26",
+    )
+
+    assert coverage["complete"] is True
+    assert coverage["universe_count"] == 1
+
+
+def test_kline_coverage_summary_allows_post_start_ipo(tmp_path):
+    universe = tmp_path / "stock_universe.csv"
+    universe.write_text("code\nsz.001220\n", encoding="utf-8")
+    basic = tmp_path / "stock_basic_20260713.csv"
+    basic.write_text("code,ipoDate\nsz.001220,2026-02-03\n", encoding="utf-8")
+    kline_dir = tmp_path / "kline"
+    kline_dir.mkdir()
+    pd.DataFrame({"date": ["2026-02-03", "2026-07-13"]}).to_csv(
+        kline_dir / "sz_001220.csv", index=False,
+    )
+
+    coverage = summarize_kline_cache_coverage(
+        kline_dir,
+        universe,
+        "2024-09-24",
+        "2026-07-13",
+        stock_basic_path=basic,
+    )
+
+    assert coverage["complete"] is True
+    assert coverage["post_ipo_start_count"] == 1
+    assert coverage["missing_start_count"] == 0
+
+
+def test_financial_cache_period_helpers(tmp_path):
+    (tmp_path / "600000_20240630.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "000001_20240630.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "000001_20240930.json").write_text("{}", encoding="utf-8")
+
+    assert report_period_visible_date("2024-06-30") == pd.Timestamp("2024-08-31")
+    assert report_period_visible_date("2024-09-30") == pd.Timestamp("2024-10-31")
+    assert financial_cache_file_count(tmp_path, "2024-06-30") == 2
+    assert financial_cache_file_count(tmp_path, "2024-09-30") == 1
+
+
+def test_candidate_manifest_empty_dates(tmp_path):
+    (tmp_path / "manifest.json").write_text(
+        """
+        {
+          "snapshots": [
+            {"date": "2024-09-24", "candidate_count": 10},
+            {"date": "2024-09-25", "candidate_count": 0},
+            {"date": "2024-09-26", "candidate_count": null}
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    assert candidate_manifest_empty_dates(tmp_path) == [
+        "2024-09-25",
+        "2024-09-26",
+    ]
 
 
 def test_empty_candidate_snapshot_file_loads_as_zero_candidates(tmp_path):
