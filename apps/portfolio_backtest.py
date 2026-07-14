@@ -154,24 +154,74 @@ def refresh_backtest_inputs(args):
     ])
 
 
-def validate_backtest_input_coverage(snapshots, formula, requested_end):
-    """Fail closed when derived inputs do not share the latest available session."""
+def validate_backtest_input_coverage(
+    snapshots,
+    formula,
+    requested_start,
+    requested_end,
+):
+    """Fail closed when every trading day lacks a fresh non-empty selection."""
     if not snapshots:
         raise RuntimeError("candidate snapshots are empty after input refresh")
     if formula.empty or "date" not in formula:
         raise RuntimeError("Formula33 phase history is empty after input refresh")
-    candidate_end = max(pd.Timestamp(value).normalize() for value in snapshots)
     formula_dates = pd.to_datetime(formula["date"], errors="coerce").dropna()
     if formula_dates.empty:
         raise RuntimeError("Formula33 phase history contains no valid dates")
-    formula_end = formula_dates.max().normalize()
+    requested_start_date = pd.Timestamp(requested_start).normalize()
+    requested_end_date = pd.Timestamp(requested_end).normalize()
+    formula_trade_dates = {
+        date.normalize()
+        for date in formula_dates
+        if requested_start_date <= date.normalize() <= requested_end_date
+    }
+    if not formula_trade_dates:
+        raise RuntimeError("Formula33 phase history has no dates in requested backtest range")
+    snapshot_trade_dates = {
+        pd.Timestamp(value).normalize()
+        for value in snapshots
+        if requested_start_date <= pd.Timestamp(value).normalize() <= requested_end_date
+    }
+    missing_snapshot_dates = sorted(formula_trade_dates - snapshot_trade_dates)
+    extra_snapshot_dates = sorted(snapshot_trade_dates - formula_trade_dates)
+    if missing_snapshot_dates:
+        preview = ", ".join(date.strftime("%Y-%m-%d") for date in missing_snapshot_dates[:10])
+        raise RuntimeError(
+            "candidate snapshots do not cover every Formula33 trade date; "
+            f"missing={preview}"
+        )
+    if extra_snapshot_dates:
+        preview = ", ".join(date.strftime("%Y-%m-%d") for date in extra_snapshot_dates[:10])
+        raise RuntimeError(
+            "candidate snapshots contain dates outside Formula33 trade calendar; "
+            f"extra={preview}"
+        )
+    empty_candidate_dates = sorted(
+        date for date in formula_trade_dates
+        if not snapshots.get(date.strftime("%Y-%m-%d"))
+    )
+    if empty_candidate_dates:
+        preview = ", ".join(date.strftime("%Y-%m-%d") for date in empty_candidate_dates[:10])
+        raise RuntimeError(
+            "candidate snapshots contain empty selection days; "
+            f"every backtest day must have a fresh non-empty selection result. empty={preview}"
+        )
+    candidate_end = max(snapshot_trade_dates)
+    formula_end = max(formula_trade_dates)
     if formula_end != candidate_end:
         raise RuntimeError(
             "backtest input dates disagree: "
             f"candidate_end={candidate_end:%Y-%m-%d} "
             f"formula_end={formula_end:%Y-%m-%d}"
         )
-    if candidate_end > pd.Timestamp(requested_end).normalize():
+    formula_start = min(formula_trade_dates)
+    if min(snapshot_trade_dates) != formula_start:
+        raise RuntimeError(
+            "candidate snapshot coverage must start on the first Formula33 trade date: "
+            f"candidate_start={min(snapshot_trade_dates):%Y-%m-%d} "
+            f"formula_start={formula_start:%Y-%m-%d}"
+        )
+    if candidate_end > requested_end_date:
         raise RuntimeError("backtest input coverage unexpectedly exceeds requested end")
     return candidate_end.strftime("%Y-%m-%d")
 
@@ -294,7 +344,7 @@ def main(argv=None):
     )
     formula = pd.read_csv(args.formula_history)
     input_coverage_end = validate_backtest_input_coverage(
-        coverage_snapshots, formula, args.end_date,
+        coverage_snapshots, formula, args.start_date, args.end_date,
     )
     phases = {
         str(row["date"]): {

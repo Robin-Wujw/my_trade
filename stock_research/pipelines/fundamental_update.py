@@ -319,6 +319,15 @@ def build_snapshot(universe, markets, report_period, industry_map):
     return result
 
 
+def value_market_cap_eligible_count(snapshot) -> int:
+    method = snapshot.get("method", pd.Series(dtype=str))
+    market_cap = pd.to_numeric(
+        snapshot.get("mktcap", pd.Series(dtype=float)),
+        errors="coerce",
+    )
+    return int((method.eq("VALUE") & market_cap.ge(VALUE_MIN_MARKET_CAP)).sum())
+
+
 def main(argv=None):
     args = parse_args(argv)
     args.report_period = args.report_period or os.environ.get("REPORT_PERIOD") or latest_visible_report_period(args.as_of_date)
@@ -364,12 +373,7 @@ def main(argv=None):
         "universe_source": universe_source,
         "industry_source": industry_source,
         "industry_known_count": int(snapshot.get("industry_known", pd.Series(dtype=bool)).sum()),
-        "value_market_cap_eligible_count": int(
-            (
-                snapshot.get("method", pd.Series(dtype=str)).eq("VALUE")
-                & pd.to_numeric(snapshot.get("mktcap"), errors="coerce").ge(VALUE_MIN_MARKET_CAP)
-            ).sum()
-        ),
+        "value_market_cap_eligible_count": value_market_cap_eligible_count(snapshot),
     }
     write_metadata(output, metadata)
     coverage_path = os.path.join(SNAPSHOT_DIR, "latest_coverage.json")

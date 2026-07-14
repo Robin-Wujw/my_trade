@@ -95,6 +95,19 @@ def _load_financial_cache(directory, report_period):
     return rows
 
 
+def _validate_required_financial_periods(financial_by_period):
+    missing = [
+        period for period, rows in sorted(financial_by_period.items())
+        if not rows
+    ]
+    if missing:
+        raise RuntimeError(
+            "missing financial cache for required point-in-time report periods: "
+            + ", ".join(missing)
+            + ". Run fundamental_update for these periods before rebuilding backtest candidates."
+        )
+
+
 def _load_prices(kline_directory, codes, start_date, end_date):
     result = {}
     for code in codes:
@@ -220,6 +233,7 @@ def build_historical_candidate_snapshots(
         period: _load_financial_cache(value_cache_directory, period)
         for period in periods
     }
+    _validate_required_financial_periods(financial)
     if research_repository is not None:
         research_repository.persist_fundamentals(financial)
     mainline_snapshots = _load_mainline_snapshots(mainline_directory)

@@ -13,6 +13,7 @@ from stock_research.indicators.price_structure import (
 )
 from stock_research.strategies.historical_candidates import (
     _trade_basis_snapshot,
+    _validate_required_financial_periods,
     report_period_for,
 )
 from stock_research.strategies.candidate_interface import normalize_candidate_snapshots
@@ -616,19 +617,55 @@ def test_default_data_end_date_waits_until_daily_bar_is_ready():
 
 
 def test_backtest_input_coverage_must_match_between_candidates_and_formula():
-    snapshots = {"2026-07-10": []}
+    snapshots = {"2026-07-10": [{"code": "A"}]}
     formula = pd.DataFrame({"date": ["2026-07-09", "2026-07-10"]})
 
     assert validate_backtest_input_coverage(
-        snapshots, formula, "2026-07-10",
+        snapshots, formula, "2026-07-10", "2026-07-10",
     ) == "2026-07-10"
 
-    with pytest.raises(RuntimeError, match="input dates disagree"):
+    with pytest.raises(RuntimeError, match="no dates in requested backtest range"):
         validate_backtest_input_coverage(
             snapshots,
             pd.DataFrame({"date": ["2026-07-09"]}),
             "2026-07-10",
+            "2026-07-10",
         )
+
+
+def test_backtest_input_coverage_rejects_empty_candidate_days():
+    formula = pd.DataFrame({"date": ["2024-09-24", "2024-09-25"]})
+
+    with pytest.raises(RuntimeError, match="empty selection days"):
+        validate_backtest_input_coverage(
+            {
+                "2024-09-24": [{"code": "A"}],
+                "2024-09-25": [],
+            },
+            formula,
+            "2024-09-24",
+            "2024-09-25",
+        )
+
+
+def test_backtest_input_coverage_requires_every_formula_trade_date():
+    formula = pd.DataFrame({"date": ["2024-09-24", "2024-09-25"]})
+
+    with pytest.raises(RuntimeError, match="do not cover every Formula33 trade date"):
+        validate_backtest_input_coverage(
+            {"2024-09-24": [{"code": "A"}]},
+            formula,
+            "2024-09-24",
+            "2024-09-25",
+        )
+
+
+def test_required_financial_periods_must_exist_for_candidate_history():
+    with pytest.raises(RuntimeError, match="2024-06-30"):
+        _validate_required_financial_periods({
+            "2024-06-30": {},
+            "2024-09-30": {"600000": {"quality_score": 80}},
+        })
 
 
 def test_empty_candidate_snapshot_file_loads_as_zero_candidates(tmp_path):
