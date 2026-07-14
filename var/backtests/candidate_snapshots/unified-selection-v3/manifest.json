@@ -1,0 +1,4358 @@
+{
+  "version": "unified-selection-v3",
+  "requested_start": "2024-09-24",
+  "requested_end": "2026-07-13",
+  "snapshot_count": 434,
+  "financial_point_in_time": false,
+  "candidate_pool_formula": "every selection model emits the same candidate interface; no manual candidate injection",
+  "selection_standard": {
+    "value": "0.80 <= price/value_line <= 1.08, quality >= 70, yoy >= 0.10, mktcap >= 100",
+    "normal": "quality >= 70, yoy >= 0.10, mktcap >= 100, and member of a fresh dated mainline snapshot",
+    "execution": "all signal_eligible model candidates use the same structure, position and exit engine",
+    "manual": "watch lists and trade plans cannot inject candidates",
+    "mainline_max_age_days": 31
+  },
+  "point_in_time_note": "行情严格按观察日截断；财务报告期保守选择，但缺少逐公告修订历史，不得声明为严格财务时点回测。",
+  "snapshots": [
+    {
+      "date": "2024-09-24",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-09-24.csv"
+    },
+    {
+      "date": "2024-09-25",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-09-25.csv"
+    },
+    {
+      "date": "2024-09-26",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-09-26.csv"
+    },
+    {
+      "date": "2024-09-27",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-09-27.csv"
+    },
+    {
+      "date": "2024-09-30",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-09-30.csv"
+    },
+    {
+      "date": "2024-10-08",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-10-08.csv"
+    },
+    {
+      "date": "2024-10-09",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-10-09.csv"
+    },
+    {
+      "date": "2024-10-10",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-10-10.csv"
+    },
+    {
+      "date": "2024-10-11",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-10-11.csv"
+    },
+    {
+      "date": "2024-10-14",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-10-14.csv"
+    },
+    {
+      "date": "2024-10-15",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-10-15.csv"
+    },
+    {
+      "date": "2024-10-16",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-10-16.csv"
+    },
+    {
+      "date": "2024-10-17",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-10-17.csv"
+    },
+    {
+      "date": "2024-10-18",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-10-18.csv"
+    },
+    {
+      "date": "2024-10-21",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-10-21.csv"
+    },
+    {
+      "date": "2024-10-22",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-10-22.csv"
+    },
+    {
+      "date": "2024-10-23",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-10-23.csv"
+    },
+    {
+      "date": "2024-10-24",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-10-24.csv"
+    },
+    {
+      "date": "2024-10-25",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-10-25.csv"
+    },
+    {
+      "date": "2024-10-28",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-10-28.csv"
+    },
+    {
+      "date": "2024-10-29",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-10-29.csv"
+    },
+    {
+      "date": "2024-10-30",
+      "report_period": "2024-06-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-10-30.csv"
+    },
+    {
+      "date": "2024-10-31",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-10-31.csv"
+    },
+    {
+      "date": "2024-11-01",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-01.csv"
+    },
+    {
+      "date": "2024-11-04",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-04.csv"
+    },
+    {
+      "date": "2024-11-05",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-05.csv"
+    },
+    {
+      "date": "2024-11-06",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-06.csv"
+    },
+    {
+      "date": "2024-11-07",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-07.csv"
+    },
+    {
+      "date": "2024-11-08",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-08.csv"
+    },
+    {
+      "date": "2024-11-11",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-11.csv"
+    },
+    {
+      "date": "2024-11-12",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-12.csv"
+    },
+    {
+      "date": "2024-11-13",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-13.csv"
+    },
+    {
+      "date": "2024-11-14",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-14.csv"
+    },
+    {
+      "date": "2024-11-15",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-15.csv"
+    },
+    {
+      "date": "2024-11-18",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-18.csv"
+    },
+    {
+      "date": "2024-11-19",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-19.csv"
+    },
+    {
+      "date": "2024-11-20",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-20.csv"
+    },
+    {
+      "date": "2024-11-21",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-21.csv"
+    },
+    {
+      "date": "2024-11-22",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-22.csv"
+    },
+    {
+      "date": "2024-11-25",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-25.csv"
+    },
+    {
+      "date": "2024-11-26",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-26.csv"
+    },
+    {
+      "date": "2024-11-27",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-27.csv"
+    },
+    {
+      "date": "2024-11-28",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-28.csv"
+    },
+    {
+      "date": "2024-11-29",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-11-29.csv"
+    },
+    {
+      "date": "2024-12-02",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-02.csv"
+    },
+    {
+      "date": "2024-12-03",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-03.csv"
+    },
+    {
+      "date": "2024-12-04",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-04.csv"
+    },
+    {
+      "date": "2024-12-05",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-05.csv"
+    },
+    {
+      "date": "2024-12-06",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-06.csv"
+    },
+    {
+      "date": "2024-12-09",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-09.csv"
+    },
+    {
+      "date": "2024-12-10",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-10.csv"
+    },
+    {
+      "date": "2024-12-11",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-11.csv"
+    },
+    {
+      "date": "2024-12-12",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-12.csv"
+    },
+    {
+      "date": "2024-12-13",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-13.csv"
+    },
+    {
+      "date": "2024-12-16",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-16.csv"
+    },
+    {
+      "date": "2024-12-17",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-17.csv"
+    },
+    {
+      "date": "2024-12-18",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-18.csv"
+    },
+    {
+      "date": "2024-12-19",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-19.csv"
+    },
+    {
+      "date": "2024-12-20",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-20.csv"
+    },
+    {
+      "date": "2024-12-23",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-23.csv"
+    },
+    {
+      "date": "2024-12-24",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-24.csv"
+    },
+    {
+      "date": "2024-12-25",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-25.csv"
+    },
+    {
+      "date": "2024-12-26",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-26.csv"
+    },
+    {
+      "date": "2024-12-27",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-27.csv"
+    },
+    {
+      "date": "2024-12-30",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-30.csv"
+    },
+    {
+      "date": "2024-12-31",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2024-12-31.csv"
+    },
+    {
+      "date": "2025-01-02",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-01-02.csv"
+    },
+    {
+      "date": "2025-01-03",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-01-03.csv"
+    },
+    {
+      "date": "2025-01-06",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-01-06.csv"
+    },
+    {
+      "date": "2025-01-07",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-01-07.csv"
+    },
+    {
+      "date": "2025-01-08",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-01-08.csv"
+    },
+    {
+      "date": "2025-01-09",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-01-09.csv"
+    },
+    {
+      "date": "2025-01-10",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-01-10.csv"
+    },
+    {
+      "date": "2025-01-13",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-01-13.csv"
+    },
+    {
+      "date": "2025-01-14",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-01-14.csv"
+    },
+    {
+      "date": "2025-01-15",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-01-15.csv"
+    },
+    {
+      "date": "2025-01-16",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-01-16.csv"
+    },
+    {
+      "date": "2025-01-17",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-01-17.csv"
+    },
+    {
+      "date": "2025-01-20",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-01-20.csv"
+    },
+    {
+      "date": "2025-01-21",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-01-21.csv"
+    },
+    {
+      "date": "2025-01-22",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-01-22.csv"
+    },
+    {
+      "date": "2025-01-23",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-01-23.csv"
+    },
+    {
+      "date": "2025-01-24",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-01-24.csv"
+    },
+    {
+      "date": "2025-01-27",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-01-27.csv"
+    },
+    {
+      "date": "2025-02-05",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-02-05.csv"
+    },
+    {
+      "date": "2025-02-06",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-02-06.csv"
+    },
+    {
+      "date": "2025-02-07",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-02-07.csv"
+    },
+    {
+      "date": "2025-02-10",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-02-10.csv"
+    },
+    {
+      "date": "2025-02-11",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-02-11.csv"
+    },
+    {
+      "date": "2025-02-12",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-02-12.csv"
+    },
+    {
+      "date": "2025-02-13",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-02-13.csv"
+    },
+    {
+      "date": "2025-02-14",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-02-14.csv"
+    },
+    {
+      "date": "2025-02-17",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-02-17.csv"
+    },
+    {
+      "date": "2025-02-18",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-02-18.csv"
+    },
+    {
+      "date": "2025-02-19",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-02-19.csv"
+    },
+    {
+      "date": "2025-02-20",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-02-20.csv"
+    },
+    {
+      "date": "2025-02-21",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-02-21.csv"
+    },
+    {
+      "date": "2025-02-24",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-02-24.csv"
+    },
+    {
+      "date": "2025-02-25",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-02-25.csv"
+    },
+    {
+      "date": "2025-02-26",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-02-26.csv"
+    },
+    {
+      "date": "2025-02-27",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-02-27.csv"
+    },
+    {
+      "date": "2025-02-28",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-02-28.csv"
+    },
+    {
+      "date": "2025-03-03",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-03.csv"
+    },
+    {
+      "date": "2025-03-04",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-04.csv"
+    },
+    {
+      "date": "2025-03-05",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-05.csv"
+    },
+    {
+      "date": "2025-03-06",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-06.csv"
+    },
+    {
+      "date": "2025-03-07",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-07.csv"
+    },
+    {
+      "date": "2025-03-10",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-10.csv"
+    },
+    {
+      "date": "2025-03-11",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-11.csv"
+    },
+    {
+      "date": "2025-03-12",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-12.csv"
+    },
+    {
+      "date": "2025-03-13",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-13.csv"
+    },
+    {
+      "date": "2025-03-14",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-14.csv"
+    },
+    {
+      "date": "2025-03-17",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-17.csv"
+    },
+    {
+      "date": "2025-03-18",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-18.csv"
+    },
+    {
+      "date": "2025-03-19",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-19.csv"
+    },
+    {
+      "date": "2025-03-20",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-20.csv"
+    },
+    {
+      "date": "2025-03-21",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-21.csv"
+    },
+    {
+      "date": "2025-03-24",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-24.csv"
+    },
+    {
+      "date": "2025-03-25",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-25.csv"
+    },
+    {
+      "date": "2025-03-26",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-26.csv"
+    },
+    {
+      "date": "2025-03-27",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-27.csv"
+    },
+    {
+      "date": "2025-03-28",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-28.csv"
+    },
+    {
+      "date": "2025-03-31",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-03-31.csv"
+    },
+    {
+      "date": "2025-04-01",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-01.csv"
+    },
+    {
+      "date": "2025-04-02",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-02.csv"
+    },
+    {
+      "date": "2025-04-03",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-03.csv"
+    },
+    {
+      "date": "2025-04-07",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-07.csv"
+    },
+    {
+      "date": "2025-04-08",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-08.csv"
+    },
+    {
+      "date": "2025-04-09",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-09.csv"
+    },
+    {
+      "date": "2025-04-10",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-10.csv"
+    },
+    {
+      "date": "2025-04-11",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-11.csv"
+    },
+    {
+      "date": "2025-04-14",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-14.csv"
+    },
+    {
+      "date": "2025-04-15",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-15.csv"
+    },
+    {
+      "date": "2025-04-16",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-16.csv"
+    },
+    {
+      "date": "2025-04-17",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-17.csv"
+    },
+    {
+      "date": "2025-04-18",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-18.csv"
+    },
+    {
+      "date": "2025-04-21",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-21.csv"
+    },
+    {
+      "date": "2025-04-22",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-22.csv"
+    },
+    {
+      "date": "2025-04-23",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-23.csv"
+    },
+    {
+      "date": "2025-04-24",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-24.csv"
+    },
+    {
+      "date": "2025-04-25",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-25.csv"
+    },
+    {
+      "date": "2025-04-28",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-28.csv"
+    },
+    {
+      "date": "2025-04-29",
+      "report_period": "2024-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-29.csv"
+    },
+    {
+      "date": "2025-04-30",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2024-10-09",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-04-30.csv"
+    },
+    {
+      "date": "2025-05-06",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-06.csv"
+    },
+    {
+      "date": "2025-05-07",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-07.csv"
+    },
+    {
+      "date": "2025-05-08",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-08.csv"
+    },
+    {
+      "date": "2025-05-09",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-09.csv"
+    },
+    {
+      "date": "2025-05-12",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-12.csv"
+    },
+    {
+      "date": "2025-05-13",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-13.csv"
+    },
+    {
+      "date": "2025-05-14",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-14.csv"
+    },
+    {
+      "date": "2025-05-15",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-15.csv"
+    },
+    {
+      "date": "2025-05-16",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-16.csv"
+    },
+    {
+      "date": "2025-05-19",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-19.csv"
+    },
+    {
+      "date": "2025-05-20",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-20.csv"
+    },
+    {
+      "date": "2025-05-21",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-21.csv"
+    },
+    {
+      "date": "2025-05-22",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-22.csv"
+    },
+    {
+      "date": "2025-05-23",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-23.csv"
+    },
+    {
+      "date": "2025-05-26",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-26.csv"
+    },
+    {
+      "date": "2025-05-27",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-27.csv"
+    },
+    {
+      "date": "2025-05-28",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-28.csv"
+    },
+    {
+      "date": "2025-05-29",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-29.csv"
+    },
+    {
+      "date": "2025-05-30",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-05-30.csv"
+    },
+    {
+      "date": "2025-06-03",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-03.csv"
+    },
+    {
+      "date": "2025-06-04",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-04.csv"
+    },
+    {
+      "date": "2025-06-05",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-05.csv"
+    },
+    {
+      "date": "2025-06-06",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-06.csv"
+    },
+    {
+      "date": "2025-06-09",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-09.csv"
+    },
+    {
+      "date": "2025-06-10",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-10.csv"
+    },
+    {
+      "date": "2025-06-11",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-11.csv"
+    },
+    {
+      "date": "2025-06-12",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-12.csv"
+    },
+    {
+      "date": "2025-06-13",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-13.csv"
+    },
+    {
+      "date": "2025-06-16",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-16.csv"
+    },
+    {
+      "date": "2025-06-17",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-17.csv"
+    },
+    {
+      "date": "2025-06-18",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-18.csv"
+    },
+    {
+      "date": "2025-06-19",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-19.csv"
+    },
+    {
+      "date": "2025-06-20",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-20.csv"
+    },
+    {
+      "date": "2025-06-23",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-23.csv"
+    },
+    {
+      "date": "2025-06-24",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-24.csv"
+    },
+    {
+      "date": "2025-06-25",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-25.csv"
+    },
+    {
+      "date": "2025-06-26",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-26.csv"
+    },
+    {
+      "date": "2025-06-27",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-27.csv"
+    },
+    {
+      "date": "2025-06-30",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-06-30.csv"
+    },
+    {
+      "date": "2025-07-01",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-01.csv"
+    },
+    {
+      "date": "2025-07-02",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-02.csv"
+    },
+    {
+      "date": "2025-07-03",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-03.csv"
+    },
+    {
+      "date": "2025-07-04",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-04.csv"
+    },
+    {
+      "date": "2025-07-07",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-07.csv"
+    },
+    {
+      "date": "2025-07-08",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-08.csv"
+    },
+    {
+      "date": "2025-07-09",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-09.csv"
+    },
+    {
+      "date": "2025-07-10",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-10.csv"
+    },
+    {
+      "date": "2025-07-11",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-11.csv"
+    },
+    {
+      "date": "2025-07-14",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-14.csv"
+    },
+    {
+      "date": "2025-07-15",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-15.csv"
+    },
+    {
+      "date": "2025-07-16",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-16.csv"
+    },
+    {
+      "date": "2025-07-17",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-17.csv"
+    },
+    {
+      "date": "2025-07-18",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-18.csv"
+    },
+    {
+      "date": "2025-07-21",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-21.csv"
+    },
+    {
+      "date": "2025-07-22",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-22.csv"
+    },
+    {
+      "date": "2025-07-23",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-23.csv"
+    },
+    {
+      "date": "2025-07-24",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-24.csv"
+    },
+    {
+      "date": "2025-07-25",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-25.csv"
+    },
+    {
+      "date": "2025-07-28",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-28.csv"
+    },
+    {
+      "date": "2025-07-29",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-29.csv"
+    },
+    {
+      "date": "2025-07-30",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-30.csv"
+    },
+    {
+      "date": "2025-07-31",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-07-31.csv"
+    },
+    {
+      "date": "2025-08-01",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-01.csv"
+    },
+    {
+      "date": "2025-08-04",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-04.csv"
+    },
+    {
+      "date": "2025-08-05",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-05.csv"
+    },
+    {
+      "date": "2025-08-06",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-06.csv"
+    },
+    {
+      "date": "2025-08-07",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-07.csv"
+    },
+    {
+      "date": "2025-08-08",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-08.csv"
+    },
+    {
+      "date": "2025-08-11",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-11.csv"
+    },
+    {
+      "date": "2025-08-12",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-12.csv"
+    },
+    {
+      "date": "2025-08-13",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-13.csv"
+    },
+    {
+      "date": "2025-08-14",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-14.csv"
+    },
+    {
+      "date": "2025-08-15",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-15.csv"
+    },
+    {
+      "date": "2025-08-18",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-18.csv"
+    },
+    {
+      "date": "2025-08-19",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-19.csv"
+    },
+    {
+      "date": "2025-08-20",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-20.csv"
+    },
+    {
+      "date": "2025-08-21",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-21.csv"
+    },
+    {
+      "date": "2025-08-22",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-22.csv"
+    },
+    {
+      "date": "2025-08-25",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-25.csv"
+    },
+    {
+      "date": "2025-08-26",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-26.csv"
+    },
+    {
+      "date": "2025-08-27",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-27.csv"
+    },
+    {
+      "date": "2025-08-28",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-28.csv"
+    },
+    {
+      "date": "2025-08-29",
+      "report_period": "2025-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-05-06",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-08-29.csv"
+    },
+    {
+      "date": "2025-09-01",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-01.csv"
+    },
+    {
+      "date": "2025-09-02",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-02.csv"
+    },
+    {
+      "date": "2025-09-03",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-03.csv"
+    },
+    {
+      "date": "2025-09-04",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-04.csv"
+    },
+    {
+      "date": "2025-09-05",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-05.csv"
+    },
+    {
+      "date": "2025-09-08",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-08.csv"
+    },
+    {
+      "date": "2025-09-09",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-09.csv"
+    },
+    {
+      "date": "2025-09-10",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-10.csv"
+    },
+    {
+      "date": "2025-09-11",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-11.csv"
+    },
+    {
+      "date": "2025-09-12",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-12.csv"
+    },
+    {
+      "date": "2025-09-15",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-15.csv"
+    },
+    {
+      "date": "2025-09-16",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-16.csv"
+    },
+    {
+      "date": "2025-09-17",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-17.csv"
+    },
+    {
+      "date": "2025-09-18",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-18.csv"
+    },
+    {
+      "date": "2025-09-19",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-19.csv"
+    },
+    {
+      "date": "2025-09-22",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-22.csv"
+    },
+    {
+      "date": "2025-09-23",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-23.csv"
+    },
+    {
+      "date": "2025-09-24",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-24.csv"
+    },
+    {
+      "date": "2025-09-25",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-25.csv"
+    },
+    {
+      "date": "2025-09-26",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-26.csv"
+    },
+    {
+      "date": "2025-09-29",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-29.csv"
+    },
+    {
+      "date": "2025-09-30",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-09-30.csv"
+    },
+    {
+      "date": "2025-10-09",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-10-09.csv"
+    },
+    {
+      "date": "2025-10-10",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-10-10.csv"
+    },
+    {
+      "date": "2025-10-13",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-10-13.csv"
+    },
+    {
+      "date": "2025-10-14",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-10-14.csv"
+    },
+    {
+      "date": "2025-10-15",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-10-15.csv"
+    },
+    {
+      "date": "2025-10-16",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-10-16.csv"
+    },
+    {
+      "date": "2025-10-17",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-10-17.csv"
+    },
+    {
+      "date": "2025-10-20",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-10-20.csv"
+    },
+    {
+      "date": "2025-10-21",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-10-21.csv"
+    },
+    {
+      "date": "2025-10-22",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-10-22.csv"
+    },
+    {
+      "date": "2025-10-23",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-10-23.csv"
+    },
+    {
+      "date": "2025-10-24",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-10-24.csv"
+    },
+    {
+      "date": "2025-10-27",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-10-27.csv"
+    },
+    {
+      "date": "2025-10-28",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-10-28.csv"
+    },
+    {
+      "date": "2025-10-29",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-10-29.csv"
+    },
+    {
+      "date": "2025-10-30",
+      "report_period": "2025-06-30",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2025-09-01",
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-10-30.csv"
+    },
+    {
+      "date": "2025-10-31",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-10-31.csv"
+    },
+    {
+      "date": "2025-11-03",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-03.csv"
+    },
+    {
+      "date": "2025-11-04",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-04.csv"
+    },
+    {
+      "date": "2025-11-05",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-05.csv"
+    },
+    {
+      "date": "2025-11-06",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-06.csv"
+    },
+    {
+      "date": "2025-11-07",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-07.csv"
+    },
+    {
+      "date": "2025-11-10",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-10.csv"
+    },
+    {
+      "date": "2025-11-11",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-11.csv"
+    },
+    {
+      "date": "2025-11-12",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-12.csv"
+    },
+    {
+      "date": "2025-11-13",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-13.csv"
+    },
+    {
+      "date": "2025-11-14",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-14.csv"
+    },
+    {
+      "date": "2025-11-17",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-17.csv"
+    },
+    {
+      "date": "2025-11-18",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-18.csv"
+    },
+    {
+      "date": "2025-11-19",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-19.csv"
+    },
+    {
+      "date": "2025-11-20",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-20.csv"
+    },
+    {
+      "date": "2025-11-21",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-21.csv"
+    },
+    {
+      "date": "2025-11-24",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-24.csv"
+    },
+    {
+      "date": "2025-11-25",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-25.csv"
+    },
+    {
+      "date": "2025-11-26",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-26.csv"
+    },
+    {
+      "date": "2025-11-27",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-27.csv"
+    },
+    {
+      "date": "2025-11-28",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-11-28.csv"
+    },
+    {
+      "date": "2025-12-01",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-01.csv"
+    },
+    {
+      "date": "2025-12-02",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-02.csv"
+    },
+    {
+      "date": "2025-12-03",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-03.csv"
+    },
+    {
+      "date": "2025-12-04",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-04.csv"
+    },
+    {
+      "date": "2025-12-05",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-05.csv"
+    },
+    {
+      "date": "2025-12-08",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-08.csv"
+    },
+    {
+      "date": "2025-12-09",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-09.csv"
+    },
+    {
+      "date": "2025-12-10",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-10.csv"
+    },
+    {
+      "date": "2025-12-11",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-11.csv"
+    },
+    {
+      "date": "2025-12-12",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-12.csv"
+    },
+    {
+      "date": "2025-12-15",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-15.csv"
+    },
+    {
+      "date": "2025-12-16",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-16.csv"
+    },
+    {
+      "date": "2025-12-17",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-17.csv"
+    },
+    {
+      "date": "2025-12-18",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-18.csv"
+    },
+    {
+      "date": "2025-12-19",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-19.csv"
+    },
+    {
+      "date": "2025-12-22",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-22.csv"
+    },
+    {
+      "date": "2025-12-23",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-23.csv"
+    },
+    {
+      "date": "2025-12-24",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-24.csv"
+    },
+    {
+      "date": "2025-12-25",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-25.csv"
+    },
+    {
+      "date": "2025-12-26",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-26.csv"
+    },
+    {
+      "date": "2025-12-29",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-29.csv"
+    },
+    {
+      "date": "2025-12-30",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-30.csv"
+    },
+    {
+      "date": "2025-12-31",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2025-12-31.csv"
+    },
+    {
+      "date": "2026-01-05",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-05.csv"
+    },
+    {
+      "date": "2026-01-06",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-06.csv"
+    },
+    {
+      "date": "2026-01-07",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-07.csv"
+    },
+    {
+      "date": "2026-01-08",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-08.csv"
+    },
+    {
+      "date": "2026-01-09",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-09.csv"
+    },
+    {
+      "date": "2026-01-12",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-12.csv"
+    },
+    {
+      "date": "2026-01-13",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-13.csv"
+    },
+    {
+      "date": "2026-01-14",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-14.csv"
+    },
+    {
+      "date": "2026-01-15",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-15.csv"
+    },
+    {
+      "date": "2026-01-16",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-16.csv"
+    },
+    {
+      "date": "2026-01-19",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-19.csv"
+    },
+    {
+      "date": "2026-01-20",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-20.csv"
+    },
+    {
+      "date": "2026-01-21",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-21.csv"
+    },
+    {
+      "date": "2026-01-22",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-22.csv"
+    },
+    {
+      "date": "2026-01-23",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-23.csv"
+    },
+    {
+      "date": "2026-01-26",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-26.csv"
+    },
+    {
+      "date": "2026-01-27",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-27.csv"
+    },
+    {
+      "date": "2026-01-28",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-28.csv"
+    },
+    {
+      "date": "2026-01-29",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-29.csv"
+    },
+    {
+      "date": "2026-01-30",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-01-30.csv"
+    },
+    {
+      "date": "2026-02-02",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-02-02.csv"
+    },
+    {
+      "date": "2026-02-03",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-02-03.csv"
+    },
+    {
+      "date": "2026-02-04",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-02-04.csv"
+    },
+    {
+      "date": "2026-02-05",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-02-05.csv"
+    },
+    {
+      "date": "2026-02-06",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-02-06.csv"
+    },
+    {
+      "date": "2026-02-09",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-02-09.csv"
+    },
+    {
+      "date": "2026-02-10",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-02-10.csv"
+    },
+    {
+      "date": "2026-02-11",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-02-11.csv"
+    },
+    {
+      "date": "2026-02-12",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-02-12.csv"
+    },
+    {
+      "date": "2026-02-13",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-02-13.csv"
+    },
+    {
+      "date": "2026-02-24",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-02-24.csv"
+    },
+    {
+      "date": "2026-02-25",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-02-25.csv"
+    },
+    {
+      "date": "2026-02-26",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-02-26.csv"
+    },
+    {
+      "date": "2026-02-27",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-02-27.csv"
+    },
+    {
+      "date": "2026-03-02",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-02.csv"
+    },
+    {
+      "date": "2026-03-03",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-03.csv"
+    },
+    {
+      "date": "2026-03-04",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-04.csv"
+    },
+    {
+      "date": "2026-03-05",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-05.csv"
+    },
+    {
+      "date": "2026-03-06",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-06.csv"
+    },
+    {
+      "date": "2026-03-09",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-09.csv"
+    },
+    {
+      "date": "2026-03-10",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-10.csv"
+    },
+    {
+      "date": "2026-03-11",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-11.csv"
+    },
+    {
+      "date": "2026-03-12",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-12.csv"
+    },
+    {
+      "date": "2026-03-13",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-13.csv"
+    },
+    {
+      "date": "2026-03-16",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-16.csv"
+    },
+    {
+      "date": "2026-03-17",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-17.csv"
+    },
+    {
+      "date": "2026-03-18",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-18.csv"
+    },
+    {
+      "date": "2026-03-19",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-19.csv"
+    },
+    {
+      "date": "2026-03-20",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-20.csv"
+    },
+    {
+      "date": "2026-03-23",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-23.csv"
+    },
+    {
+      "date": "2026-03-24",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-24.csv"
+    },
+    {
+      "date": "2026-03-25",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-25.csv"
+    },
+    {
+      "date": "2026-03-26",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-26.csv"
+    },
+    {
+      "date": "2026-03-27",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-27.csv"
+    },
+    {
+      "date": "2026-03-30",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-30.csv"
+    },
+    {
+      "date": "2026-03-31",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-03-31.csv"
+    },
+    {
+      "date": "2026-04-01",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-01.csv"
+    },
+    {
+      "date": "2026-04-02",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-02.csv"
+    },
+    {
+      "date": "2026-04-03",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-03.csv"
+    },
+    {
+      "date": "2026-04-07",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-07.csv"
+    },
+    {
+      "date": "2026-04-08",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-08.csv"
+    },
+    {
+      "date": "2026-04-09",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-09.csv"
+    },
+    {
+      "date": "2026-04-10",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-10.csv"
+    },
+    {
+      "date": "2026-04-13",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-13.csv"
+    },
+    {
+      "date": "2026-04-14",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-14.csv"
+    },
+    {
+      "date": "2026-04-15",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-15.csv"
+    },
+    {
+      "date": "2026-04-16",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-16.csv"
+    },
+    {
+      "date": "2026-04-17",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-17.csv"
+    },
+    {
+      "date": "2026-04-20",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-20.csv"
+    },
+    {
+      "date": "2026-04-21",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-21.csv"
+    },
+    {
+      "date": "2026-04-22",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-22.csv"
+    },
+    {
+      "date": "2026-04-23",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-23.csv"
+    },
+    {
+      "date": "2026-04-24",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-24.csv"
+    },
+    {
+      "date": "2026-04-27",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-27.csv"
+    },
+    {
+      "date": "2026-04-28",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-28.csv"
+    },
+    {
+      "date": "2026-04-29",
+      "report_period": "2025-09-30",
+      "candidate_count": 0,
+      "signal_eligible_count": 0,
+      "mainline_snapshot_date": null,
+      "mainline_snapshot_fresh": false,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-29.csv"
+    },
+    {
+      "date": "2026-04-30",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-04-30",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-04-30.csv"
+    },
+    {
+      "date": "2026-05-06",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-05-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-05-06.csv"
+    },
+    {
+      "date": "2026-05-07",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-05-07",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-05-07.csv"
+    },
+    {
+      "date": "2026-05-08",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-05-08",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-05-08.csv"
+    },
+    {
+      "date": "2026-05-11",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-05-11",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-05-11.csv"
+    },
+    {
+      "date": "2026-05-12",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-05-12",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-05-12.csv"
+    },
+    {
+      "date": "2026-05-13",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-05-13",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-05-13.csv"
+    },
+    {
+      "date": "2026-05-14",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-05-14",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-05-14.csv"
+    },
+    {
+      "date": "2026-05-15",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-05-15",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-05-15.csv"
+    },
+    {
+      "date": "2026-05-18",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-05-18",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-05-18.csv"
+    },
+    {
+      "date": "2026-05-19",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-05-19",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-05-19.csv"
+    },
+    {
+      "date": "2026-05-20",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-05-20",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-05-20.csv"
+    },
+    {
+      "date": "2026-05-21",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-05-21",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-05-21.csv"
+    },
+    {
+      "date": "2026-05-22",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-05-22",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-05-22.csv"
+    },
+    {
+      "date": "2026-05-25",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-05-25",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-05-25.csv"
+    },
+    {
+      "date": "2026-05-26",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-05-26",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-05-26.csv"
+    },
+    {
+      "date": "2026-05-27",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-05-27",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-05-27.csv"
+    },
+    {
+      "date": "2026-05-28",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-05-28",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-05-28.csv"
+    },
+    {
+      "date": "2026-05-29",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-05-29",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-05-29.csv"
+    },
+    {
+      "date": "2026-06-01",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-01.csv"
+    },
+    {
+      "date": "2026-06-02",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-02",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-02.csv"
+    },
+    {
+      "date": "2026-06-03",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-03",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-03.csv"
+    },
+    {
+      "date": "2026-06-04",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-04",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-04.csv"
+    },
+    {
+      "date": "2026-06-05",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-05",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-05.csv"
+    },
+    {
+      "date": "2026-06-08",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-08",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-08.csv"
+    },
+    {
+      "date": "2026-06-09",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-09",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-09.csv"
+    },
+    {
+      "date": "2026-06-10",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-10",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-10.csv"
+    },
+    {
+      "date": "2026-06-11",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-11",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-11.csv"
+    },
+    {
+      "date": "2026-06-12",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-12",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-12.csv"
+    },
+    {
+      "date": "2026-06-15",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-15",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-15.csv"
+    },
+    {
+      "date": "2026-06-16",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-16",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-16.csv"
+    },
+    {
+      "date": "2026-06-17",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-17",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-17.csv"
+    },
+    {
+      "date": "2026-06-18",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-18",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-18.csv"
+    },
+    {
+      "date": "2026-06-22",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-22",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-22.csv"
+    },
+    {
+      "date": "2026-06-23",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-23",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-23.csv"
+    },
+    {
+      "date": "2026-06-24",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-24",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-24.csv"
+    },
+    {
+      "date": "2026-06-25",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-25",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-25.csv"
+    },
+    {
+      "date": "2026-06-26",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-26",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-26.csv"
+    },
+    {
+      "date": "2026-06-29",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-29",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-29.csv"
+    },
+    {
+      "date": "2026-06-30",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-06-30",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-06-30.csv"
+    },
+    {
+      "date": "2026-07-01",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-07-01",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-07-01.csv"
+    },
+    {
+      "date": "2026-07-02",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-07-02",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-07-02.csv"
+    },
+    {
+      "date": "2026-07-03",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-07-03",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-07-03.csv"
+    },
+    {
+      "date": "2026-07-06",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-07-06",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-07-06.csv"
+    },
+    {
+      "date": "2026-07-07",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-07-07",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-07-07.csv"
+    },
+    {
+      "date": "2026-07-08",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-07-08",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-07-08.csv"
+    },
+    {
+      "date": "2026-07-09",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-07-09",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-07-09.csv"
+    },
+    {
+      "date": "2026-07-10",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-07-10",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-07-10.csv"
+    },
+    {
+      "date": "2026-07-13",
+      "report_period": "2026-03-31",
+      "candidate_count": 10,
+      "signal_eligible_count": 10,
+      "mainline_snapshot_date": "2026-07-10",
+      "mainline_snapshot_fresh": true,
+      "financial_point_in_time": false,
+      "file": "candidates_2026-07-13.csv"
+    }
+  ]
+}
