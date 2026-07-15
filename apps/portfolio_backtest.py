@@ -554,8 +554,12 @@ def main(argv=None):
         help="default: latest session whose daily bar should be available",
     )
     parser.add_argument(
-        "--max-positions", type=int, default=4,
-        help="maximum symbols, hard-capped at 4",
+        "--max-positions", type=int, default=3,
+        help="main capacity symbols; default 3, hard-capped at 5",
+    )
+    parser.add_argument(
+        "--max-total-held-symbols", type=int, default=5,
+        help="hard cap for all held symbols, including left cores and profit tails",
     )
     parser.add_argument(
         "--max-same-industry", type=int, default=2,
@@ -702,6 +706,7 @@ def main(argv=None):
         end_date=args.end_date,
         trade_plans=trade_plans,
         max_positions=None if args.max_positions == 0 else args.max_positions,
+        max_total_held_symbols=args.max_total_held_symbols,
         max_same_industry=args.max_same_industry,
         same_theme_correlation=args.same_theme_correlation,
         min_entry_evidence_score=args.min_entry_evidence_score,

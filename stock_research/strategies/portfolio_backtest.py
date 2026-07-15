@@ -405,7 +405,8 @@ def run_portfolio_backtest(
     requested_start,
     end_date,
     trade_plans=None,
-    max_positions=4,
+    max_positions=3,
+    max_total_held_symbols=5,
     max_same_industry=2,
     same_theme_correlation=0.60,
     min_entry_evidence_score=0,
@@ -481,6 +482,12 @@ def run_portfolio_backtest(
             if state.left or state.right
         }
 
+    def left_side_codes():
+        return {
+            code for code, state in states.items()
+            if state.left or state.left_grid_started
+        }
+
     def left_position_counts_capacity(state):
         if not state.left:
             return False
@@ -504,9 +511,10 @@ def run_portfolio_backtest(
         return sum(float(lot["size"]) for lot in state.left + state.right)
 
     configured_positions = (
-        4 if max_positions is None or int(max_positions) <= 0
-        else min(4, int(max_positions))
+        3 if max_positions is None or int(max_positions) <= 0
+        else min(5, int(max_positions))
     )
+    configured_total_held_symbols = max(1, min(5, int(max_total_held_symbols)))
     configured_same_industry = max(1, int(max_same_industry))
     configured_theme_correlation = float(same_theme_correlation)
     configured_min_entry_evidence_score = max(
@@ -526,6 +534,23 @@ def run_portfolio_backtest(
     def symbol_limit_reached():
         configured = configured_positions
         return len(capacity_codes()) >= configured
+
+    def total_symbol_limit_reached(code=None):
+        occupied = occupied_codes()
+        if code is not None and code in occupied:
+            return False
+        return len(occupied) >= configured_total_held_symbols
+
+    def right_market_active():
+        return current_phase in {"watch", "active"} or current_up_streak >= 3
+
+    def left_symbol_limit_reached(code=None):
+        if not right_market_active():
+            return False
+        left_codes = left_side_codes()
+        if code is not None and code in left_codes:
+            return False
+        return len(left_codes) >= 1
 
     def right_codes():
         return {code for code, state in states.items() if state.right}
@@ -1238,7 +1263,12 @@ def run_portfolio_backtest(
             held_slots = {int(lot["slot"]) for lot in state.left}
             starting_new_symbol = not state.left_grid_started and code not in capacity_codes()
             if starting_new_symbol:
-                if symbol_limit_reached() or industry_limit_reached(code, candidate, date):
+                if (
+                    symbol_limit_reached()
+                    or total_symbol_limit_reached(code)
+                    or left_symbol_limit_reached(code)
+                    or industry_limit_reached(code, candidate, date)
+                ):
                     continue
             for planned in plan_by_slot.values():
                 if not can_add_left:
@@ -1256,7 +1286,12 @@ def run_portfolio_backtest(
                 if (
                     not left_position_counts_capacity(state)
                     and not bool(planned["core"])
-                    and (symbol_limit_reached() or industry_limit_reached(code, candidate, date))
+                    and (
+                        symbol_limit_reached()
+                        or total_symbol_limit_reached(code)
+                        or left_symbol_limit_reached(code)
+                        or industry_limit_reached(code, candidate, date)
+                    )
                 ):
                     continue
                 requested_size = min(
@@ -1520,6 +1555,8 @@ def run_portfolio_backtest(
                 opening_right_symbol = code not in capacity_codes()
                 candidate = current_candidates.get(code, {})
                 if opening_right_symbol:
+                    if total_symbol_limit_reached(code):
+                        continue
                     if industry_limit_reached(code, candidate, date):
                         continue
                     if not can_open_new_right_symbol(date):
@@ -1743,6 +1780,7 @@ def run_portfolio_backtest(
             "gross_exposure_pct": round(gross_exposure() * 100, 2),
             "capacity_position_count": len(capacity_codes()),
             "total_held_symbol_count": len(occupied_codes()),
+            "left_side_symbol_count": len(left_side_codes()),
             "profit_tail_count": sum(
                 _is_profit_tail(state) for state in states.values()
             ),
@@ -1893,6 +1931,7 @@ def run_portfolio_backtest(
         ),
         "candidate_pool_limit": MAX_DAILY_CANDIDATES,
         "max_positions": configured_positions,
+        "max_total_held_symbols": configured_total_held_symbols,
         "profit_tranches": configured_profit_tranches,
         "profit_tails_consume_capacity": False,
         "profit_tail_minimum_current_return_pct": round(
@@ -1905,6 +1944,9 @@ def run_portfolio_backtest(
         ),
         "maximum_total_held_symbols": max(
             (row["total_held_symbol_count"] for row in equity_curve), default=0,
+        ),
+        "maximum_left_side_symbols": max(
+            (row["left_side_symbol_count"] for row in equity_curve), default=0,
         ),
         "maximum_profit_tail_count": max(
             (row["profit_tail_count"] for row in equity_curve), default=0,

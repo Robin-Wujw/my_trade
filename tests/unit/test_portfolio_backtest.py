@@ -658,6 +658,80 @@ def test_left_core_only_position_does_not_consume_capacity():
     assert position["capacity_counted"] is False
 
 
+def test_right_side_market_allows_only_one_left_symbol():
+    dates = pd.bdate_range("2026-01-01", periods=81)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 81,
+        "high": [100.5] * 81,
+        "low": [99.5] * 80 + [99.0],
+        "close": [100.0] * 81,
+        "volume": [1000.0] * 81,
+    })
+    date = dates[-1].strftime("%Y-%m-%d")
+
+    result = run_portfolio_backtest(
+        {"A": bars, "B": bars},
+        {date: [
+            {
+                "code": "A", "candidate_source": "value_model",
+                "value_line": 100.0, "candidate_score": 20,
+            },
+            {
+                "code": "B", "candidate_source": "value_model",
+                "value_line": 100.0, "candidate_score": 10,
+            },
+        ]},
+        {date: {"phase": "watch", "window_up_streak": 3}},
+        requested_start=date, end_date=date, max_positions=5,
+    )
+
+    assert [item["code"] for item in result["final_positions"]] == ["A"]
+    assert result["maximum_left_side_symbols"] == 1
+
+
+def test_total_symbol_cap_counts_left_cores_that_do_not_use_capacity():
+    dates = pd.bdate_range("2026-01-01", periods=83)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 83,
+        "high": [100.5] * 81 + [111.0, 100.5],
+        "low": [99.5] * 81 + [99.5, 99.0],
+        "close": [100.0] * 83,
+        "volume": [1000.0] * 83,
+    })
+    first = dates[80].strftime("%Y-%m-%d")
+    sell_non_core = dates[81].strftime("%Y-%m-%d")
+    try_sixth = dates[82].strftime("%Y-%m-%d")
+    initial_codes = ["A", "B", "C", "D", "E"]
+
+    result = run_portfolio_backtest(
+        {code: bars for code in initial_codes + ["F"]},
+        {
+            first: [
+                {
+                    "code": code, "candidate_source": "value_model",
+                    "value_line": 100.0, "candidate_score": 100 - index,
+                    "industry": f"industry-{code}",
+                }
+                for index, code in enumerate(initial_codes)
+            ],
+            sell_non_core: [],
+            try_sixth: [{
+                "code": "F", "candidate_source": "value_model",
+                "value_line": 100.0, "candidate_score": 200,
+                "industry": "industry-F",
+            }],
+        },
+        {}, requested_start=first, end_date=try_sixth,
+        max_positions=5, max_total_held_symbols=5,
+    )
+
+    assert {item["code"] for item in result["final_positions"]} == set(initial_codes)
+    assert result["maximum_total_held_symbols"] == 5
+    assert all(item["capacity_counted"] is False for item in result["final_positions"])
+
+
 def test_unified_candidate_interface_honors_signal_eligible():
     bars = breakout_bars()
     date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
