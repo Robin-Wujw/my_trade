@@ -908,10 +908,11 @@ def run_portfolio_backtest(
             })
         return plan
 
-    def promote_left_grid_to_right_campaign(code, state, row, signal):
+    def promote_left_grid_to_right_campaign(code, state, row, signal, first_right_batch_id):
         if not state.left:
-            return []
+            return [], first_right_batch_id
         promoted = []
+        next_right_batch_id = first_right_batch_id
         reconfirm_on_next_day = (
             bool(signal.get("requires_next_day_confirmation"))
             or (
@@ -922,21 +923,25 @@ def run_portfolio_backtest(
         for lot in list(state.left):
             state.left.remove(lot)
             promoted_lot = dict(lot)
+            origin_batch = lot["batch"]
             promoted_lot.update({
+                "batch": f"R{next_right_batch_id}",
                 "date": row["date"],
                 "stop": float(signal["stop"]),
                 "merged": True,
                 "proven": False,
                 "origin_account": "left",
+                "origin_batch": origin_batch,
                 "left_grid_slot": int(lot["slot"]),
                 "reconfirm_level": float(signal["trigger"]),
                 "reconfirm_on_next_day": reconfirm_on_next_day,
             })
+            next_right_batch_id += 1
             state.right.append(promoted_lot)
             promoted.append(promoted_lot)
         state.left_value_line = None
         state.left_grid_started = False
-        return promoted
+        return promoted, next_right_batch_id
 
     def left_position_detached_from_value(row, state):
         if state.left_value_line is None:
@@ -1844,8 +1849,8 @@ def run_portfolio_backtest(
                     states[code].right_tail_capacity_free = False
                 promoted_left_lots = []
                 if left_to_right:
-                    promoted_left_lots = promote_left_grid_to_right_campaign(
-                        code, states[code], row, signal,
+                    promoted_left_lots, next_batch_id = promote_left_grid_to_right_campaign(
+                        code, states[code], row, signal, next_batch_id,
                     )
                 batch = f"R{next_batch_id}"
                 next_batch_id += 1
@@ -1874,10 +1879,14 @@ def run_portfolio_backtest(
                         configured_profit_tranches,
                     )
                     if promoted_left_lots:
+                        promoted_batch_labels = ",".join(
+                            f"{lot['batch']}(原{lot.get('origin_batch', lot['batch'])})"
+                            for lot in promoted_left_lots
+                        )
                         add_event(
                             date, code, "左转右接管左仓", fill["price"], 0.0,
                             (
-                                f"接管左侧批次={','.join(lot['batch'] for lot in promoted_left_lots)}; "
+                                f"接管左侧批次={promoted_batch_labels}; "
                                 f"右侧止损={float(signal['stop']):.3f}; 左侧网格暂停"
                             ),
                             account_mode="right",
@@ -1970,6 +1979,25 @@ def run_portfolio_backtest(
             "date",
         ]
     }
+
+    def _right_batch_snapshot(lot):
+        item = {
+            "batch": lot["batch"],
+            "position_pct": round(lot["size"] * 100, 2),
+            "quantity": round(lot["quantity"], 8),
+            "cost": round(lot["cost"], 3),
+            "stop": round(lot["stop"], 3),
+            "merged": lot["merged"],
+            "proven": lot.get("proven", False),
+        }
+        if lot.get("origin_account"):
+            item["origin_account"] = lot["origin_account"]
+        if lot.get("origin_batch"):
+            item["origin_batch"] = lot["origin_batch"]
+        if lot.get("left_grid_slot") is not None:
+            item["left_grid_slot"] = int(lot["left_grid_slot"])
+        return item
+
     final_position_details = []
     for code in sorted(occupied_codes()):
         state = states[code]
@@ -2030,7 +2058,7 @@ def run_portfolio_backtest(
                 for lot in state.left
             ],
             "batches": [
-                {"batch": lot["batch"], "position_pct": round(lot["size"] * 100, 2), "quantity": round(lot["quantity"], 8), "cost": round(lot["cost"], 3), "stop": round(lot["stop"], 3), "merged": lot["merged"], "proven": lot.get("proven", False)}
+                _right_batch_snapshot(lot)
                 for lot in state.right
             ],
         })

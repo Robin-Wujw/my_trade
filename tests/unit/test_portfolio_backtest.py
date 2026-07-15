@@ -706,10 +706,22 @@ def test_left_to_right_stops_grid_and_uses_right_side_batches(monkeypatch):
     position = result["final_positions"][0]
     assert position["position_mode"] == "right"
     assert position["left_batches"] == []
-    assert {item["batch"] for item in position["batches"]} >= {
+    assert all(item["batch"].startswith("R") for item in position["batches"])
+    promoted = [
+        item for item in position["batches"]
+        if item.get("origin_account") == "left"
+    ]
+    assert {item["origin_batch"] for item in promoted} == {
         "L1", "L2", "L3", "L4", "L5",
     }
+    assert all(item["batch"].startswith("R") for item in promoted)
     assert {round(item["stop"], 3) for item in position["batches"]} == {90.0}
+    switch_index = actions.index("左转右接管左仓")
+    managed_after_switch = result["events"][switch_index + 1:]
+    assert not any(
+        str(event["reason"]).startswith("L")
+        for event in managed_after_switch
+    )
 
 
 def test_value_grid_financial_falsification_exits_left_at_next_open():
