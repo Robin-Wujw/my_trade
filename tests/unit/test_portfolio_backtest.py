@@ -648,6 +648,70 @@ def test_value_grid_candidate_removal_stops_new_left_buys_without_clearing():
     assert {item["grid_slot"] for item in result["final_positions"][0]["left_batches"]} == set(range(5))
 
 
+def test_left_to_right_stops_grid_and_uses_right_side_batches(monkeypatch):
+    dates = pd.bdate_range("2026-01-01", periods=83)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 81 + [109.0, 110.0],
+        "high": [100.5] * 81 + [110.0, 111.0],
+        "low": [99.5] * 83,
+        "close": [100.0] * 81 + [109.0, 110.0],
+        "volume": [1000.0] * 83,
+    })
+    first = dates[80].strftime("%Y-%m-%d")
+    turn = dates[81].strftime("%Y-%m-%d")
+    last = dates[82].strftime("%Y-%m-%d")
+
+    def fake_signal(data, index, plan=None, **kwargs):
+        if data.iloc[index]["date"].strftime("%Y-%m-%d") != turn:
+            return None
+        return {
+            "rank": 2,
+            "stop": 90.0,
+            "trigger": 100.0,
+            "order_type": "close",
+            "reason": "test left-to-right",
+            "known_volume_ratio": 1.0,
+            "signal_type": "uptrend_50_reclaim",
+            "entry_evidence_score": 6,
+        }
+
+    monkeypatch.setattr(
+        "stock_research.strategies.portfolio_backtest._right_signal",
+        fake_signal,
+    )
+
+    result = run_portfolio_backtest(
+        {"A": bars},
+        {
+            first: [{
+                "code": "A", "candidate_source": "value_model",
+                "value_line": 100.0, "industry": "test", "mktcap": 150,
+            }],
+            turn: [{
+                "code": "A", "candidate_source": "value_model",
+                "value_line": 100.0, "industry": "test", "mktcap": 150,
+            }],
+            last: [{
+                "code": "A", "candidate_source": "value_model",
+                "value_line": 100.0, "industry": "test", "mktcap": 150,
+            }],
+        },
+        {}, requested_start=first, end_date=last,
+    )
+
+    actions = [event["action"] for event in result["events"]]
+    assert "左转右接管左仓" in actions
+    assert "左侧网格卖出" not in actions
+    position = result["final_positions"][0]
+    assert position["position_mode"] == "right"
+    assert position["left_batches"] == []
+    assert {item["batch"] for item in position["batches"]} >= {
+        "L1", "L2", "L3", "L4", "L5",
+    }
+    assert {round(item["stop"], 3) for item in position["batches"]} == {90.0}
+
+
 def test_value_grid_financial_falsification_exits_left_at_next_open():
     dates = pd.bdate_range("2026-01-01", periods=83)
     bars = pd.DataFrame({

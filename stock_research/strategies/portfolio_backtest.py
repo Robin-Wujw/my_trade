@@ -908,6 +908,74 @@ def run_portfolio_backtest(
             })
         return plan
 
+    def promote_left_grid_to_right_campaign(code, state, row, signal):
+        if not state.left:
+            return []
+        promoted = []
+        reconfirm_on_next_day = (
+            bool(signal.get("requires_next_day_confirmation"))
+            or (
+                signal["order_type"] == "stop"
+                and float(row["close"]) < float(signal["trigger"])
+            )
+        )
+        for lot in list(state.left):
+            state.left.remove(lot)
+            promoted_lot = dict(lot)
+            promoted_lot.update({
+                "date": row["date"],
+                "stop": float(signal["stop"]),
+                "merged": True,
+                "proven": False,
+                "origin_account": "left",
+                "left_grid_slot": int(lot["slot"]),
+                "reconfirm_level": float(signal["trigger"]),
+                "reconfirm_on_next_day": reconfirm_on_next_day,
+            })
+            state.right.append(promoted_lot)
+            promoted.append(promoted_lot)
+        state.left_value_line = None
+        state.left_grid_started = False
+        return promoted
+
+    def left_position_detached_from_value(row, state):
+        if state.left_value_line is None:
+            return False
+        close = pd.to_numeric(row.get("close"), errors="coerce")
+        if pd.isna(close):
+            return False
+        return float(close) / float(state.left_value_line) > 1.08
+
+    def left_to_right_switch_signal(code, date, candidate):
+        state = states[code]
+        if not state.left or state.right or code in pending_left_exits:
+            return None
+        data = frames[code]
+        indexes = data.index[data["date"].dt.normalize() == date]
+        if indexes.empty:
+            return None
+        index = int(indexes[0])
+        row = data.iloc[index]
+        if not left_position_detached_from_value(row, state):
+            return None
+        if candidate and not _enabled(candidate.get("signal_eligible"), default=True):
+            return None
+        if left_value_falsification_reason(candidate):
+            return None
+        signal = _right_signal(
+            data, index, plans.get(code),
+            auto_price_structure=auto_price_structure,
+            allow_structure_pullback=allow_structure_pullback,
+        )
+        if not signal:
+            return None
+        if (
+            float(signal.get("entry_evidence_score") or 0.0)
+            < configured_min_entry_evidence_score
+        ):
+            return None
+        return signal
+
     calendar = sorted({
         date.normalize()
         for frame in frames.values()
@@ -1247,6 +1315,15 @@ def run_portfolio_backtest(
             reason = left_value_falsification_reason(current_candidates.get(code))
             if reason:
                 pending_left_exits[code] = reason
+        left_right_switch_signals = {}
+        for code, state in states.items():
+            if not state.left or state.right:
+                continue
+            signal = left_to_right_switch_signal(
+                code, date, current_candidates.get(code, {}),
+            )
+            if signal:
+                left_right_switch_signals[code] = signal
         # Existing grids remain active even after dropping out of the daily
         # top ten. New campaigns, however, compete by candidate score so file
         # or ticker ordering can never decide which four symbols get capital.
@@ -1256,7 +1333,11 @@ def run_portfolio_backtest(
         ]
         new_left_candidates = []
         for code, candidate in current_candidates.items():
-            if code not in states or states[code].left_value_line is not None:
+            if (
+                code not in states
+                or states[code].left_value_line is not None
+                or states[code].right
+            ):
                 continue
             if not left_candidate_can_add(candidate):
                 continue
@@ -1277,6 +1358,8 @@ def run_portfolio_backtest(
         for code, grid_anchor in left_targets:
             state = states[code]
             if code in pending_left_exits:
+                continue
+            if code in left_right_switch_signals:
                 continue
             data = frames[code]
             indexes = data.index[data["date"].dt.normalize() == date]
@@ -1569,23 +1652,31 @@ def run_portfolio_backtest(
             or has_twenty_percent_float(date)
         )
         if entry_allowed:
-            for code in current_candidates:
+            right_entry_codes = sorted(
+                set(current_candidates) | set(left_right_switch_signals)
+            )
+            for code in right_entry_codes:
                 if code not in states or code in exited_today:
                     continue
-                if not _enabled(current_candidates[code].get("signal_eligible"), default=True):
+                candidate = current_candidates.get(code, {})
+                if (
+                    code not in left_right_switch_signals
+                    and not _enabled(candidate.get("signal_eligible"), default=True)
+                ):
                     continue
-                candidate = current_candidates[code]
                 allow_right = _enabled(candidate.get("allow_right"), default=True)
-                # A pure value candidate may add a separately managed right
-                # batch only after its left position exists (left-to-right).
+                # A pure value candidate can switch only after the left
+                # position has left the value zone and a right signal appears.
                 if not allow_right and not states[code].left:
+                    continue
+                if states[code].left and code not in left_right_switch_signals:
                     continue
                 data = frames[code]
                 indexes = data.index[data["date"].dt.normalize() == date]
                 if indexes.empty:
                     continue
                 index = int(indexes[0])
-                signal = _right_signal(
+                signal = left_right_switch_signals.get(code) or _right_signal(
                     data, index, plans.get(code),
                     auto_price_structure=auto_price_structure,
                     allow_structure_pullback=allow_structure_pullback,
@@ -1601,7 +1692,7 @@ def run_portfolio_backtest(
                             continue
                         if not symbol_has_float_profit(code, date, add_on_float_threshold()):
                             continue
-                    fundamental_score = float(current_candidates[code].get("candidate_score") or 0.0)
+                    fundamental_score = float(candidate.get("candidate_score") or 0.0)
                     entry_priority = (
                         fundamental_score
                         + float(signal["rank"]) * 8
@@ -1677,11 +1768,9 @@ def run_portfolio_backtest(
                     continue
                 existing_size = sum(lot["size"] for lot in states[code].right)
                 starting_new_right_campaign = not states[code].right or reopening_profit_tail
+                left_to_right = False
                 if starting_new_right_campaign:
-                    left_to_right = (
-                        bool(states[code].left)
-                        and not _enabled(candidate.get("allow_right"), default=True)
-                    )
+                    left_to_right = bool(states[code].left)
                     preferred_breakout = signal.get("signal_type") in {
                         "uptrend_50_reclaim",
                         "pullback_50_breakout",
@@ -1717,7 +1806,7 @@ def run_portfolio_backtest(
                     elif left_to_right:
                         left_size = sum(float(lot["size"]) for lot in states[code].left)
                         size = min(size, left_size * 0.50)
-                        entry_kind = f"左转右加仓(不超过左仓一半); {entry_kind}"
+                        entry_kind = f"左转右切换; 加仓不超过原左仓一半; {entry_kind}"
                 else:
                     if any(not lot.get("proven", False) for lot in states[code].right):
                         continue
@@ -1753,6 +1842,11 @@ def run_portfolio_backtest(
                 elif not states[code].right:
                     states[code].pending_tail_capacity_free = False
                     states[code].right_tail_capacity_free = False
+                promoted_left_lots = []
+                if left_to_right:
+                    promoted_left_lots = promote_left_grid_to_right_campaign(
+                        code, states[code], row, signal,
+                    )
                 batch = f"R{next_batch_id}"
                 next_batch_id += 1
                 states[code].right.append({
@@ -1761,7 +1855,7 @@ def run_portfolio_backtest(
                     "quantity": quantity,
                     "entry_fee_cash": entry_fee_cash,
                     "batch": batch,
-                    "merged": reopening_profit_tail or not bool(states[code].right),
+                    "merged": reopening_profit_tail or starting_new_right_campaign,
                     "proven": False,
                     "industry_tags": sorted(candidate_industry_tags(candidate)),
                     "reconfirm_level": float(signal["trigger"]),
@@ -1779,6 +1873,15 @@ def run_portfolio_backtest(
                         sum(float(lot["quantity"]) for lot in states[code].right),
                         configured_profit_tranches,
                     )
+                    if promoted_left_lots:
+                        add_event(
+                            date, code, "左转右接管左仓", fill["price"], 0.0,
+                            (
+                                f"接管左侧批次={','.join(lot['batch'] for lot in promoted_left_lots)}; "
+                                f"右侧止损={float(signal['stop']):.3f}; 左侧网格暂停"
+                            ),
+                            account_mode="right",
+                        )
                 if not states[code].right_plan_date:
                     states[code].right_plan_date = row["date"]
                 structure_metadata = {
@@ -1806,11 +1909,11 @@ def run_portfolio_backtest(
                     cash_limited=cash_limited,
                     lot_rounded=size < requested_size - 1e-9 and not cash_limited,
                     board_lot_size=board_lot_size(code),
-                    selection_reason=current_candidates[code].get("selection_reason"),
-                    trade_basis_score=current_candidates[code].get("trade_basis_score"),
-                    trade_basis_reason=current_candidates[code].get("trade_basis_reason"),
-                    technical_alignment=current_candidates[code].get("technical_alignment"),
-                    ima_web_validation=current_candidates[code].get("ima_web_validation"),
+                    selection_reason=candidate.get("selection_reason"),
+                    trade_basis_score=candidate.get("trade_basis_score"),
+                    trade_basis_reason=candidate.get("trade_basis_reason"),
+                    technical_alignment=candidate.get("technical_alignment"),
+                    ima_web_validation=candidate.get("ima_web_validation"),
                     **structure_metadata,
                 )
 
