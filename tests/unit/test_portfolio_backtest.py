@@ -421,6 +421,50 @@ def test_up_market_opens_only_first_right_side_symbol_without_ten_percent_profit
     assert "整理平台收盘放量突破" in result["events"][0]["reason"]
 
 
+def test_right_side_unlock_uses_reached_profit_not_current_pullback():
+    dates = pd.bdate_range("2026-01-01", periods=84)
+    first_entry = dates[79].strftime("%Y-%m-%d")
+    second_entry = dates[83].strftime("%Y-%m-%d")
+    a_closes = [10.0] * 79 + [10.4, 11.6, 10.7, 10.7, 10.7]
+    b_closes = [10.0] * 83 + [10.4]
+
+    def frame(closes):
+        return pd.DataFrame({
+            "date": dates,
+            "open": [10.0] * len(dates),
+            "high": closes,
+            "low": [10.0] * len(dates),
+            "close": closes,
+            "volume": [1000] * (len(dates) - 1) + [3000],
+        })
+
+    a = frame(a_closes)
+    a.loc[79, "volume"] = 3000
+    b = frame(b_closes)
+    snapshots = {
+        first_entry: [{"code": "A", "name": "A"}],
+        dates[80].strftime("%Y-%m-%d"): [{"code": "A", "name": "A"}],
+        dates[81].strftime("%Y-%m-%d"): [{"code": "A", "name": "A"}],
+        dates[82].strftime("%Y-%m-%d"): [{"code": "A", "name": "A"}],
+        second_entry: [{"code": "A", "name": "A"}, {"code": "B", "name": "B"}],
+    }
+    formula = {
+        date.strftime("%Y-%m-%d"): {"phase": "active", "window_up_streak": 5}
+        for date in dates[79:84]
+    }
+
+    result = run_portfolio_backtest(
+        {"A": a, "B": b}, snapshots, formula,
+        requested_start=first_entry, end_date=second_entry, max_positions=2,
+    )
+
+    bought_codes = [
+        event["code"] for event in result["events"]
+        if event["action"] == "右侧买入"
+    ]
+    assert bought_codes == ["A", "B"]
+
+
 def test_new_breakout_lot_waits_for_next_open_because_of_t_plus_one():
     bars = breakout_bars()
     bars.loc[bars.index[-1], ["open", "high", "low", "close"]] = [10.0, 10.4, 9.8, 10.4]
@@ -927,6 +971,36 @@ def test_unified_candidate_interface_honors_signal_eligible():
     assert result["final_positions"] == []
 
 
+def test_daily_top10_quota_diagnostic_can_still_wait_for_right_signal():
+    bars = breakout_bars()
+    date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
+
+    result = run_portfolio_backtest(
+        {"A": bars},
+        {date: [{
+            "code": "A",
+            "name": "A",
+            "candidate_source": "growth_leadership",
+            "selected_for_trading": False,
+            "signal_eligible": False,
+            "candidate_failure_reason": (
+                "not_selected_for_trading: daily_top10_quota_or_core_reservation"
+            ),
+            "quality_score": 90,
+            "earnings_yoy": 0.30,
+            "mktcap": 300,
+            "trade_basis_score": 9,
+            "leadership_score": 20,
+        }]},
+        {date: {"phase": "active", "window_up_streak": 5}},
+        requested_start=date,
+        end_date=date,
+    )
+
+    assert [event["action"] for event in result["events"]] == ["右侧买入"]
+    assert result["events"][0]["code"] == "A"
+
+
 def test_after_close_snapshot_becomes_effective_on_next_trading_day():
     bars = breakout_bars()
     signal_date = bars.iloc[-1]["date"]
@@ -1111,6 +1185,49 @@ def test_configured_price_structure_ratio_is_a_pre_known_condition_order():
 
     assert signal["signal_type"] == "uptrend_support_pullback"
     assert result["events"] == []
+
+
+def test_leading_pullback_pilot_is_explicit_sensitivity_mode():
+    dates = pd.bdate_range("2026-01-01", periods=80)
+    closes = list(pd.Series(range(78)).map(lambda value: 7.0 + value * 3.0 / 77)) + [10.2, 10.1]
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": closes,
+        "high": [value + 0.2 for value in closes],
+        "low": [value - 0.2 for value in closes[:-1]] + [9.8],
+        "close": closes,
+        "volume": [1000] * 79 + [2000],
+    })
+    date = dates[-1].strftime("%Y-%m-%d")
+    plans = {"plans": {"A": {"price_structures": [{
+        "kind": "uptrend_support", "uptrend_low": 5.0,
+        "uptrend_high": 15.0, "ratio": 0.50,
+        "confluence": ["MA20"],
+    }]}}}
+    snapshots = {date: [{
+        "code": "A",
+        "name": "A",
+        "trade_basis_score": 8,
+        "leadership_score": 25,
+    }]}
+    phases = {date: {"phase": "active", "window_up_streak": 3, "window_down_streak": 0}}
+
+    default_result = run_portfolio_backtest(
+        {"A": bars}, snapshots, phases,
+        requested_start=date, end_date=date, trade_plans=plans,
+        min_entry_evidence_score=8,
+    )
+    pilot_result = run_portfolio_backtest(
+        {"A": bars}, snapshots, phases,
+        requested_start=date, end_date=date, trade_plans=plans,
+        min_entry_evidence_score=8, allow_pullback_pilot=True,
+    )
+
+    assert default_result["events"] == []
+    assert default_result["allow_pullback_pilot"] is False
+    assert pilot_result["allow_pullback_pilot"] is True
+    assert pilot_result["events"][0]["signal_type"] == "uptrend_support_pullback"
+    assert pilot_result["events"][0]["requested_position_pct"] == pytest.approx(15)
 
 
 def test_symbol_cap_is_independent_from_price_structure_ratios():

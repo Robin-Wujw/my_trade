@@ -322,7 +322,7 @@ def infer_technical_entry(data: pd.DataFrame, index: int) -> dict | None:
             and float(row["close"]) >= half
         ):
             signals.append({
-                "rank": 3,
+                "rank": 4,
                 "trigger": half,
                 "stop": half,
                 "order_type": "limit",

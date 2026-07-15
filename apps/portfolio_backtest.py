@@ -570,7 +570,7 @@ def main(argv=None):
         help="60-session return correlation used to group related exposure when tags are missing",
     )
     parser.add_argument(
-        "--min-entry-evidence-score", type=float, default=8.0,
+        "--min-entry-evidence-score", type=float, default=7.0,
         help="minimum multi-signal technical evidence score for an executable entry",
     )
     parser.add_argument(
@@ -622,6 +622,10 @@ def main(argv=None):
     parser.add_argument(
         "--no-structure-pullback", action="store_true",
         help="allow structure breakout orders but disable structure support pullback orders",
+    )
+    parser.add_argument(
+        "--allow-pullback-pilot", action="store_true",
+        help="sensitivity mode: allow leading-group support pullbacks as small first-entry pilots",
     )
     parser.add_argument(
         "--close-confirmed-execution", choices=("close_proxy", "next_open"),
@@ -716,6 +720,7 @@ def main(argv=None):
         signals_effective_next_day=True,
         auto_price_structure=not args.no_auto_price_structure,
         allow_structure_pullback=not args.no_structure_pullback,
+        allow_pullback_pilot=args.allow_pullback_pilot,
         close_confirmed_execution=args.close_confirmed_execution,
         commission_rate=args.commission_rate,
         minimum_commission=args.minimum_commission,

@@ -379,7 +379,7 @@ def _price_structure_signal(
             ):
                 confluence = ",".join(map(str, structure["confluence"]))
                 return {
-                    "rank": 3, "stop": level, "trigger": float(row["close"]),
+                    "rank": 4, "stop": level, "trigger": float(row["close"]),
                     "order_type": "close",
                     "reason": f"上涨波段{ratio:.1%}拉回支撑5%区域; 共振={confluence}",
                     "known_volume_ratio": 1.0, "structure_ratio": ratio,
@@ -437,6 +437,7 @@ def run_portfolio_backtest(
     signals_effective_next_day=False,
     auto_price_structure=True,
     allow_structure_pullback=True,
+    allow_pullback_pilot=False,
     close_confirmed_execution="next_open",
     commission_rate=0.0,
     minimum_commission=0.0,
@@ -538,6 +539,7 @@ def run_portfolio_backtest(
     configured_min_entry_evidence_score = max(
         0.0, float(min_entry_evidence_score),
     )
+    configured_allow_pullback_pilot = bool(allow_pullback_pilot)
     configured_profit_tranches = max(2, min(5, int(profit_tranches)))
     configured_profit_tail_min_return = max(0.0, float(profit_tail_min_return))
     configured_left_grid_unit = max(0.0, float(left_grid_unit))
@@ -548,6 +550,7 @@ def run_portfolio_backtest(
     for state in states.values():
         state.right_parts = configured_profit_tranches
     concentration_blocks = []
+    entry_blocks = []
 
     def symbol_limit_reached():
         configured = configured_positions
@@ -599,6 +602,49 @@ def run_portfolio_backtest(
                 or "value thesis falsified by financial snapshot"
             ).strip()
         return ""
+
+    def candidate_failure_reason(candidate):
+        if not candidate:
+            return ""
+        return str(candidate.get("candidate_failure_reason") or "").strip()
+
+    def candidate_is_daily_quota_diagnostic(candidate):
+        return candidate_failure_reason(candidate).startswith(
+            "not_selected_for_trading: daily_top10_quota_or_core_reservation"
+        )
+
+    def candidate_passes_hard_gate(candidate):
+        if not candidate:
+            return False
+        quality = pd.to_numeric(candidate.get("quality_score"), errors="coerce")
+        growth = pd.to_numeric(candidate.get("earnings_yoy"), errors="coerce")
+        market_cap = pd.to_numeric(candidate.get("mktcap"), errors="coerce")
+        return (
+            pd.notna(quality)
+            and pd.notna(growth)
+            and pd.notna(market_cap)
+            and float(quality) >= 70.0
+            and float(growth) >= 0.10
+            and float(market_cap) >= 100.0
+        )
+
+    def right_candidate_can_evaluate(candidate):
+        if not candidate:
+            return False
+        if (
+            _enabled(candidate.get("selected_for_trading"), default=True)
+            and _enabled(candidate.get("signal_eligible"), default=True)
+        ):
+            return True
+        # Ranking out of the daily Top10 is a report/display limit.  It should
+        # not prevent a right-side model candidate from waiting for its own
+        # high-quality technical setup.
+        return (
+            candidate_is_daily_quota_diagnostic(candidate)
+            and _enabled(candidate.get("allow_right"), default=False)
+            and candidate_passes_hard_gate(candidate)
+            and not left_value_falsification_reason(candidate)
+        )
 
     def left_candidate_can_add(candidate):
         if not candidate:
@@ -676,6 +722,22 @@ def run_portfolio_backtest(
             return True
         return False
 
+    def record_entry_block(date, code, candidate, signal, reason):
+        entry_blocks.append({
+            "date": pd.Timestamp(date).strftime("%Y-%m-%d"),
+            "code": code,
+            "name": candidate.get("name") or code,
+            "reason": reason,
+            "signal_type": signal.get("signal_type") if signal else None,
+            "entry_evidence_score": (
+                signal.get("entry_evidence_score") if signal else None
+            ),
+            "candidate_score": candidate.get("candidate_score"),
+            "trade_basis_score": candidate.get("trade_basis_score"),
+            "leadership_score": candidate.get("leadership_score"),
+            "candidate_failure_reason": candidate_failure_reason(candidate),
+        })
+
     def has_twenty_percent_float(date):
         for code in occupied_codes():
             state = states[code]
@@ -684,6 +746,8 @@ def run_portfolio_backtest(
                 continue
             close = float(visible.iloc[-1]["close"])
             if any(close / lot["cost"] - 1 >= 0.20 for lot in state.right):
+                return True
+            if any(float(lot.get("max_return") or 0.0) >= 0.20 for lot in state.right):
                 return True
         return False
 
@@ -706,10 +770,15 @@ def run_portfolio_backtest(
             if visible.empty or not state.right:
                 continue
             close = float(visible.iloc[-1]["close"])
-            cost = sum(lot["quantity"] * lot["cost"] for lot in state.right) / sum(
-                lot["quantity"] for lot in state.right
-            )
-            returns.append(close / cost - 1)
+            lot_returns = [
+                max(
+                    float(lot.get("max_return") or 0.0),
+                    close / float(lot["cost"]) - 1,
+                )
+                for lot in state.right
+            ]
+            if lot_returns:
+                returns.append(max(lot_returns))
         return sorted(returns, reverse=True)
 
     def can_open_new_right_symbol(date):
@@ -718,11 +787,31 @@ def run_portfolio_backtest(
             return True
         if len(returns) >= configured_positions:
             return False
-        if current_up_streak >= 3:
+        if current_down_streak < 3:
             return all(value >= 0.10 for value in returns)
         if len(returns) == 1:
             return returns[0] >= 0.20
         return returns[0] >= 0.20 and all(value >= 0.10 for value in returns[1:])
+
+    def leading_pullback_pilot_starter(candidate, signal):
+        if not configured_allow_pullback_pilot:
+            return False
+        if not candidate or not signal:
+            return False
+        if signal.get("signal_type") != "uptrend_support_pullback":
+            return False
+        if not right_market_active() or current_down_streak >= 3:
+            return False
+        leadership = pd.to_numeric(candidate.get("leadership_score"), errors="coerce")
+        trade_basis = pd.to_numeric(candidate.get("trade_basis_score"), errors="coerce")
+        evidence_score = float(signal.get("entry_evidence_score") or signal.get("rank") or 0.0)
+        return (
+            pd.notna(leadership)
+            and float(leadership) >= 24.0
+            and pd.notna(trade_basis)
+            and float(trade_basis) >= 6.0
+            and evidence_score >= max(10.0, configured_min_entry_evidence_score)
+        )
 
     def trade_fee_components(turnover, *, sell=False):
         turnover = abs(float(turnover))
@@ -947,6 +1036,7 @@ def run_portfolio_backtest(
                 "stop": float(signal["stop"]),
                 "merged": True,
                 "proven": False,
+                "max_return": 0.0,
                 "origin_account": "left",
                 "origin_batch": origin_batch,
                 "left_grid_slot": int(lot["slot"]),
@@ -980,7 +1070,11 @@ def run_portfolio_backtest(
         row = data.iloc[index]
         if not left_position_detached_from_value(row, state):
             return None
-        if candidate and not _enabled(candidate.get("signal_eligible"), default=True):
+        if (
+            candidate
+            and not _enabled(candidate.get("signal_eligible"), default=True)
+            and not candidate_is_daily_quota_diagnostic(candidate)
+        ):
             return None
         if left_value_falsification_reason(candidate):
             return None
@@ -1523,14 +1617,22 @@ def run_portfolio_backtest(
             if state.right:
                 for lot in list(state.right):
                     prior_close = float(data.iloc[index - 1]["close"]) if index > 0 else None
-                    if prior_close is not None and prior_close / lot["cost"] - 1 >= 0.10:
-                        lot["proven"] = True
+                    if prior_close is not None:
+                        prior_return = prior_close / lot["cost"] - 1
+                        lot["max_return"] = max(
+                            float(lot.get("max_return") or 0.0),
+                            prior_return,
+                        )
+                        if prior_return >= 0.10:
+                            lot["proven"] = True
                     if not _entry_risk_still_controls_lot(lot, state):
                         continue
-                    time_limit = 8 if current_down_streak >= 3 else 13
+                    time_limit = int(lot.get("time_limit_days") or (8 if current_down_streak >= 3 else 13))
+                    space_stop_pct = lot.get("space_stop_pct")
                     risk = position_exit_snapshot(
                         history, lot["cost"], lot["date"], entry_mode="right",
                         condition_stop=lot["stop"], time_limit_days=time_limit,
+                        space_stop_pct=space_stop_pct,
                     )
                     if risk.get("space_stop_triggered"):
                         quantity = float(lot["quantity"])
@@ -1683,7 +1785,7 @@ def run_portfolio_backtest(
                 candidate = current_candidates.get(code, {})
                 if (
                     code not in left_right_switch_signals
-                    and not _enabled(candidate.get("signal_eligible"), default=True)
+                    and not right_candidate_can_evaluate(candidate)
                 ):
                     continue
                 allow_right = _enabled(candidate.get("allow_right"), default=True)
@@ -1703,37 +1805,46 @@ def run_portfolio_backtest(
                     auto_price_structure=auto_price_structure,
                     allow_structure_pullback=allow_structure_pullback,
                 )
-                if signal:
-                    if (
-                        float(signal.get("entry_evidence_score") or 0.0)
-                        < configured_min_entry_evidence_score
-                    ):
-                        continue
-                    if signal.get("signal_type") == "uptrend_support_pullback":
-                        if not states[code].right:
+                if not signal:
+                    continue
+                if (
+                    float(signal.get("entry_evidence_score") or 0.0)
+                    < configured_min_entry_evidence_score
+                ):
+                    record_entry_block(date, code, candidate, signal, "entry_evidence_below_min")
+                    continue
+                if signal.get("signal_type") == "uptrend_support_pullback":
+                    if not states[code].right:
+                        if not leading_pullback_pilot_starter(candidate, signal):
+                            record_entry_block(date, code, candidate, signal, "support_pullback_not_first_entry")
                             continue
-                        if not symbol_has_float_profit(code, date, add_on_float_threshold()):
+                    if not symbol_has_float_profit(code, date, add_on_float_threshold()):
+                        if states[code].right:
+                            record_entry_block(date, code, candidate, signal, "add_current_profit_not_met")
                             continue
-                    fundamental_score = float(candidate.get("candidate_score") or 0.0)
-                    entry_priority = (
-                        fundamental_score
-                        + float(signal["rank"]) * 8
-                        + min(float(signal["known_volume_ratio"]), 5.0) * 2
-                    )
-                    candidates.append((
-                        entry_priority, fundamental_score, signal["rank"],
-                        code, index, signal,
-                    ))
+                fundamental_score = float(candidate.get("candidate_score") or 0.0)
+                entry_priority = (
+                    fundamental_score
+                    + float(signal["rank"]) * 8
+                    + min(float(signal["known_volume_ratio"]), 5.0) * 2
+                )
+                candidates.append((
+                    entry_priority, fundamental_score, signal["rank"],
+                    code, index, signal,
+                ))
             for _, fundamental_score, __, code, index, signal in sorted(candidates, reverse=True):
                 reopening_profit_tail = _is_profit_tail(states[code])
                 opening_right_symbol = code not in capacity_codes()
                 candidate = current_candidates.get(code, {})
                 if opening_right_symbol:
                     if total_symbol_limit_reached(code):
+                        record_entry_block(date, code, candidate, signal, "total_symbol_limit")
                         continue
                     if industry_limit_reached(code, candidate, date):
+                        record_entry_block(date, code, candidate, signal, "industry_or_correlation_limit")
                         continue
                     if not can_open_new_right_symbol(date):
+                        record_entry_block(date, code, candidate, signal, "new_symbol_unlock_not_met")
                         continue
                     if symbol_limit_reached():
                         incoming_stop_pct = max(0.0, 1 - float(signal["stop"]) / float(frames[code].iloc[index]["close"]))
@@ -1767,6 +1878,9 @@ def run_portfolio_backtest(
                                 weak.append((held_score, held_code))
                         if weak:
                             pending_weak_exits.add(min(weak)[1])
+                            record_entry_block(date, code, candidate, signal, "weak_replacement_scheduled")
+                        else:
+                            record_entry_block(date, code, candidate, signal, "symbol_limit_no_weak_replacement")
                         continue
                 row = frames[code].iloc[index]
                 previous_close = frames[code].iloc[index - 1]["close"] if index > 0 else None
@@ -1787,10 +1901,12 @@ def run_portfolio_backtest(
                         previous_close=previous_close, code=code, is_st=is_st(code),
                     )
                 if not fill["filled"]:
+                    record_entry_block(date, code, candidate, signal, "order_not_filled")
                     continue
                 existing_size = sum(lot["size"] for lot in states[code].right)
                 starting_new_right_campaign = not states[code].right or reopening_profit_tail
                 left_to_right = False
+                pullback_pilot = False
                 if starting_new_right_campaign:
                     left_to_right = bool(states[code].left)
                     preferred_breakout = signal.get("signal_type") in {
@@ -1807,13 +1923,19 @@ def run_portfolio_backtest(
                         "volume_price_node",
                         "bull_run_half_pullback",
                     }
+                    pullback_pilot = leading_pullback_pilot_starter(
+                        candidate, signal,
+                    )
                     direct_breakout = signal["order_type"] == "stop"
                     size = (
                         0.20 if current_down_streak >= 3
+                        else 0.15 if pullback_pilot
                         else 0.30 if preferred_breakout
                         else 0.20
                     )
-                    if preferred_breakout:
+                    if pullback_pilot:
+                        entry_kind = "领先族群拉回试错首仓"
+                    elif preferred_breakout:
                         entry_kind = "33未三日下行首仓" if current_down_streak < 3 else "33三日下行试错首仓"
                     elif inferred_entry:
                         entry_kind = "技术合理买点试探仓"
@@ -1841,14 +1963,17 @@ def run_portfolio_backtest(
                     symbol_exposure(code), size, max_symbol_exposure,
                 )
                 if size <= 1e-9:
+                    record_entry_block(date, code, candidate, signal, "symbol_exposure_cap")
                     continue
                 if gross_exposure() + size > 1.0 + 1e-9:
+                    record_entry_block(date, code, candidate, signal, "gross_exposure_cap")
                     continue
                 requested_size = size
                 size, quantity, pnl, entry_fee_cash, cash_limited = execute_buy(
                     code, requested_size, float(fill["price"]),
                 )
                 if size <= 1e-9:
+                    record_entry_block(date, code, candidate, signal, "cash_or_board_lot_limit")
                     continue
                 if reopening_profit_tail:
                     for lot in states[code].right:
@@ -1877,6 +2002,9 @@ def run_portfolio_backtest(
                     "batch": batch,
                     "merged": reopening_profit_tail or starting_new_right_campaign,
                     "proven": False,
+                    "max_return": 0.0,
+                    "time_limit_days": 8 if pullback_pilot else None,
+                    "space_stop_pct": 0.07 if pullback_pilot else None,
                     "industry_tags": sorted(candidate_industry_tags(candidate)),
                     "reconfirm_level": float(signal["trigger"]),
                     "reconfirm_on_next_day": (
@@ -2008,6 +2136,7 @@ def run_portfolio_backtest(
             "stop": round(lot["stop"], 3),
             "merged": lot["merged"],
             "proven": lot.get("proven", False),
+            "max_return_pct": round(float(lot.get("max_return") or 0.0) * 100, 2),
         }
         if lot.get("origin_account"):
             item["origin_account"] = lot["origin_account"]
@@ -2175,8 +2304,11 @@ def run_portfolio_backtest(
         "max_same_industry": configured_same_industry,
         "same_theme_correlation": configured_theme_correlation,
         "min_entry_evidence_score": configured_min_entry_evidence_score,
+        "allow_pullback_pilot": configured_allow_pullback_pilot,
         "concentration_block_count": len(concentration_blocks),
         "concentration_blocks": concentration_blocks,
+        "entry_block_count": len(entry_blocks),
+        "entry_blocks": entry_blocks,
         "board_lot_policy": {"sh.688": 200, "default": 100},
         "structure_signal_counts": structure_signal_counts,
         "realized_return_pct": round(realized * 100, 3),
