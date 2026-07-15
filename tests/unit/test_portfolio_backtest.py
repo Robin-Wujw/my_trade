@@ -690,6 +690,48 @@ def test_right_side_market_allows_only_one_left_symbol():
     assert result["maximum_left_side_symbols"] == 1
 
 
+def test_right_side_market_reduces_existing_left_symbols_to_one():
+    dates = pd.bdate_range("2026-01-01", periods=83)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 83,
+        "high": [100.5] * 83,
+        "low": [99.5] * 80 + [99.0, 99.0, 99.0],
+        "close": [100.0] * 83,
+        "volume": [1000.0] * 83,
+    })
+    first = dates[80].strftime("%Y-%m-%d")
+    right_market = dates[81].strftime("%Y-%m-%d")
+    exit_day = dates[82].strftime("%Y-%m-%d")
+
+    result = run_portfolio_backtest(
+        {"A": bars, "B": bars},
+        {first: [
+            {
+                "code": "A", "candidate_source": "value_model",
+                "value_line": 100.0, "candidate_score": 20,
+            },
+            {
+                "code": "B", "candidate_source": "value_model",
+                "value_line": 100.0, "candidate_score": 10,
+            },
+        ]},
+        {
+            first: {"phase": "waiting", "window_up_streak": 0},
+            right_market: {"phase": "watch", "window_up_streak": 3},
+            exit_day: {"phase": "watch", "window_up_streak": 3},
+        },
+        requested_start=first, end_date=exit_day, max_positions=5,
+    )
+
+    assert [item["code"] for item in result["final_positions"]] == ["A"]
+    quota_exits = [
+        event for event in result["events"]
+        if event["action"] == "左侧右侧行情限额清仓"
+    ]
+    assert {event["code"] for event in quota_exits} == {"B"}
+
+
 def test_total_symbol_cap_counts_left_cores_that_do_not_use_capacity():
     dates = pd.bdate_range("2026-01-01", periods=83)
     bars = pd.DataFrame({

@@ -466,6 +466,7 @@ def run_portfolio_backtest(
     pending_candidate_exits = set()
     pending_weak_exits = set()
     pending_left_exits = {}
+    pending_left_quota_exits = {}
 
     candidate_names = {
         str(item["code"]): str(item.get("name") or "")
@@ -1005,6 +1006,42 @@ def run_portfolio_backtest(
                 state.pending_tail_capacity_free = False
                 state.right_tail_capacity_free = False
 
+        eligible_formula_dates = [
+            item for item in formula_dates
+            if item < date or (not signals_effective_next_day and item <= date)
+        ]
+        formula_state = (
+            formula_by_date[eligible_formula_dates[-1]]
+            if eligible_formula_dates else current_phase
+        )
+        if isinstance(formula_state, dict):
+            current_phase = str(formula_state.get("phase") or current_phase)
+            current_down_streak = int(formula_state.get("window_down_streak") or 0)
+            current_up_streak = int(formula_state.get("window_up_streak") or 0)
+        else:
+            current_phase = str(formula_state)
+            current_down_streak = 0
+            current_up_streak = 0
+
+        if right_market_active() and len(left_side_codes()) > 1:
+            def left_keep_rank(code):
+                state = states[code]
+                score = float(last_candidate_scores.get(code, 0.0) or 0.0)
+                return (
+                    bool(state.right),
+                    score,
+                    symbol_exposure(code),
+                    code,
+                )
+
+            keep_code = max(left_side_codes(), key=left_keep_rank)
+            for code in left_side_codes() - {keep_code}:
+                if code in pending_left_exits or code in pending_left_quota_exits:
+                    continue
+                pending_left_quota_exits[code] = (
+                    f"右侧行情左侧标的限额; 保留={keep_code}"
+                )
+
         for code, state in states.items():
             pending_lots = [
                 lot for lot in state.right
@@ -1152,6 +1189,44 @@ def run_portfolio_backtest(
             state.left_grid_started = False
             pending_left_exits.pop(code, None)
             exited_today.add(code)
+        for code, reason in list(pending_left_quota_exits.items()):
+            state = states.get(code)
+            if state is None or not state.left:
+                if state is not None:
+                    state.left_value_line = None
+                    state.left_grid_started = False
+                pending_left_quota_exits.pop(code, None)
+                continue
+            data = frames[code]
+            indexes = data.index[data["date"].dt.normalize() == date]
+            if indexes.empty:
+                continue
+            index = int(indexes[0])
+            row = data.iloc[index]
+            previous_close = data.iloc[index - 1]["close"] if index > 0 else None
+            fill = fill_sell_stop(
+                row, stop_price=float("inf"), previous_close=previous_close,
+                code=code, is_st=is_st(code),
+            )
+            if not fill["filled"]:
+                continue
+            sell = float(fill["price"])
+            for lot in list(state.left):
+                quantity = float(lot["quantity"])
+                entry_fee_cash = float(lot.get("entry_fee_cash") or 0.0)
+                size, pnl = execute_sell(quantity, sell, lot["cost"])
+                state.left.remove(lot)
+                add_event(
+                    date, code, "左侧右侧行情限额清仓", sell, -size,
+                    f"{lot['batch']}; {reason}; 次日开盘退出", pnl,
+                    cost_basis=lot["cost"], execution_quantity=-quantity,
+                    entry_fee_cash=entry_fee_cash, grid_slot=int(lot["slot"]),
+                    value_line=state.left_value_line, account_mode="left",
+                )
+            state.left_value_line = None
+            state.left_grid_started = False
+            pending_left_quota_exits.pop(code, None)
+            exited_today.add(code)
         eligible_snapshots = [
             item for item in snapshot_dates
             if item < date or (not signals_effective_next_day and item <= date)
@@ -1173,23 +1248,6 @@ def run_portfolio_backtest(
             reason = left_value_falsification_reason(current_candidates.get(code))
             if reason:
                 pending_left_exits[code] = reason
-        eligible_formula_dates = [
-            item for item in formula_dates
-            if item < date or (not signals_effective_next_day and item <= date)
-        ]
-        formula_state = (
-            formula_by_date[eligible_formula_dates[-1]]
-            if eligible_formula_dates else current_phase
-        )
-        if isinstance(formula_state, dict):
-            current_phase = str(formula_state.get("phase") or current_phase)
-            current_down_streak = int(formula_state.get("window_down_streak") or 0)
-            current_up_streak = int(formula_state.get("window_up_streak") or 0)
-        else:
-            current_phase = str(formula_state)
-            current_down_streak = 0
-            current_up_streak = 0
-
         # Existing grids remain active even after dropping out of the daily
         # top ten. New campaigns, however, compete by candidate score so file
         # or ticker ordering can never decide which four symbols get capital.
@@ -1261,15 +1319,19 @@ def run_portfolio_backtest(
                 )
 
             held_slots = {int(lot["slot"]) for lot in state.left}
-            starting_new_symbol = not state.left_grid_started and code not in capacity_codes()
-            if starting_new_symbol:
+            starting_new_left_plan = (
+                not state.left_grid_started and code not in left_side_codes()
+            )
+            starting_new_symbol = starting_new_left_plan and code not in capacity_codes()
+            if starting_new_left_plan:
                 if (
-                    symbol_limit_reached()
-                    or total_symbol_limit_reached(code)
+                    total_symbol_limit_reached(code)
                     or left_symbol_limit_reached(code)
-                    or industry_limit_reached(code, candidate, date)
                 ):
                     continue
+                if starting_new_symbol:
+                    if symbol_limit_reached() or industry_limit_reached(code, candidate, date):
+                        continue
             for planned in plan_by_slot.values():
                 if not can_add_left:
                     continue
@@ -1781,6 +1843,9 @@ def run_portfolio_backtest(
             "capacity_position_count": len(capacity_codes()),
             "total_held_symbol_count": len(occupied_codes()),
             "left_side_symbol_count": len(left_side_codes()),
+            "right_market_left_side_symbol_count": (
+                len(left_side_codes()) if right_market_active() else 0
+            ),
             "profit_tail_count": sum(
                 _is_profit_tail(state) for state in states.values()
             ),
@@ -1947,6 +2012,13 @@ def run_portfolio_backtest(
         ),
         "maximum_left_side_symbols": max(
             (row["left_side_symbol_count"] for row in equity_curve), default=0,
+        ),
+        "maximum_right_market_left_side_symbols": max(
+            (
+                row["right_market_left_side_symbol_count"]
+                for row in equity_curve
+            ),
+            default=0,
         ),
         "maximum_profit_tail_count": max(
             (row["profit_tail_count"] for row in equity_curve), default=0,
