@@ -547,15 +547,35 @@ def validate_backtest_input_coverage(
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="候选池、Formula33和三持仓组合回测")
+    parser = argparse.ArgumentParser(description="候选池、Formula33和四持仓组合回测")
     parser.add_argument("--start-date", default="2026-01-01")
     parser.add_argument(
         "--end-date", default="",
         help="default: latest session whose daily bar should be available",
     )
     parser.add_argument(
-        "--max-positions", type=int, default=0,
-        help="maximum symbols; 0 disables the symbol-count cap while exposure stays <=100%%",
+        "--max-positions", type=int, default=4,
+        help="maximum symbols, hard-capped at 4",
+    )
+    parser.add_argument(
+        "--max-same-industry", type=int, default=2,
+        help="maximum simultaneously held symbols sharing a dated industry/board tag",
+    )
+    parser.add_argument(
+        "--same-theme-correlation", type=float, default=0.60,
+        help="60-session return correlation used to group related exposure when tags are missing",
+    )
+    parser.add_argument(
+        "--min-entry-evidence-score", type=float, default=6.0,
+        help="minimum multi-signal technical evidence score for an executable entry",
+    )
+    parser.add_argument(
+        "--profit-tail-min-return", type=float, default=0.50,
+        help="minimum current return for the last tranche not to consume a slot",
+    )
+    parser.add_argument(
+        "--profit-tranches", type=int, choices=(2, 3, 4, 5), default=5,
+        help="number of profit-taking tranches; the last is reserved for maximum-profit-half",
     )
     parser.add_argument(
         "--codes",
@@ -573,7 +593,7 @@ def main(argv=None):
     )
     parser.add_argument(
         "--candidate-directory",
-        default=str(PATHS.runtime_root / "backtests" / "candidate_snapshots" / "unified-selection-v3"),
+        default=str(PATHS.runtime_root / "backtests" / "candidate_snapshots" / "unified-selection-v4"),
     )
     parser.add_argument(
         "--formula-history",
@@ -682,6 +702,11 @@ def main(argv=None):
         end_date=args.end_date,
         trade_plans=trade_plans,
         max_positions=None if args.max_positions == 0 else args.max_positions,
+        max_same_industry=args.max_same_industry,
+        same_theme_correlation=args.same_theme_correlation,
+        min_entry_evidence_score=args.min_entry_evidence_score,
+        profit_tranches=args.profit_tranches,
+        profit_tail_min_return=args.profit_tail_min_return,
         exit_tail_on_candidate_removal=args.exit_tail_on_candidate_removal,
         signals_effective_next_day=True,
         auto_price_structure=not args.no_auto_price_structure,

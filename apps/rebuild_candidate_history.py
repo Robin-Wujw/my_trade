@@ -17,7 +17,7 @@ def main(argv=None):
     parser.add_argument("--end-date", default="2026-07-10")
     parser.add_argument(
         "--output-directory",
-        default=str(PATHS.runtime_root / "backtests" / "candidate_snapshots" / "unified-selection-v3"),
+        default=str(PATHS.runtime_root / "backtests" / "candidate_snapshots" / "unified-selection-v4"),
     )
     args = parser.parse_args(argv)
     database = Database(PATHS.database, code_version="candidate-history-v3")

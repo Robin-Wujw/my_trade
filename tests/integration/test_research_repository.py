@@ -21,6 +21,13 @@ def test_research_repository_persists_candidates_formula_and_backtest(tmp_path):
             "trade_basis_reason": "MA20/MA60同步上扬",
             "technical_alignment": "trade_ready",
             "ima_web_validation": "aligned",
+            "return_20d": 0.12,
+            "return_60d": 0.28,
+            "return_120d": 0.45,
+            "distance_120d_high": -0.03,
+            "leadership_score": 22,
+            "leadership_reason": "20日强度+12.0%；距120日高点-3.0%",
+            "long_term_structure_favorable": True,
         }],
         "2026-01-06": [],
     }, version="test-v1") == 1
@@ -70,7 +77,8 @@ def test_research_repository_persists_candidates_formula_and_backtest(tmp_path):
     try:
         row = connection.execute(
             """
-            SELECT trade_basis_score, technical_alignment, ima_web_validation
+            SELECT trade_basis_score, technical_alignment, ima_web_validation,
+                   leadership_score, long_term_structure_favorable
             FROM derived.candidate_snapshots
             """
         ).fetchone()
@@ -89,7 +97,7 @@ def test_research_repository_persists_candidates_formula_and_backtest(tmp_path):
         ).fetchall()
     finally:
         connection.close()
-    assert row == (7.0, "trade_ready", "aligned")
+    assert row == (7.0, "trade_ready", "aligned", 22.0, True)
     assert trade == (
         "主流标准基本面模型入选",
         "MA20/MA60同步上扬",

@@ -106,6 +106,13 @@ class ResearchRepository:
                     "technical_alignment": str(candidate.get("technical_alignment") or ""),
                     "ima_web_validation": str(candidate.get("ima_web_validation") or ""),
                     "validation_sources_json": _json(candidate.get("validation_sources") or []),
+                    "return_20d": pd.to_numeric(candidate.get("return_20d"), errors="coerce"),
+                    "return_60d": pd.to_numeric(candidate.get("return_60d"), errors="coerce"),
+                    "return_120d": pd.to_numeric(candidate.get("return_120d"), errors="coerce"),
+                    "distance_120d_high": pd.to_numeric(candidate.get("distance_120d_high"), errors="coerce"),
+                    "leadership_score": pd.to_numeric(candidate.get("leadership_score"), errors="coerce"),
+                    "leadership_reason": str(candidate.get("leadership_reason") or ""),
+                    "long_term_structure_favorable": bool(candidate.get("long_term_structure_favorable", False)),
                     "payload_json": _json(candidate),
                 })
         frame = pd.DataFrame(rows)

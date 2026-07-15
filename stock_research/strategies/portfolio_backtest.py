@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 
 import pandas as pd
 
@@ -14,17 +15,60 @@ from stock_research.indicators.price_structure import (
     configured_price_structures,
     infer_price_structures,
 )
+from stock_research.indicators.technical_entries import (
+    _valid_volume_price_nodes,
+    apply_entry_confluence,
+    infer_technical_entry,
+)
 from stock_research.strategies.ohlc_execution import fill_buy_stop, fill_limit_order, fill_sell_stop
 
 
 @dataclass
 class PositionState:
+    left: list[dict] = field(default_factory=list)
+    left_value_line: float | None = None
+    left_grid_started: bool = False
     right: list[dict] = field(default_factory=list)
     right_parts: int = 5
     right_sold: set[str] = field(default_factory=set)
     right_plan_date: object | None = None
     pending_lot_exits: dict[str, str] = field(default_factory=dict)
     pending_profit_ids: set[str] = field(default_factory=set)
+    pending_tail_capacity_free: bool = False
+    right_tail_capacity_free: bool = False
+
+
+def _is_profit_tail(state: PositionState) -> bool:
+    """A final profit tranche remains invested but no longer consumes a slot."""
+    return (
+        bool(state.right)
+        and state.right_parts == 1
+        and bool(state.right_sold)
+        and state.right_tail_capacity_free
+    )
+
+
+def _qualifies_profit_tail(profit, remaining_parts, minimum_return) -> bool:
+    return (
+        int(remaining_parts) == 1
+        and float(profit.get("current_return_pct") or 0.0) / 100
+        >= float(minimum_return)
+    )
+
+
+def _profit_ids_to_execute(new_ids, remaining_parts) -> list[str]:
+    """Reserve the final tranche for maximum-profit-half only."""
+    remaining = max(0, int(remaining_parts))
+    ids = set(new_ids)
+    if remaining == 1:
+        return ["maximum_profit_half"] if "maximum_profit_half" in ids else []
+    intermediate = sorted(ids - {"maximum_profit_half"})
+    return intermediate[:max(0, remaining - 1)]
+
+
+def _entry_risk_still_controls_lot(lot: dict, state: PositionState) -> bool:
+    """Only a qualified high-profit final tail is released from entry risk."""
+    return not (bool(lot.get("merged")) and _is_profit_tail(state))
 
 
 def build_formula_phase_history(formula_rows) -> dict[str, str]:
@@ -60,7 +104,7 @@ def _prepare_frame(frame):
         data[column] = pd.to_numeric(data.get(column), errors="coerce")
     data = data.dropna(subset=["date", "high", "low", "close"])
     data = data.sort_values("date").drop_duplicates("date").reset_index(drop=True)
-    for period in (5, 10, 20, 60):
+    for period in (5, 10, 20, 60, 120):
         data[f"ma{period}"] = data["close"].rolling(period).mean()
     return data
 
@@ -114,6 +158,66 @@ def _board_lot_quantity(code, quantity) -> int:
     return max(0, int(float(quantity) // lot) * lot)
 
 
+def _effective_profit_tranches(code, quantity, configured_parts) -> int:
+    """Never promise more exit slices than the acquired board lots support."""
+    available_board_lots = int(float(quantity) // board_lot_size(code))
+    return min(max(1, int(configured_parts)), max(1, available_board_lots))
+
+
+def _active_profit_trigger_ids(profit, history, remaining_parts) -> set[str]:
+    """Map source-backed protection signals without treating examples as a checklist."""
+    maximum_return = float(profit.get("maximum_return_pct") or 0.0)
+    if maximum_return < 10:
+        return set()
+    ids = set()
+    if profit.get("profit_floor_triggered"):
+        ids.add("profit_floor")
+    if maximum_return >= 20 and profit.get("trailing_10_triggered"):
+        ids.add("trailing_10")
+    if profit.get("divergence_time_take_profit"):
+        ids.add("divergence_time")
+
+    if (
+        maximum_return >= 20
+        and len(history) >= 14
+        and {"date", "volume", "low"}.issubset(history.columns)
+    ):
+        prior_history = history.iloc[:-1]
+        valid_nodes = _valid_volume_price_nodes(prior_history)
+        if valid_nodes:
+            prior_close = float(prior_history.iloc[-1]["close"])
+            supporting_nodes = [
+                node for node in valid_nodes
+                if float(node["support"]) <= prior_close
+            ]
+            if supporting_nodes:
+                closest_node = max(
+                    supporting_nodes, key=lambda node: float(node["support"]),
+                )
+                if float(history.iloc[-1]["low"]) < float(closest_node["support"]):
+                    ids.add(f"volume_node_break:{closest_node['date']}")
+
+    close = float(profit.get("close") or 0.0)
+    latest_ma20 = pd.to_numeric(history.iloc[-1].get("ma20"), errors="coerce")
+    prior_ma20 = (
+        pd.to_numeric(history.iloc[-6].get("ma20"), errors="coerce")
+        if len(history) >= 6 else pd.NA
+    )
+    if (
+        pd.notna(latest_ma20)
+        and pd.notna(prior_ma20)
+        and float(latest_ma20) > float(prior_ma20)
+        and close < float(latest_ma20) * 0.97
+    ):
+        ids.add("rising_ma20_break_3pct")
+
+    # Reserve the author's most basic maximum-profit-half rule for the last
+    # tranche; it clears the campaign without waiting for a return to cost.
+    if int(remaining_parts) == 1 and profit.get("half_profit_triggered"):
+        ids.add("maximum_profit_half")
+    return ids
+
+
 def _price_structure_signal(
     data, index, plan=None, *, auto_structure=True, allow_pullback=True,
 ):
@@ -122,6 +226,24 @@ def _price_structure_signal(
     row = data.iloc[index]
     previous = data.iloc[:index]
     prior_close = float(previous.iloc[-1]["close"])
+    volume_baseline = max(
+        float(previous["volume"].tail(5).mean()),
+        float(previous["volume"].tail(10).mean()),
+    )
+    close_volume_ratio = (
+        float(row["volume"]) / volume_baseline if volume_baseline > 0 else 0.0
+    )
+
+    def gap_up_rank(base_rank: int) -> tuple[int, bool]:
+        prior_high = pd.to_numeric(previous.iloc[-1].get("high"), errors="coerce")
+        day_open = pd.to_numeric(row.get("open"), errors="coerce")
+        gap_up = bool(
+            pd.notna(prior_high)
+            and pd.notna(day_open)
+            and float(day_open) > float(prior_high)
+        )
+        return (base_rank + 1 if gap_up else base_rank), gap_up
+
     structures = configured_price_structures(plan)
     if auto_structure:
         inferred_structures = infer_price_structures(previous)
@@ -154,47 +276,37 @@ def _price_structure_signal(
                         "uptrend_high_date": inferred["uptrend_high_date"],
                     })
 
-    # U75/U625 are pullback-only and require declared technical confluence.
-    # U50 reclaim is handled separately below as a trend-restoration order.
-    if allow_pullback:
-        supports = sorted(
-            (item for item in structures if item["kind"] == "uptrend_support"),
-            key=lambda item: item["level"], reverse=True,
-        )
-        for structure in supports:
-            level = float(structure["level"])
-            ratio = float(structure["ratio"])
-            if prior_close > level and float(row["low"]) < level:
-                confluence = ",".join(map(str, structure["confluence"]))
-                return {
-                    "rank": 3, "stop": level, "trigger": level,
-                    "order_type": "limit",
-                    "reason": f"上涨波段{ratio:.1%}拉回支撑; 共振={confluence}",
-                    "known_volume_ratio": 1.0, "structure_ratio": ratio,
-                    "anchor_low": structure.get("uptrend_low"),
-                    "anchor_high": structure.get("uptrend_high"),
-                    "anchor_low_date": structure.get("uptrend_low_date"),
-                    "anchor_high_date": structure.get("uptrend_high_date"),
-                }
-
     # A close-confirmed breach of the uptrend U50 followed by a reclaim is a
     # trend-restoration entry.  It is not the H-P pullback-half breakout.
     reclaim_candidates = []
     for structure in structures:
         if structure.get("kind") != "uptrend_anchor":
             continue
+        if not structure.get("amplitude_valid"):
+            continue
         trigger = float(structure["uptrend_levels"][0.50])
         high_date = pd.Timestamp(structure["uptrend_high_date"])
         after_high = previous[previous["date"] > high_date]
         effective_breach = bool((after_high["close"] < trigger).any())
-        if effective_breach and prior_close <= trigger and float(row["high"]) > trigger:
+        if (
+            effective_breach
+            and prior_close <= trigger < float(row["close"])
+            and close_volume_ratio >= 1.0
+        ):
             reclaim_candidates.append((trigger, structure))
     if reclaim_candidates:
         trigger, structure = max(reclaim_candidates, key=lambda item: item[0])
+        rank, gap_up = gap_up_rank(4)
+        reason = "上涨波段50%有效跌破后收盘放量收复"
+        if gap_up:
+            reason += "; 跳空向上加分"
         return {
-            "rank": 4, "stop": trigger, "trigger": trigger,
-            "order_type": "stop", "reason": "上涨波段50%有效跌破后重新突破",
-            "known_volume_ratio": 1.0, "structure_ratio": 0.50,
+            "rank": rank, "stop": trigger, "trigger": trigger,
+            "order_type": "close", "reason": reason,
+            "known_volume_ratio": close_volume_ratio,
+            "requires_next_day_confirmation": True,
+            "structure_ratio": 0.50,
+            "signal_type": "uptrend_50_reclaim", "gap_up": gap_up,
             "anchor_low": structure["uptrend_low"],
             "anchor_high": structure["uptrend_high"],
             "anchor_low_date": structure["uptrend_low_date"],
@@ -214,11 +326,21 @@ def _price_structure_signal(
         ):
             continue
         trigger = float(structure["recovery_half"])
-        if prior_close <= trigger and float(row["high"]) > trigger:
+        if (
+            prior_close <= trigger < float(row["close"])
+            and close_volume_ratio >= 1.0
+        ):
+            rank, gap_up = gap_up_rank(4)
+            reason = "回调波段50%收盘放量向上突破"
+            if gap_up:
+                reason += "; 跳空向上加分"
             return {
-                "rank": 4, "stop": trigger, "trigger": trigger,
-                "order_type": "stop", "reason": "回调波段50%向上突破",
-                "known_volume_ratio": 1.0, "structure_ratio": 0.50,
+                "rank": rank, "stop": trigger, "trigger": trigger,
+                "order_type": "close", "reason": reason,
+                "known_volume_ratio": close_volume_ratio,
+                "requires_next_day_confirmation": True,
+                "structure_ratio": 0.50,
+                "signal_type": "pullback_50_breakout", "gap_up": gap_up,
                 "anchor_low": structure.get("uptrend_low"),
                 "anchor_high": structure.get("uptrend_high"),
                 "anchor_pullback_low": structure.get("pullback_low"),
@@ -226,6 +348,30 @@ def _price_structure_signal(
                 "anchor_high_date": structure.get("uptrend_high_date"),
                 "anchor_pullback_low_date": structure.get("pullback_low_date"),
             }
+
+    # U75/U625 are pullback-only and require declared technical confluence.
+    # They are lower priority than the author's two right-side breakout entries.
+    if allow_pullback:
+        supports = sorted(
+            (item for item in structures if item["kind"] == "uptrend_support"),
+            key=lambda item: item["level"], reverse=True,
+        )
+        for structure in supports:
+            level = float(structure["level"])
+            ratio = float(structure["ratio"])
+            if prior_close > level and float(row["low"]) < level:
+                confluence = ",".join(map(str, structure["confluence"]))
+                return {
+                    "rank": 3, "stop": level, "trigger": level,
+                    "order_type": "limit",
+                    "reason": f"上涨波段{ratio:.1%}拉回支撑; 共振={confluence}",
+                    "known_volume_ratio": 1.0, "structure_ratio": ratio,
+                    "signal_type": "uptrend_support_pullback",
+                    "anchor_low": structure.get("uptrend_low"),
+                    "anchor_high": structure.get("uptrend_high"),
+                    "anchor_low_date": structure.get("uptrend_low_date"),
+                    "anchor_high_date": structure.get("uptrend_high_date"),
+                }
     return None
 
 
@@ -235,40 +381,20 @@ def _right_signal(
 ):
     if index < 60:
         return None
-    row = data.iloc[index]
-    previous = data.iloc[:index]
     structure_signal = _price_structure_signal(
         data, index, plan, auto_structure=auto_price_structure,
         allow_pullback=allow_structure_pullback,
     )
     if structure_signal:
+        structure_signal = apply_entry_confluence(data, index, structure_signal)
+    if configured_price_structures(plan) and structure_signal:
         return structure_signal
-    baseline = max(
-        float(previous["volume"].iloc[:-1].tail(5).mean()),
-        float(previous["volume"].iloc[:-1].tail(10).mean()),
+    technical_signal = infer_technical_entry(data, index)
+    return max(
+        (signal for signal in (structure_signal, technical_signal) if signal),
+        key=lambda signal: signal["rank"],
+        default=None,
     )
-    known_volume_ratio = (
-        float(previous.iloc[-1]["volume"]) / baseline if baseline > 0 else 0.0
-    )
-    local_trigger = float(previous["close"].tail(21).max())
-    local_breakout = bool(
-        previous.iloc[-1]["close"] <= local_trigger
-        and row["high"] > local_trigger
-        and local_trigger >= previous.iloc[-1]["ma20"]
-    )
-    pullback_level = float(previous.iloc[-1]["ma20"])
-    pullback = bool(
-        previous.iloc[-1]["ma20"] > previous.iloc[-1]["ma60"]
-        and previous.iloc[-1]["ma20"] > previous.iloc[-6]["ma20"]
-        and previous.iloc[-1]["ma60"] > previous.iloc[-6]["ma60"]
-        and previous.iloc[-1]["close"] > pullback_level
-        and row["low"] < pullback_level
-    )
-    if local_breakout:
-        return {"rank": 2, "stop": local_trigger, "trigger": local_trigger, "order_type": "stop", "reason": "价格突破21日收盘高点", "known_volume_ratio": known_volume_ratio}
-    if pullback:
-        return {"rank": 1, "stop": pullback_level, "trigger": pullback_level, "order_type": "limit", "reason": "上扬MA20/MA60结构回踩20日均线", "known_volume_ratio": known_volume_ratio}
-    return None
 
 
 def run_portfolio_backtest(
@@ -279,7 +405,15 @@ def run_portfolio_backtest(
     requested_start,
     end_date,
     trade_plans=None,
-    max_positions=3,
+    max_positions=4,
+    max_same_industry=2,
+    same_theme_correlation=0.60,
+    min_entry_evidence_score=0,
+    profit_tranches=5,
+    profit_tail_min_return=0.50,
+    left_grid_unit=0.02,
+    left_grid_step=0.05,
+    left_grid_max_exposure=0.20,
     max_symbol_exposure=0.625,
     exit_tail_on_candidate_removal=False,
     signals_effective_next_day=False,
@@ -297,7 +431,9 @@ def run_portfolio_backtest(
         raise ValueError("close_confirmed_execution must be next_open or close_proxy")
     if float(initial_capital) <= 0:
         raise ValueError("initial_capital must be positive")
-    normalized_snapshots = normalize_candidate_snapshots(candidate_snapshots)
+    normalized_snapshots = normalize_candidate_snapshots(
+        candidate_snapshots, include_diagnostics=True,
+    )
     snapshots = {
         pd.Timestamp(date).normalize(): {str(item["code"]): dict(item) for item in rows}
         for date, rows in normalized_snapshots.items()
@@ -328,6 +464,7 @@ def run_portfolio_backtest(
     previous_candidate_codes = set()
     pending_candidate_exits = set()
     pending_weak_exits = set()
+    pending_left_exits = {}
 
     candidate_names = {
         str(item["code"]): str(item.get("name") or "")
@@ -339,24 +476,163 @@ def run_portfolio_backtest(
         return "ST" in candidate_names.get(code, "").upper()
 
     def occupied_codes():
-        return {code for code, state in states.items() if state.right}
+        return {
+            code for code, state in states.items()
+            if state.left or state.right
+        }
+
+    def left_position_counts_capacity(state):
+        if not state.left:
+            return False
+        return any(not bool(lot.get("core")) for lot in state.left)
+
+    def capacity_codes():
+        return {
+            code for code, state in states.items()
+            if left_position_counts_capacity(state)
+            or (state.right and not _is_profit_tail(state))
+        }
 
     def gross_exposure():
         return sum(
-            sum(float(lot["size"]) for lot in state.right)
+            sum(float(lot["size"]) for lot in state.left + state.right)
             for state in states.values()
         )
 
     def symbol_exposure(code):
         state = states[code]
-        return sum(float(lot["size"]) for lot in state.right)
+        return sum(float(lot["size"]) for lot in state.left + state.right)
+
+    configured_positions = (
+        4 if max_positions is None or int(max_positions) <= 0
+        else min(4, int(max_positions))
+    )
+    configured_same_industry = max(1, int(max_same_industry))
+    configured_theme_correlation = float(same_theme_correlation)
+    configured_min_entry_evidence_score = max(
+        0.0, float(min_entry_evidence_score),
+    )
+    configured_profit_tranches = max(2, min(5, int(profit_tranches)))
+    configured_profit_tail_min_return = max(0.0, float(profit_tail_min_return))
+    configured_left_grid_unit = max(0.0, float(left_grid_unit))
+    configured_left_grid_step = max(0.05, float(left_grid_step))
+    configured_left_grid_max_exposure = min(
+        0.30, max(0.0, float(left_grid_max_exposure)),
+    )
+    for state in states.values():
+        state.right_parts = configured_profit_tranches
+    concentration_blocks = []
 
     def symbol_limit_reached():
-        configured = 5 if max_positions is None or int(max_positions) <= 0 else min(5, int(max_positions))
-        return len(occupied_codes()) >= configured
+        configured = configured_positions
+        return len(capacity_codes()) >= configured
 
     def right_codes():
         return {code for code, state in states.items() if state.right}
+
+    def candidate_industry_tags(candidate):
+        raw = candidate.get("industry") or candidate.get("mainline_boards") or ""
+        if pd.isna(raw):
+            return set()
+        aliases = {
+            "通信网络设备及器件": "通信设备",
+            "光通信设备": "通信设备",
+            "通信终端及配件": "通信设备",
+        }
+        tags = {
+            aliases.get(tag.strip(), tag.strip())
+            for tag in re.split(r"[、,，;；/|+]", str(raw))
+            if tag.strip()
+        }
+        return tags
+
+    def left_value_falsification_reason(candidate):
+        if not candidate:
+            return ""
+        reason = str(candidate.get("value_falsification_reason") or "").strip()
+        if reason:
+            return reason
+        if _enabled(candidate.get("value_falsified"), default=False):
+            return str(
+                candidate.get("candidate_failure_reason")
+                or "value thesis falsified by financial snapshot"
+            ).strip()
+        return ""
+
+    def left_candidate_can_add(candidate):
+        if not candidate:
+            return False
+        return (
+            _enabled(candidate.get("selected_for_trading"), default=True)
+            and _enabled(candidate.get("allow_left"), default=False)
+            and not left_value_falsification_reason(candidate)
+        )
+
+    def held_industry_counts():
+        counts = {}
+        for state in states.values():
+            if _is_profit_tail(state) and not state.left:
+                continue
+            tags = {
+                tag
+                for lot in state.left + state.right
+                for tag in lot.get("industry_tags", [])
+            }
+            for tag in tags:
+                counts[tag] = counts.get(tag, 0) + 1
+        return counts
+
+    def return_correlation(code, held_code, date):
+        left = frames[code]
+        right = frames[held_code]
+        left = left[left["date"] < date][["date", "close"]].tail(61)
+        right = right[right["date"] < date][["date", "close"]].tail(61)
+        aligned = left.merge(right, on="date", suffixes=("_left", "_right"))
+        if len(aligned) < 41:
+            return None
+        returns = aligned[["close_left", "close_right"]].pct_change().dropna()
+        if len(returns) < 40:
+            return None
+        if (returns.std(ddof=0) <= 1e-12).any():
+            return None
+        correlation = returns["close_left"].corr(returns["close_right"])
+        return None if pd.isna(correlation) else float(correlation)
+
+    def industry_limit_reached(code, candidate, date):
+        if code in capacity_codes():
+            return False
+        counts = held_industry_counts()
+        tags = candidate_industry_tags(candidate)
+        tag_blocked = any(
+            counts.get(tag, 0) >= configured_same_industry
+            for tag in tags
+        )
+        correlations = {
+            held_code: return_correlation(code, held_code, date)
+            for held_code in capacity_codes()
+        }
+        related = {
+            held_code: correlation
+            for held_code, correlation in correlations.items()
+            if correlation is not None
+            and correlation >= configured_theme_correlation
+        }
+        correlation_blocked = len(related) >= configured_same_industry
+        if tag_blocked or correlation_blocked:
+            concentration_blocks.append({
+                "date": pd.Timestamp(date).strftime("%Y-%m-%d"),
+                "code": code,
+                "name": candidate.get("name") or code,
+                "industry_tags": "、".join(sorted(tags)),
+                "correlated_held_codes": sorted(related),
+                "correlations": {
+                    held_code: round(correlation, 4)
+                    for held_code, correlation in related.items()
+                },
+                "reason": "industry_tag" if tag_blocked else "return_correlation",
+            })
+            return True
+        return False
 
     def has_twenty_percent_float(date):
         for code in occupied_codes():
@@ -369,9 +645,20 @@ def run_portfolio_backtest(
                 return True
         return False
 
+    def symbol_has_float_profit(code, date, threshold):
+        state = states[code]
+        visible = frames[code][frames[code]["date"] < date]
+        if visible.empty or not state.right:
+            return False
+        close = float(visible.iloc[-1]["close"])
+        return any(close / lot["cost"] - 1 >= float(threshold) for lot in state.right)
+
+    def add_on_float_threshold():
+        return 0.20 if current_down_streak >= 3 else 0.10
+
     def right_symbol_returns(date):
         returns = []
-        for code in right_codes():
+        for code in capacity_codes():
             state = states[code]
             visible = frames[code][frames[code]["date"] < date]
             if visible.empty or not state.right:
@@ -387,11 +674,13 @@ def run_portfolio_backtest(
         returns = right_symbol_returns(date)
         if not returns:
             return True
+        if len(returns) >= configured_positions:
+            return False
         if current_up_streak >= 3:
-            return len(returns) < 3 and all(value >= 0.10 for value in returns)
+            return all(value >= 0.10 for value in returns)
         if len(returns) == 1:
             return returns[0] >= 0.20
-        return len(returns) < 3 and returns[0] >= 0.20 and returns[1] >= 0.10
+        return returns[0] >= 0.20 and all(value >= 0.10 for value in returns[1:])
 
     def trade_fee_components(turnover, *, sell=False):
         turnover = abs(float(turnover))
@@ -571,6 +860,29 @@ def run_portfolio_backtest(
         sold_cost = sold_cost_value / sold_quantity if sold_quantity else 0.0
         return sold_quantity, sold_cost, sold_entry_fee
 
+    def left_grid_plan(value_line):
+        """Ten-unit value grid: five initial units and five lower units."""
+        anchor = float(value_line)
+        plan = []
+        for slot in range(10):
+            if slot < 5:
+                buy_price = anchor
+            else:
+                buy_price = anchor * (1.0 - configured_left_grid_step) ** (slot - 4)
+            if slot < 3:
+                sell_price = None
+            elif slot < 5:
+                sell_price = anchor * (1.0 + configured_left_grid_step * (slot - 2))
+            else:
+                sell_price = anchor * (1.0 - configured_left_grid_step) ** (slot - 5)
+            plan.append({
+                "slot": slot,
+                "buy_price": buy_price,
+                "sell_price": sell_price,
+                "core": slot < 3,
+            })
+        return plan
+
     calendar = sorted({
         date.normalize()
         for frame in frames.values()
@@ -621,43 +933,52 @@ def run_portfolio_backtest(
 
             merged = [lot for lot in state.right if lot.get("merged")]
             if state.pending_profit_ids and merged and state.right_parts > 0:
-                parts = min(len(state.pending_profit_ids), state.right_parts)
-                merged_size = sum(float(lot["size"]) for lot in merged)
+                executed_ids = _profit_ids_to_execute(
+                    state.pending_profit_ids, state.right_parts,
+                )
+                parts = len(executed_ids)
+                if not parts:
+                    state.pending_profit_ids.clear()
+                    state.pending_tail_capacity_free = False
+                    continue
                 merged_quantity = sum(float(lot["quantity"]) for lot in merged)
                 merged_cost = sum(
                     float(lot["quantity"]) * float(lot["cost"]) for lot in merged
                 ) / merged_quantity
-                liquidate_tail = merged_size < 0.10 - 1e-9
-                planned_ratio = 1.0 if liquidate_tail else parts / state.right_parts
+                planned_ratio = parts / state.right_parts
                 desired_quantity = merged_quantity * planned_ratio
-                quantity = (
-                    merged_quantity if liquidate_tail
-                    else float(_board_lot_quantity(code, desired_quantity))
-                )
+                quantity = float(_board_lot_quantity(code, desired_quantity))
                 if quantity <= 0:
                     continue
                 quantity, sold_cost, entry_fee_cash = consume_merged_lots(
                     code, state, merged, quantity,
                 )
                 size, pnl = execute_sell(quantity, sell, sold_cost)
-                executed_ids = sorted(state.pending_profit_ids)[:parts]
                 state.right_sold.update(executed_ids)
                 state.pending_profit_ids.difference_update(executed_ids)
-                state.right_parts = 0 if liquidate_tail else state.right_parts - parts
-                action = "统一尾仓次日退出" if liquidate_tail else f"统一分仓次日止盈{parts}份"
+                state.right_parts -= parts
+                if state.right_parts == 1 and state.pending_tail_capacity_free:
+                    state.right_tail_capacity_free = True
+                state.pending_tail_capacity_free = False
+                action = (
+                    "统一尾仓次日退出" if state.right_parts == 0
+                    else f"统一分仓次日止盈{parts}份"
+                )
                 add_event(
                     date, code, action, sell, -size,
-                    f"收盘确认止盈; {fill['status']}", pnl,
+                    f"止盈条件={','.join(executed_ids)}; 收盘确认; {fill['status']}", pnl,
                     cost_basis=sold_cost, execution_quantity=-quantity,
                     entry_fee_cash=entry_fee_cash,
                 )
                 exited_today.add(code)
             if not state.right:
-                state.right_parts = 5
+                state.right_parts = configured_profit_tranches
                 state.right_sold.clear()
                 state.right_plan_date = None
                 state.pending_lot_exits.clear()
                 state.pending_profit_ids.clear()
+                state.pending_tail_capacity_free = False
+                state.right_tail_capacity_free = False
 
         for code, state in states.items():
             pending_lots = [
@@ -697,7 +1018,7 @@ def run_portfolio_backtest(
                     entry_fee_cash=entry_fee_cash,
                 )
             if not state.right:
-                state.right_parts = 5
+                state.right_parts = configured_profit_tranches
                 state.right_sold.clear()
                 state.right_plan_date = None
         for code in list(pending_candidate_exits):
@@ -731,7 +1052,7 @@ def run_portfolio_backtest(
                     cost_basis=lot["cost"], execution_quantity=-quantity,
                     entry_fee_cash=entry_fee_cash,
                 )
-            state.right_parts = 5
+            state.right_parts = configured_profit_tranches
             state.right_sold.clear()
             state.right_plan_date = None
             pending_candidate_exits.discard(code)
@@ -766,10 +1087,45 @@ def run_portfolio_backtest(
                     cost_basis=lot["cost"], execution_quantity=-quantity,
                     entry_fee_cash=entry_fee_cash,
                 )
-            state.right_parts = 5
+            state.right_parts = configured_profit_tranches
             state.right_sold.clear()
             state.right_plan_date = None
             pending_weak_exits.discard(code)
+            exited_today.add(code)
+        for code, reason in list(pending_left_exits.items()):
+            state = states.get(code)
+            if state is None or not state.left:
+                pending_left_exits.pop(code, None)
+                continue
+            data = frames[code]
+            indexes = data.index[data["date"].dt.normalize() == date]
+            if indexes.empty:
+                continue
+            index = int(indexes[0])
+            row = data.iloc[index]
+            previous_close = data.iloc[index - 1]["close"] if index > 0 else None
+            fill = fill_sell_stop(
+                row, stop_price=float("inf"), previous_close=previous_close,
+                code=code, is_st=is_st(code),
+            )
+            if not fill["filled"]:
+                continue
+            sell = float(fill["price"])
+            for lot in list(state.left):
+                quantity = float(lot["quantity"])
+                entry_fee_cash = float(lot.get("entry_fee_cash") or 0.0)
+                size, pnl = execute_sell(quantity, sell, lot["cost"])
+                state.left.remove(lot)
+                add_event(
+                    date, code, "左侧价值证伪清仓", sell, -size,
+                    f"{lot['batch']}; {reason}; 次日开盘退出", pnl,
+                    cost_basis=lot["cost"], execution_quantity=-quantity,
+                    entry_fee_cash=entry_fee_cash, grid_slot=int(lot["slot"]),
+                    value_line=state.left_value_line, account_mode="left",
+                )
+            state.left_value_line = None
+            state.left_grid_started = False
+            pending_left_exits.pop(code, None)
             exited_today.add(code)
         eligible_snapshots = [
             item for item in snapshot_dates
@@ -786,6 +1142,12 @@ def run_portfolio_backtest(
                 if state and state.right and sum(lot["size"] for lot in state.right) < 0.10 - 1e-9:
                     pending_candidate_exits.add(code)
         previous_candidate_codes = current_candidate_codes
+        for code, state in states.items():
+            if not state.left or code in pending_left_exits:
+                continue
+            reason = left_value_falsification_reason(current_candidates.get(code))
+            if reason:
+                pending_left_exits[code] = reason
         eligible_formula_dates = [
             item for item in formula_dates
             if item < date or (not signals_effective_next_day and item <= date)
@@ -803,6 +1165,152 @@ def run_portfolio_backtest(
             current_down_streak = 0
             current_up_streak = 0
 
+        # Existing grids remain active even after dropping out of the daily
+        # top ten. New campaigns, however, compete by candidate score so file
+        # or ticker ordering can never decide which four symbols get capital.
+        active_left_codes = [
+            code for code, state in states.items()
+            if state.left_value_line is not None and (state.left or state.left_grid_started)
+        ]
+        new_left_candidates = []
+        for code, candidate in current_candidates.items():
+            if code not in states or states[code].left_value_line is not None:
+                continue
+            if not left_candidate_can_add(candidate):
+                continue
+            value_line = pd.to_numeric(candidate.get("value_line"), errors="coerce")
+            if pd.notna(value_line) and float(value_line) > 0:
+                new_left_candidates.append((
+                    float(candidate.get("candidate_score") or 0.0),
+                    code, float(value_line),
+                ))
+        left_targets = [
+            (code, float(states[code].left_value_line))
+            for code in active_left_codes
+        ] + [
+            (code, value_line)
+            for _, code, value_line in sorted(new_left_candidates, reverse=True)
+        ]
+
+        for code, grid_anchor in left_targets:
+            state = states[code]
+            if code in pending_left_exits:
+                continue
+            data = frames[code]
+            indexes = data.index[data["date"].dt.normalize() == date]
+            if indexes.empty:
+                continue
+            index = int(indexes[0])
+            row = data.iloc[index]
+            previous_close = data.iloc[index - 1]["close"] if index > 0 else None
+            candidate = current_candidates.get(code, {})
+            can_add_left = left_candidate_can_add(candidate)
+            plan_by_slot = {
+                item["slot"]: item for item in left_grid_plan(grid_anchor)
+            }
+            sold_slots = set()
+
+            # Only non-core grid units have resting sell orders.  Selling a
+            # right-side campaign elsewhere never reaches this list.
+            for lot in list(state.left):
+                sell_price = lot.get("sell_price")
+                if sell_price is None:
+                    continue
+                fill = fill_limit_order(
+                    row, side="sell", limit_price=float(sell_price),
+                    previous_close=previous_close, code=code, is_st=is_st(code),
+                )
+                if not fill["filled"]:
+                    continue
+                quantity = float(lot["quantity"])
+                entry_fee_cash = float(lot.get("entry_fee_cash") or 0.0)
+                size, pnl = execute_sell(quantity, float(fill["price"]), lot["cost"])
+                state.left.remove(lot)
+                sold_slots.add(int(lot["slot"]))
+                add_event(
+                    date, code, "左侧网格卖出", fill["price"], -size,
+                    f"{lot['batch']}; 上一格卖出; {fill['status']}", pnl,
+                    cost_basis=lot["cost"], execution_quantity=-quantity,
+                    entry_fee_cash=entry_fee_cash, grid_slot=int(lot["slot"]),
+                    value_line=grid_anchor, account_mode="left",
+                )
+
+            held_slots = {int(lot["slot"]) for lot in state.left}
+            starting_new_symbol = not state.left_grid_started and code not in capacity_codes()
+            if starting_new_symbol:
+                if symbol_limit_reached() or industry_limit_reached(code, candidate, date):
+                    continue
+            for planned in plan_by_slot.values():
+                if not can_add_left:
+                    continue
+                slot = int(planned["slot"])
+                if slot in held_slots or slot in sold_slots:
+                    continue
+                # The first order is five equal units at the value line.  The
+                # remaining units are pre-placed at successively lower grids.
+                if not state.left_grid_started and slot >= 5 and not {
+                    0, 1, 2, 3, 4,
+                }.issubset(held_slots):
+                    continue
+                current_left = sum(float(lot["size"]) for lot in state.left)
+                if (
+                    not left_position_counts_capacity(state)
+                    and not bool(planned["core"])
+                    and (symbol_limit_reached() or industry_limit_reached(code, candidate, date))
+                ):
+                    continue
+                requested_size = min(
+                    configured_left_grid_unit,
+                    configured_left_grid_max_exposure - current_left,
+                )
+                requested_size = _capped_entry_size(
+                    symbol_exposure(code), requested_size, max_symbol_exposure,
+                )
+                if requested_size <= 1e-9 or gross_exposure() + requested_size > 1.0 + 1e-9:
+                    continue
+                fill = fill_limit_order(
+                    row, side="buy", limit_price=float(planned["buy_price"]),
+                    previous_close=previous_close, code=code, is_st=is_st(code),
+                )
+                if not fill["filled"]:
+                    continue
+                size, quantity, pnl, entry_fee_cash, cash_limited = execute_buy(
+                    code, requested_size, float(fill["price"]),
+                )
+                if size <= 1e-9:
+                    continue
+                lot = {
+                    "cost": float(fill["price"]), "date": row["date"],
+                    "buy_price": float(planned["buy_price"]),
+                    "sell_price": planned["sell_price"], "size": size,
+                    "quantity": quantity, "entry_fee_cash": entry_fee_cash,
+                    "slot": slot, "batch": f"L{slot + 1}",
+                    "core": bool(planned["core"]),
+                    "industry_tags": sorted(
+                        candidate_industry_tags(candidate)
+                        or {
+                            tag for existing in state.left
+                            for tag in existing.get("industry_tags", [])
+                        }
+                    ),
+                }
+                if state.left_value_line is None:
+                    state.left_value_line = grid_anchor
+                state.left.append(lot)
+                held_slots.add(slot)
+                if {0, 1, 2, 3, 4}.issubset(held_slots):
+                    state.left_grid_started = True
+                add_event(
+                    date, code, "左侧网格买入", fill["price"], size,
+                    f"{lot['batch']}; 价值线网格第{slot + 1}份; {fill['status']}", pnl,
+                    execution_quantity=quantity, entry_fee_cash=entry_fee_cash,
+                    requested_position_pct=requested_size * 100,
+                    cash_limited=cash_limited,
+                    lot_rounded=size < requested_size - 1e-9 and not cash_limited,
+                    board_lot_size=board_lot_size(code), grid_slot=slot,
+                    value_line=grid_anchor, account_mode="left",
+                )
+
         for code, state in states.items():
             data = frames[code]
             indexes = data.index[data["date"].dt.normalize() == date]
@@ -816,7 +1324,9 @@ def run_portfolio_backtest(
                     prior_close = float(data.iloc[index - 1]["close"]) if index > 0 else None
                     if prior_close is not None and prior_close / lot["cost"] - 1 >= 0.10:
                         lot["proven"] = True
-                    time_limit = 5 if current_phase == "exited" else 8 if current_phase == "watch" else 13
+                    if not _entry_risk_still_controls_lot(lot, state):
+                        continue
+                    time_limit = 8 if current_down_streak >= 3 else 13
                     risk = position_exit_snapshot(
                         history, lot["cost"], lot["date"], entry_mode="right",
                         condition_stop=lot["stop"], time_limit_days=time_limit,
@@ -864,9 +1374,9 @@ def run_portfolio_backtest(
                             state.pending_lot_exits.setdefault(lot["batch"], reason)
                 if state.right:
                     if not any(lot["merged"] for lot in state.right):
-                        state.right_parts = 5
+                        state.right_parts = configured_profit_tranches
                         state.right_sold.clear()
-                    merge_threshold = 0.10 if current_up_streak >= 3 else 0.20
+                    merge_threshold = 0.20 if current_down_streak >= 3 else 0.10
                     merged_new_batch = False
                     for lot in state.right:
                         if not lot["merged"] and prior_close is not None and prior_close / lot["cost"] - 1 >= merge_threshold:
@@ -875,13 +1385,13 @@ def run_portfolio_backtest(
                             add_event(date, code, "加仓批次合并", row["close"], 0.0, f"{lot['batch']}; 浮盈达到{merge_threshold:.0%}")
 
                     if merged_new_batch:
-                        state.right_parts = 5
-                        state.right_sold.clear()
-                        state.right_plan_date = row["date"]
+                        # A new add-on belongs to the existing campaign.  Keep
+                        # already executed profit tranches and the original
+                        # peak-observation window instead of resetting both.
+                        state.right_parts = max(1, state.right_parts)
 
                     merged = [lot for lot in state.right if lot["merged"]]
                     if merged and state.right_parts > 0:
-                        merged_size = sum(lot["size"] for lot in merged)
                         merged_quantity = sum(float(lot["quantity"]) for lot in merged)
                         merged_cost = sum(
                             float(lot["quantity"]) * float(lot["cost"])
@@ -890,40 +1400,45 @@ def run_portfolio_backtest(
                         merged_entry = state.right_plan_date or min(lot["date"] for lot in merged)
                         profit = position_exit_snapshot(
                             history, merged_cost, merged_entry, entry_mode="right",
-                            condition_stop=None, time_limit_days=9999, exit_tranches=5,
+                            condition_stop=None, time_limit_days=9999,
+                            exit_tranches=configured_profit_tranches,
                         )
-                        maximum_return = float(profit.get("maximum_return_pct") or 0.0)
-                        if maximum_return < 10:
-                            active_profit_ids = set()
-                        elif maximum_return < 20:
-                            active_profit_ids = {"half_profit"} if profit.get("half_profit_triggered") else set()
-                        else:
-                            active_profit_ids = set(profit.get("take_profit_trigger_ids") or [])
+                        active_profit_ids = _active_profit_trigger_ids(
+                            profit, history, state.right_parts,
+                        )
                         new_ids = active_profit_ids - state.right_sold
                         if new_ids:
                             if close_confirmed_execution == "close_proxy":
-                                parts = min(len(new_ids), state.right_parts)
-                                liquidate_tail = merged_size < 0.10 - 1e-9
-                                sell = float(row["close"])
-                                planned_ratio = 1.0 if liquidate_tail else parts / state.right_parts
-                                desired_quantity = merged_quantity * planned_ratio
-                                quantity = (
-                                    merged_quantity if liquidate_tail
-                                    else float(_board_lot_quantity(code, desired_quantity))
+                                executed_ids = _profit_ids_to_execute(
+                                    new_ids, state.right_parts,
                                 )
+                                parts = len(executed_ids)
+                                if not parts:
+                                    continue
+                                sell = float(row["close"])
+                                planned_ratio = parts / state.right_parts
+                                desired_quantity = merged_quantity * planned_ratio
+                                quantity = float(_board_lot_quantity(code, desired_quantity))
                                 if quantity <= 0:
                                     continue
                                 quantity, sold_cost, entry_fee_cash = consume_merged_lots(
                                     code, state, merged, quantity,
                                 )
                                 size, pnl = execute_sell(quantity, sell, sold_cost)
-                                executed_ids = sorted(new_ids)[:parts]
                                 state.right_sold.update(executed_ids)
-                                state.right_parts = 0 if liquidate_tail else state.right_parts - parts
-                                action = "统一尾仓收盘退出" if liquidate_tail else f"统一分仓收盘止盈{parts}份"
+                                state.right_parts -= parts
+                                if _qualifies_profit_tail(
+                                    profit, state.right_parts,
+                                    configured_profit_tail_min_return,
+                                ):
+                                    state.right_tail_capacity_free = True
+                                action = (
+                                    "统一尾仓收盘退出" if state.right_parts == 0
+                                    else f"统一分仓收盘止盈{parts}份"
+                                )
                                 add_event(
                                     date, code, action, sell, -size,
-                                    "14:55/close proxy", pnl,
+                                    f"止盈条件={','.join(executed_ids)}; 14:55/close proxy", pnl,
                                     cost_basis=sold_cost, execution_quantity=-quantity,
                                     entry_fee_cash=entry_fee_cash,
                                 )
@@ -931,21 +1446,30 @@ def run_portfolio_backtest(
                                     for lot in list(state.right):
                                         if lot.get("merged"):
                                             state.right.remove(lot)
-                                    state.right_parts = 5
+                                    state.right_parts = configured_profit_tranches
                                     state.right_sold.clear()
                                     state.right_plan_date = None
+                                    state.right_tail_capacity_free = False
                                     exited_today.add(code)
                             else:
-                                state.pending_profit_ids.update(new_ids)
+                                executable_ids = _profit_ids_to_execute(
+                                    new_ids, state.right_parts,
+                                )
+                                state.pending_profit_ids.update(executable_ids)
+                                scheduled_parts = len(executable_ids)
+                                state.pending_tail_capacity_free = _qualifies_profit_tail(
+                                    profit, state.right_parts - scheduled_parts,
+                                    configured_profit_tail_min_return,
+                                )
                     if not state.right:
-                        state.right_parts = 5
+                        state.right_parts = configured_profit_tranches
                         state.right_sold.clear()
                         state.right_plan_date = None
 
         candidates = []
         entry_allowed = (
             current_down_streak < 3
-            or not occupied_codes()
+            or not capacity_codes()
             or has_twenty_percent_float(date)
         )
         if entry_allowed:
@@ -953,6 +1477,12 @@ def run_portfolio_backtest(
                 if code not in states or code in exited_today:
                     continue
                 if not _enabled(current_candidates[code].get("signal_eligible"), default=True):
+                    continue
+                candidate = current_candidates[code]
+                allow_right = _enabled(candidate.get("allow_right"), default=True)
+                # A pure value candidate may add a separately managed right
+                # batch only after its left position exists (left-to-right).
+                if not allow_right and not states[code].left:
                     continue
                 data = frames[code]
                 indexes = data.index[data["date"].dt.normalize() == date]
@@ -965,26 +1495,47 @@ def run_portfolio_backtest(
                     allow_structure_pullback=allow_structure_pullback,
                 )
                 if signal:
+                    if (
+                        float(signal.get("entry_evidence_score") or 0.0)
+                        < configured_min_entry_evidence_score
+                    ):
+                        continue
+                    if signal.get("signal_type") == "uptrend_support_pullback":
+                        if not states[code].right:
+                            continue
+                        if not symbol_has_float_profit(code, date, add_on_float_threshold()):
+                            continue
                     fundamental_score = float(current_candidates[code].get("candidate_score") or 0.0)
-                    candidates.append((fundamental_score, signal["rank"], signal["known_volume_ratio"], code, index, signal))
-            for fundamental_score, _, __, code, index, signal in sorted(candidates, reverse=True):
-                if code not in occupied_codes() and symbol_limit_reached() and len(right_codes()) < 3:
-                    continue
-                opening_right_symbol = not states[code].right
+                    entry_priority = (
+                        fundamental_score
+                        + float(signal["rank"]) * 8
+                        + min(float(signal["known_volume_ratio"]), 5.0) * 2
+                    )
+                    candidates.append((
+                        entry_priority, fundamental_score, signal["rank"],
+                        code, index, signal,
+                    ))
+            for _, fundamental_score, __, code, index, signal in sorted(candidates, reverse=True):
+                reopening_profit_tail = _is_profit_tail(states[code])
+                opening_right_symbol = code not in capacity_codes()
+                candidate = current_candidates.get(code, {})
                 if opening_right_symbol:
+                    if industry_limit_reached(code, candidate, date):
+                        continue
                     if not can_open_new_right_symbol(date):
                         continue
-                    if len(right_codes()) >= 3:
+                    if symbol_limit_reached():
                         incoming_stop_pct = max(0.0, 1 - float(signal["stop"]) / float(frames[code].iloc[index]["close"]))
                         incoming_score = fundamental_score + signal["rank"] * 10 + min(float(signal["known_volume_ratio"]), 5.0) * 2 - incoming_stop_pct * 20
                         weak = []
-                        for held_code in right_codes() - pending_weak_exits:
+                        for held_code in capacity_codes() - pending_weak_exits:
                             held_state = states[held_code]
+                            if not held_state.right:
+                                continue
                             visible = frames[held_code][frames[held_code]["date"] <= date]
                             if visible.empty:
                                 continue
                             held_row = visible.iloc[-1]
-                            held_size = sum(lot["size"] for lot in held_state.right)
                             held_quantity = sum(lot["quantity"] for lot in held_state.right)
                             held_cost = sum(
                                 lot["quantity"] * lot["cost"] for lot in held_state.right
@@ -1000,7 +1551,8 @@ def run_portfolio_backtest(
                                 continue
                             held_fundamental = float(last_candidate_scores.get(held_code, 0.0))
                             held_score = held_fundamental + held_return * 100 + (20 if any(lot.get("proven") for lot in held_state.right) else 0) + (-10 if below_ma20 else 10)
-                            if removed and incoming_score >= held_score + 5:
+                            replacement_margin = 5 if removed else 15
+                            if incoming_score >= held_score + replacement_margin:
                                 weak.append((held_score, held_code))
                         if weak:
                             pending_weak_exits.add(min(weak)[1])
@@ -1012,6 +1564,12 @@ def run_portfolio_backtest(
                         row, trigger_price=signal["trigger"],
                         previous_close=previous_close, code=code, is_st=is_st(code),
                     )
+                elif signal["order_type"] == "close":
+                    fill = {
+                        "filled": True,
+                        "price": float(row["close"]),
+                        "status": "close_confirmed",
+                    }
                 else:
                     fill = fill_limit_order(
                         row, side="buy", limit_price=signal["trigger"],
@@ -1020,17 +1578,56 @@ def run_portfolio_backtest(
                 if not fill["filled"]:
                     continue
                 existing_size = sum(lot["size"] for lot in states[code].right)
-                if not states[code].right:
+                starting_new_right_campaign = not states[code].right or reopening_profit_tail
+                if starting_new_right_campaign:
+                    left_to_right = (
+                        bool(states[code].left)
+                        and not _enabled(candidate.get("allow_right"), default=True)
+                    )
+                    preferred_breakout = signal.get("signal_type") in {
+                        "uptrend_50_reclaim",
+                        "pullback_50_breakout",
+                        "w_bottom_neckline",
+                        "gap_long_ma_breakout",
+                        "strong_trend_breakout",
+                        "consolidation_breakout",
+                        "volume_price_node",
+                        "bull_run_half_pullback",
+                    }
+                    inferred_entry = signal.get("signal_type") in {
+                        "consolidation_breakout",
+                        "strong_trend_breakout",
+                        "volume_price_node",
+                        "bull_run_half_pullback",
+                    }
                     direct_breakout = signal["order_type"] == "stop"
-                    size = 0.30 if current_up_streak >= 3 and not direct_breakout else 0.20
-                    if direct_breakout:
+                    size = (
+                        0.20 if current_down_streak >= 3
+                        else 0.30 if preferred_breakout
+                        else 0.20
+                    )
+                    if preferred_breakout:
+                        entry_kind = "33未三日下行首仓" if current_down_streak < 3 else "33三日下行试错首仓"
+                    elif inferred_entry:
+                        entry_kind = "技术合理买点试探仓"
+                    elif direct_breakout:
                         entry_kind = "直接突破首仓"
                     else:
                         entry_kind = "33上行首仓" if current_up_streak >= 3 else "33未上行首仓"
+                    if reopening_profit_tail:
+                        entry_kind = f"尾仓再入; {entry_kind}"
+                    elif left_to_right:
+                        left_size = sum(float(lot["size"]) for lot in states[code].left)
+                        size = min(size, left_size * 0.50)
+                        entry_kind = f"左转右加仓(不超过左仓一半); {entry_kind}"
                 else:
                     if any(not lot.get("proven", False) for lot in states[code].right):
                         continue
-                    ratio = 0.50 if signal["order_type"] == "limit" else 1 / 3
+                    pullback_entry = signal.get("signal_type") in {
+                        "uptrend_support_pullback",
+                        "bull_run_half_pullback",
+                    }
+                    ratio = 0.50 if pullback_entry else 1 / 3
                     size = existing_size * ratio
                     entry_kind = f"浮盈加仓{ratio:.0%}"
                 size = _capped_entry_size(
@@ -1046,6 +1643,18 @@ def run_portfolio_backtest(
                 )
                 if size <= 1e-9:
                     continue
+                if reopening_profit_tail:
+                    for lot in states[code].right:
+                        lot["merged"] = True
+                    states[code].right_parts = configured_profit_tranches
+                    states[code].right_sold.clear()
+                    states[code].pending_profit_ids.clear()
+                    states[code].pending_tail_capacity_free = False
+                    states[code].right_tail_capacity_free = False
+                    states[code].right_plan_date = row["date"]
+                elif not states[code].right:
+                    states[code].pending_tail_capacity_free = False
+                    states[code].right_tail_capacity_free = False
                 batch = f"R{next_batch_id}"
                 next_batch_id += 1
                 states[code].right.append({
@@ -1053,14 +1662,25 @@ def run_portfolio_backtest(
                     "stop": float(signal["stop"]), "size": size,
                     "quantity": quantity,
                     "entry_fee_cash": entry_fee_cash,
-                    "batch": batch, "merged": not bool(states[code].right),
+                    "batch": batch,
+                    "merged": reopening_profit_tail or not bool(states[code].right),
                     "proven": False,
+                    "industry_tags": sorted(candidate_industry_tags(candidate)),
                     "reconfirm_level": float(signal["trigger"]),
                     "reconfirm_on_next_day": (
-                        signal["order_type"] == "stop"
-                        and float(row["close"]) < float(signal["trigger"])
+                        bool(signal.get("requires_next_day_confirmation"))
+                        or (
+                            signal["order_type"] == "stop"
+                            and float(row["close"]) < float(signal["trigger"])
+                        )
                     ),
                 })
+                if starting_new_right_campaign:
+                    states[code].right_parts = _effective_profit_tranches(
+                        code,
+                        sum(float(lot["quantity"]) for lot in states[code].right),
+                        configured_profit_tranches,
+                    )
                 if not states[code].right_plan_date:
                     states[code].right_plan_date = row["date"]
                 structure_metadata = {
@@ -1069,9 +1689,16 @@ def run_portfolio_backtest(
                         "structure_ratio", "anchor_low", "anchor_high",
                         "anchor_pullback_low", "anchor_low_date",
                         "anchor_high_date", "anchor_pullback_low_date",
+                        "signal_type", "gap_up",
+                        "entry_evidence_score", "entry_evidence",
+                        "volume_node_date", "volume_node_confirmed_on",
+                        "valid_volume_node_count",
                     )
                     if signal.get(key) is not None
                 }
+                structure_metadata["industry_tags"] = "、".join(
+                    sorted(candidate_industry_tags(candidate))
+                )
                 add_event(
                     date, code, "右侧买入", fill["price"], size,
                     f"{batch}; {entry_kind}; {signal['reason']}; {fill['status']}",
@@ -1097,13 +1724,16 @@ def run_portfolio_backtest(
             if visible.empty:
                 continue
             close = float(visible.iloc[-1]["close"])
-            if state.right:
+            if state.left or state.right:
                 unrealized += sum(
                     float(lot["quantity"]) * (close - float(lot["cost"]))
                     / float(initial_capital)
-                    for lot in state.right
+                    for lot in state.left + state.right
                 )
-                market_value += sum(float(lot["quantity"]) * close for lot in state.right)
+                market_value += sum(
+                    float(lot["quantity"]) * close
+                    for lot in state.left + state.right
+                )
         equity = market_value / float(initial_capital)
         equity_curve.append({
             "date": date.strftime("%Y-%m-%d"),
@@ -1111,6 +1741,11 @@ def run_portfolio_backtest(
             "cash": float(cash_balance),
             "cash_pct": round(float(cash_balance) / market_value * 100, 4),
             "gross_exposure_pct": round(gross_exposure() * 100, 2),
+            "capacity_position_count": len(capacity_codes()),
+            "total_held_symbol_count": len(occupied_codes()),
+            "profit_tail_count": sum(
+                _is_profit_tail(state) for state in states.values()
+            ),
             "candidate_count": len(current_candidates),
         })
 
@@ -1136,19 +1771,34 @@ def run_portfolio_backtest(
         frame = frames[code]
         visible = frame[frame["date"] <= end]
         close = None if visible.empty else float(visible.iloc[-1]["close"])
+        left_size = sum(float(lot["size"]) for lot in state.left)
+        left_quantity = sum(float(lot["quantity"]) for lot in state.left)
+        left_value = sum(float(lot["quantity"]) * float(lot["cost"]) for lot in state.left)
+        left_entry_fees = sum(float(lot.get("entry_fee_cash") or 0.0) for lot in state.left)
         right_size = sum(float(lot["size"]) for lot in state.right)
         right_quantity = sum(float(lot["quantity"]) for lot in state.right)
         right_value = sum(float(lot["quantity"]) * float(lot["cost"]) for lot in state.right)
         right_entry_fees = sum(float(lot.get("entry_fee_cash") or 0.0) for lot in state.right)
-        invested_amount = right_value + right_entry_fees
-        market_value = None if close is None else right_quantity * close
+        total_quantity = left_quantity + right_quantity
+        total_value = left_value + right_value
+        invested_amount = total_value + left_entry_fees + right_entry_fees
+        market_value = None if close is None else total_quantity * close
         unrealized_pnl_amount = None if market_value is None else market_value - invested_amount
         final_position_details.append({
             "code": code,
             "name": candidate_names.get(code) or str(plans.get(code, {}).get("name") or code),
             "close": close,
-            "position_pct": round(right_size * 100, 2),
-            "quantity": round(right_quantity, 8),
+            "position_pct": round((left_size + right_size) * 100, 2),
+            "left_position_pct": round(left_size * 100, 2),
+            "right_position_pct": round(right_size * 100, 2),
+            "position_mode": (
+                "left+right" if state.left and state.right
+                else "left" if state.left else "right"
+            ),
+            "capacity_counted": left_position_counts_capacity(state)
+            or (bool(state.right) and not _is_profit_tail(state)),
+            "profit_tail": _is_profit_tail(state),
+            "quantity": round(total_quantity, 8),
             "invested_amount": round(invested_amount, 2),
             "market_value": None if market_value is None else round(market_value, 2),
             "unrealized_pnl_amount": (
@@ -1158,7 +1808,22 @@ def run_portfolio_backtest(
                 None if unrealized_pnl_amount is None or invested_amount <= 0
                 else round(unrealized_pnl_amount / invested_amount * 100, 4)
             ),
-            "cost": None if not right_quantity else round(right_value / right_quantity, 3),
+            "cost": None if not total_quantity else round(total_value / total_quantity, 3),
+            "left_value_line": state.left_value_line,
+            "left_batches": [
+                {
+                    "batch": lot["batch"], "grid_slot": int(lot["slot"]),
+                    "position_pct": round(lot["size"] * 100, 2),
+                    "quantity": round(lot["quantity"], 8),
+                    "cost": round(lot["cost"], 3),
+                    "sell_price": (
+                        None if lot.get("sell_price") is None
+                        else round(float(lot["sell_price"]), 3)
+                    ),
+                    "core": bool(lot.get("core")),
+                }
+                for lot in state.left
+            ],
             "batches": [
                 {"batch": lot["batch"], "position_pct": round(lot["size"] * 100, 2), "quantity": round(lot["quantity"], 8), "cost": round(lot["cost"], 3), "stop": round(lot["stop"], 3), "merged": lot["merged"], "proven": lot.get("proven", False)}
                 for lot in state.right
@@ -1227,6 +1892,28 @@ def run_portfolio_backtest(
             bool(event.get("lot_rounded")) for event in events
         ),
         "candidate_pool_limit": MAX_DAILY_CANDIDATES,
+        "max_positions": configured_positions,
+        "profit_tranches": configured_profit_tranches,
+        "profit_tails_consume_capacity": False,
+        "profit_tail_minimum_current_return_pct": round(
+            configured_profit_tail_min_return * 100, 2,
+        ),
+        "left_grid_unit_pct": round(configured_left_grid_unit * 100, 2),
+        "left_grid_step_pct": round(configured_left_grid_step * 100, 2),
+        "left_grid_max_exposure_pct": round(
+            configured_left_grid_max_exposure * 100, 2,
+        ),
+        "maximum_total_held_symbols": max(
+            (row["total_held_symbol_count"] for row in equity_curve), default=0,
+        ),
+        "maximum_profit_tail_count": max(
+            (row["profit_tail_count"] for row in equity_curve), default=0,
+        ),
+        "max_same_industry": configured_same_industry,
+        "same_theme_correlation": configured_theme_correlation,
+        "min_entry_evidence_score": configured_min_entry_evidence_score,
+        "concentration_block_count": len(concentration_blocks),
+        "concentration_blocks": concentration_blocks,
         "board_lot_policy": {"sh.688": 200, "default": 100},
         "structure_signal_counts": structure_signal_counts,
         "realized_return_pct": round(realized * 100, 3),

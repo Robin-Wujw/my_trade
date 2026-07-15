@@ -40,6 +40,7 @@ def test_initialize_creates_schemas_and_is_idempotent(tmp_path):
         (5, "research_backtest_persistence", "test"),
         (6, "candidate_basis_and_query_indexes", "test"),
         (7, "candidate_snapshot_coverage", "test"),
+        (8, "candidate_leadership_fields", "test"),
     ]
     assert {
         ("ops", "schema_migrations"),

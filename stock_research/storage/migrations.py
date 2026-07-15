@@ -308,6 +308,20 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_candidate_snapshot_coverage_version_date ON derived.candidate_snapshot_coverage (snapshot_version, observation_date)",
         ),
     ),
+    Migration(
+        version=8,
+        name="candidate_leadership_fields",
+        statements=(
+            "ALTER TABLE derived.candidate_snapshots ADD COLUMN return_20d DOUBLE",
+            "ALTER TABLE derived.candidate_snapshots ADD COLUMN return_60d DOUBLE",
+            "ALTER TABLE derived.candidate_snapshots ADD COLUMN return_120d DOUBLE",
+            "ALTER TABLE derived.candidate_snapshots ADD COLUMN distance_120d_high DOUBLE",
+            "ALTER TABLE derived.candidate_snapshots ADD COLUMN leadership_score DOUBLE",
+            "ALTER TABLE derived.candidate_snapshots ADD COLUMN leadership_reason VARCHAR",
+            "ALTER TABLE derived.candidate_snapshots ADD COLUMN long_term_structure_favorable BOOLEAN",
+            "CREATE INDEX IF NOT EXISTS idx_candidate_snapshot_leadership ON derived.candidate_snapshots (snapshot_version, observation_date, leadership_score)",
+        ),
+    ),
 )
 
 
