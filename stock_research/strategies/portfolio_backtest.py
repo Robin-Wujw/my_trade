@@ -588,6 +588,7 @@ def run_portfolio_backtest(
             return False
         return (
             _enabled(candidate.get("selected_for_trading"), default=True)
+            and _enabled(candidate.get("signal_eligible"), default=True)
             and _enabled(candidate.get("allow_left"), default=False)
             and not left_value_falsification_reason(candidate)
         )

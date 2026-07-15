@@ -24,6 +24,15 @@ def _truthy(value):
     return bool(value)
 
 
+def _clean_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and math.isnan(value):
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in {"nan", "none", "<na>"} else text
+
+
 def normalize_candidate(candidate):
     """Return the one candidate schema consumed by portfolio execution.
 
@@ -41,7 +50,7 @@ def normalize_candidate(candidate):
     original_score = _number(row.get("fundamental_score"))
     if original_score is None:
         original_score = _number(row.get("candidate_score")) or 0.0
-    source = str(row.get("candidate_source") or "")
+    source = _clean_text(row.get("candidate_source"))
     sources = {item for item in source.split("+") if item}
     if sources:
         row["allow_left"] = "value_model" in sources
@@ -68,19 +77,19 @@ def normalize_candidate(candidate):
         row["core_candidate_score"] = round(core_score, 6)
         original_score = core_score + min(max(leadership_score, 0.0), 30.0)
     row["candidate_score"] = round(original_score, 6)
-    row["value_falsification_reason"] = str(
-        row.get("value_falsification_reason") or ""
-    ).strip()
-    row["candidate_failure_reason"] = str(
-        row.get("candidate_failure_reason") or ""
-    ).strip()
+    row["value_falsification_reason"] = _clean_text(
+        row.get("value_falsification_reason")
+    )
+    row["candidate_failure_reason"] = _clean_text(
+        row.get("candidate_failure_reason")
+    )
     row["selected_for_trading"] = _truthy(
         row.get("selected_for_trading", True)
     )
     row["value_falsified"] = _truthy(row.get("value_falsified")) or bool(
         row["value_falsification_reason"]
     )
-    row["selection_reason"] = str(
+    row["selection_reason"] = _clean_text(
         row.get("selection_reason")
         or row.get("strategy_part")
         or row.get("candidate_source")
@@ -91,12 +100,28 @@ def normalize_candidate(candidate):
         eligible = True
     if isinstance(eligible, str):
         eligible = eligible.strip().lower() in {"1", "true", "yes", "y"}
+    eligibility_reasons = []
     if quality is not None:
+        if quality < 70.0:
+            eligibility_reasons.append("quality_score_below_70")
         eligible = eligible and quality >= 70.0
     if growth is not None:
+        if growth < 0.10:
+            eligibility_reasons.append("earnings_yoy_below_10pct")
         eligible = eligible and growth >= 0.10
-    if market_cap is not None:
+    requires_market_cap = bool(sources) or quality is not None or growth is not None
+    if requires_market_cap:
+        if market_cap is None:
+            eligibility_reasons.append("mktcap_missing")
+        elif market_cap < 100.0:
+            eligibility_reasons.append("mktcap_below_100")
+        eligible = eligible and market_cap is not None and market_cap >= 100.0
+    elif market_cap is not None:
+        if market_cap < 100.0:
+            eligibility_reasons.append("mktcap_below_100")
         eligible = eligible and market_cap >= 100.0
+    if eligibility_reasons and not row["candidate_failure_reason"]:
+        row["candidate_failure_reason"] = ";".join(eligibility_reasons)
     row["signal_eligible"] = bool(eligible)
     return row
 

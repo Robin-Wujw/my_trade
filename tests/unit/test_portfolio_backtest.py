@@ -29,7 +29,10 @@ from stock_research.indicators.technical_entries import (
     apply_entry_confluence,
     infer_technical_entry,
 )
-from stock_research.strategies.candidate_interface import normalize_candidate_snapshots
+from stock_research.strategies.candidate_interface import (
+    normalize_candidate,
+    normalize_candidate_snapshots,
+)
 from stock_research.strategies.portfolio_backtest import (
     PositionState,
     _active_profit_trigger_ids,
@@ -489,9 +492,13 @@ def test_explicit_right_permission_blocks_a_direct_right_entry():
 
 def test_candidate_sources_grant_left_and_right_permissions_independently():
     selected = normalize_candidate_snapshots({"2026-07-10": [
-        {"code": "VALUE", "candidate_source": "value_model"},
-        {"code": "BOTH", "candidate_source": "value_model+growth_leadership"},
-        {"code": "RIGHT", "candidate_source": "growth_leadership"},
+        {"code": "VALUE", "candidate_source": "value_model", "mktcap": 150},
+        {
+            "code": "BOTH",
+            "candidate_source": "value_model+growth_leadership",
+            "mktcap": 150,
+        },
+        {"code": "RIGHT", "candidate_source": "growth_leadership", "mktcap": 150},
     ]})["2026-07-10"]
     by_code = {item["code"]: item for item in selected}
 
@@ -526,6 +533,59 @@ def test_candidate_diagnostics_are_opt_in_and_not_tradable():
     assert by_code["B"]["value_falsified"] is True
 
 
+def test_candidate_nan_text_fields_do_not_falsify_value_model():
+    selected = normalize_candidate_snapshots({"2026-07-10": [{
+        "code": "A",
+        "candidate_source": "value_model",
+        "quality_score": 80,
+        "earnings_yoy": 0.20,
+        "mktcap": 150,
+        "value_falsification_reason": float("nan"),
+        "candidate_failure_reason": float("nan"),
+    }]})["2026-07-10"]
+
+    assert selected[0]["allow_left"] is True
+    assert selected[0]["value_falsification_reason"] == ""
+    assert selected[0]["candidate_failure_reason"] == ""
+    assert selected[0]["value_falsified"] is False
+
+
+def test_model_candidates_require_visible_100b_market_cap():
+    missing = normalize_candidate({
+        "code": "MISSING",
+        "candidate_source": "growth_leadership",
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+    })
+    small = normalize_candidate({
+        "code": "SMALL",
+        "candidate_source": "standard_mainline",
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+        "mktcap": 99.9,
+    })
+    enough = normalize_candidate({
+        "code": "ENOUGH",
+        "candidate_source": "value_model",
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+        "mktcap": 100.0,
+    })
+
+    assert missing["signal_eligible"] is False
+    assert missing["candidate_failure_reason"] == "mktcap_missing"
+    assert small["signal_eligible"] is False
+    assert small["candidate_failure_reason"] == "mktcap_below_100"
+    assert enough["signal_eligible"] is True
+
+    diagnostic = normalize_candidate_snapshots(
+        {"2026-07-10": [missing, small, enough]},
+        include_diagnostics=True,
+    )["2026-07-10"]
+
+    assert {item["code"] for item in diagnostic} == {"MISSING", "SMALL", "ENOUGH"}
+
+
 def test_value_grid_keeps_core_sells_two_upper_units_and_rebuys_them():
     dates = pd.bdate_range("2026-01-01", periods=84)
     bars = pd.DataFrame({
@@ -543,7 +603,7 @@ def test_value_grid_keeps_core_sells_two_upper_units_and_rebuys_them():
         {"A": bars},
         {first: [{
             "code": "A", "candidate_source": "value_model",
-            "value_line": 100.0, "industry": "test",
+            "value_line": 100.0, "industry": "test", "mktcap": 150,
         }]},
         {}, requested_start=first, end_date=last,
     )
@@ -576,7 +636,7 @@ def test_value_grid_candidate_removal_stops_new_left_buys_without_clearing():
         {
             first: [{
                 "code": "A", "candidate_source": "value_model",
-                "value_line": 100.0, "industry": "test",
+                "value_line": 100.0, "industry": "test", "mktcap": 150,
             }],
             dates[81].strftime("%Y-%m-%d"): [],
         },
@@ -607,7 +667,7 @@ def test_value_grid_financial_falsification_exits_left_at_next_open():
         {
             first: [{
                 "code": "A", "candidate_source": "value_model",
-                "value_line": 100.0, "industry": "test",
+                "value_line": 100.0, "industry": "test", "mktcap": 150,
             }],
             fail: [{
                 "code": "A", "candidate_source": "value_model",
@@ -645,7 +705,7 @@ def test_left_core_only_position_does_not_consume_capacity():
         {
             first: [{
                 "code": "A", "candidate_source": "value_model",
-                "value_line": 100.0, "industry": "test",
+                "value_line": 100.0, "industry": "test", "mktcap": 150,
             }],
             last: [],
         },
@@ -675,11 +735,11 @@ def test_all_market_phases_allow_only_one_left_symbol():
         {date: [
             {
                 "code": "A", "candidate_source": "value_model",
-                "value_line": 100.0, "candidate_score": 20,
+                "value_line": 100.0, "candidate_score": 20, "mktcap": 150,
             },
             {
                 "code": "B", "candidate_source": "value_model",
-                "value_line": 100.0, "candidate_score": 10,
+                "value_line": 100.0, "candidate_score": 10, "mktcap": 150,
             },
         ]},
         {date: {"phase": "waiting", "window_up_streak": 0}},
@@ -710,11 +770,11 @@ def test_waiting_market_does_not_seed_multiple_left_symbols():
         {first: [
             {
                 "code": "A", "candidate_source": "value_model",
-                "value_line": 100.0, "candidate_score": 20,
+                "value_line": 100.0, "candidate_score": 20, "mktcap": 150,
             },
             {
                 "code": "B", "candidate_source": "value_model",
-                "value_line": 100.0, "candidate_score": 10,
+                "value_line": 100.0, "candidate_score": 10, "mktcap": 150,
             },
         ]},
         {
@@ -756,7 +816,7 @@ def test_left_core_still_blocks_a_second_left_symbol():
                 {
                     "code": code, "candidate_source": "value_model",
                     "value_line": 100.0, "candidate_score": 100 - index,
-                    "industry": f"industry-{code}",
+                    "industry": f"industry-{code}", "mktcap": 150,
                 }
                 for index, code in enumerate(initial_codes)
             ],
@@ -764,7 +824,7 @@ def test_left_core_still_blocks_a_second_left_symbol():
             try_sixth: [{
                 "code": "F", "candidate_source": "value_model",
                 "value_line": 100.0, "candidate_score": 200,
-                "industry": "industry-F",
+                "industry": "industry-F", "mktcap": 150,
             }],
         },
         {}, requested_start=first, end_date=try_sixth,
