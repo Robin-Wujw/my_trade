@@ -16,6 +16,7 @@ from stock_research.indicators.price_structure import (
     infer_price_structures,
 )
 from stock_research.indicators.technical_entries import (
+    SUPPORT_ZONE_PCT,
     _valid_volume_price_nodes,
     apply_entry_confluence,
     infer_technical_entry,
@@ -115,6 +116,15 @@ def _enabled(value, *, default=True):
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y"}
     return bool(value)
+
+
+def _clean_trade_basis_text(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return value
+    return str(value).replace(
+        "距离21日收盘高点3%以内",
+        "候选观察：接近21日收盘高点（非买点）",
+    )
 
 
 def _capped_entry_size(current_exposure, planned_size, max_symbol_exposure=0.625):
@@ -242,7 +252,7 @@ def _price_structure_signal(
             and pd.notna(day_open)
             and float(day_open) > float(prior_high)
         )
-        return (base_rank + 1 if gap_up else base_rank), gap_up
+        return base_rank, gap_up
 
     structures = configured_price_structures(plan)
     if auto_structure:
@@ -264,7 +274,7 @@ def _price_structure_signal(
                 confluence = []
                 for name in ("ma5", "ma10", "ma20", "ma60"):
                     value = pd.to_numeric(prior.get(name), errors="coerce")
-                    if pd.notna(value) and abs(float(value) / float(level) - 1) <= 0.02:
+                    if pd.notna(value) and abs(float(value) / float(level) - 1) <= SUPPORT_ZONE_PCT:
                         confluence.append(name.upper())
                 if confluence:
                     structures.append({
@@ -291,12 +301,13 @@ def _price_structure_signal(
         if (
             effective_breach
             and prior_close <= trigger < float(row["close"])
+            and float(row["close"]) <= trigger * (1 + SUPPORT_ZONE_PCT)
             and close_volume_ratio >= 1.0
         ):
             reclaim_candidates.append((trigger, structure))
     if reclaim_candidates:
         trigger, structure = max(reclaim_candidates, key=lambda item: item[0])
-        rank, gap_up = gap_up_rank(4)
+        rank, gap_up = gap_up_rank(5)
         reason = "上涨波段50%有效跌破后收盘放量收复"
         if gap_up:
             reason += "; 跳空向上加分"
@@ -328,9 +339,10 @@ def _price_structure_signal(
         trigger = float(structure["recovery_half"])
         if (
             prior_close <= trigger < float(row["close"])
+            and float(row["close"]) <= trigger * (1 + SUPPORT_ZONE_PCT)
             and close_volume_ratio >= 1.0
         ):
-            rank, gap_up = gap_up_rank(4)
+            rank, gap_up = gap_up_rank(5)
             reason = "回调波段50%收盘放量向上突破"
             if gap_up:
                 reason += "; 跳空向上加分"
@@ -359,12 +371,17 @@ def _price_structure_signal(
         for structure in supports:
             level = float(structure["level"])
             ratio = float(structure["ratio"])
-            if prior_close > level and float(row["low"]) < level:
+            zone_top = level * (1 + SUPPORT_ZONE_PCT)
+            if (
+                prior_close > level
+                and float(row["low"]) <= zone_top
+                and float(row["close"]) >= level
+            ):
                 confluence = ",".join(map(str, structure["confluence"]))
                 return {
-                    "rank": 3, "stop": level, "trigger": level,
-                    "order_type": "limit",
-                    "reason": f"上涨波段{ratio:.1%}拉回支撑; 共振={confluence}",
+                    "rank": 3, "stop": level, "trigger": float(row["close"]),
+                    "order_type": "close",
+                    "reason": f"上涨波段{ratio:.1%}拉回支撑5%区域; 共振={confluence}",
                     "known_volume_ratio": 1.0, "structure_ratio": ratio,
                     "signal_type": "uptrend_support_pullback",
                     "anchor_low": structure.get("uptrend_low"),
@@ -1781,14 +1798,12 @@ def run_portfolio_backtest(
                         "pullback_50_breakout",
                         "w_bottom_neckline",
                         "gap_long_ma_breakout",
-                        "strong_trend_breakout",
                         "consolidation_breakout",
                         "volume_price_node",
                         "bull_run_half_pullback",
                     }
                     inferred_entry = signal.get("signal_type") in {
                         "consolidation_breakout",
-                        "strong_trend_breakout",
                         "volume_price_node",
                         "bull_run_half_pullback",
                     }
@@ -1918,9 +1933,13 @@ def run_portfolio_backtest(
                     cash_limited=cash_limited,
                     lot_rounded=size < requested_size - 1e-9 and not cash_limited,
                     board_lot_size=board_lot_size(code),
-                    selection_reason=candidate.get("selection_reason"),
+                    selection_reason=_clean_trade_basis_text(
+                        candidate.get("selection_reason"),
+                    ),
                     trade_basis_score=candidate.get("trade_basis_score"),
-                    trade_basis_reason=candidate.get("trade_basis_reason"),
+                    trade_basis_reason=_clean_trade_basis_text(
+                        candidate.get("trade_basis_reason"),
+                    ),
                     technical_alignment=candidate.get("technical_alignment"),
                     ima_web_validation=candidate.get("ima_web_validation"),
                     **structure_metadata,

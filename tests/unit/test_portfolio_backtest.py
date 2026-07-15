@@ -214,11 +214,11 @@ def test_unified_pool_reserves_five_core_candidates_from_leadership_crowding():
 
 def breakout_bars():
     dates = pd.bdate_range("2026-01-01", periods=80)
-    closes = [10.0] * 79 + [11.0]
+    closes = [10.0] * 79 + [10.4]
     return pd.DataFrame({
         "date": dates,
         "open": [10.0] * 80,
-        "high": [10.0] * 79 + [11.0],
+        "high": [10.0] * 79 + [10.4],
         "low": [10.0] * 80,
         "close": closes,
         "volume": [1000] * 79 + [3000],
@@ -261,7 +261,7 @@ def test_portfolio_does_not_chain_open_symbols_on_the_same_day():
 
     assert len(result["final_positions"]) == 1
     assert result["coverage_complete"] is True
-    assert sum(item["position_pct"] for item in result["final_positions"]) == pytest.approx(29.92)
+    assert sum(item["position_pct"] for item in result["final_positions"]) == pytest.approx(29.95)
 
 
 def test_portfolio_result_does_not_depend_on_price_frame_insertion_order():
@@ -302,8 +302,8 @@ def test_three_day_formula_decline_blocks_new_entry_without_profit_buffer():
             "close": closes, "volume": volumes,
         })
 
-    first = frame([10.0] * 79 + [11.0, 11.0], [1000] * 79 + [3000, 1000])
-    second = frame([10.0] * 80 + [11.0], [1000] * 80 + [3000])
+    first = frame([10.0] * 79 + [10.4, 10.4], [1000] * 79 + [3000, 1000])
+    second = frame([10.0] * 80 + [10.4], [1000] * 80 + [3000])
     day1, day2 = (dates[-2].strftime("%Y-%m-%d"), dates[-1].strftime("%Y-%m-%d"))
     snapshots = {
         day1: [{"code": "A", "strategy_part": "2.正常基本面选股"}],
@@ -348,24 +348,24 @@ def test_portfolio_executes_intraday_space_stop_at_stop_price():
     )
 
     sell = [event for event in result["events"] if event["position_change_pct"] < 0][0]
-    assert sell["price"] == 9.9
-    assert sell["realized_account_pct"] == pytest.approx(-3.0078, abs=0.0001)
+    assert sell["price"] == 9.36
+    assert sell["realized_account_pct"] == pytest.approx(-3.011, abs=0.0001)
     assert len(result["trade_ledger"]) == 2
     buy, sell = result["trade_ledger"]
     assert buy["trade_side"] == "买入"
-    assert buy["trade_amount"] == pytest.approx(299_200)
-    assert buy["commission_amount"] == pytest.approx(25.43)
-    assert buy["profit_loss_amount"] == pytest.approx(-25.43)
+    assert buy["trade_amount"] == pytest.approx(299_520)
+    assert buy["commission_amount"] == pytest.approx(25.46)
+    assert buy["profit_loss_amount"] == pytest.approx(-25.46)
     assert sell["trade_side"] == "卖出"
-    assert sell["quantity"] == pytest.approx(27_200)
-    assert sell["trade_amount"] == pytest.approx(269_280)
-    assert sell["cost_amount"] == pytest.approx(299_200)
-    assert sell["allocated_entry_fee_amount"] == pytest.approx(25.43)
-    assert sell["transaction_cost_amount"] == pytest.approx(157.53)
-    assert sell["gross_pnl_amount"] == pytest.approx(-29_920)
-    assert sell["profit_loss_amount"] == pytest.approx(-30_102.96)
+    assert sell["quantity"] == pytest.approx(28_800)
+    assert sell["trade_amount"] == pytest.approx(269_568)
+    assert sell["cost_amount"] == pytest.approx(299_520)
+    assert sell["allocated_entry_fee_amount"] == pytest.approx(25.46)
+    assert sell["transaction_cost_amount"] == pytest.approx(157.70)
+    assert sell["gross_pnl_amount"] == pytest.approx(-29_952)
+    assert sell["profit_loss_amount"] == pytest.approx(-30_135.16)
     assert sell["reason"]
-    assert result["trade_summary"]["closed_trade_net_pnl_amount"] == pytest.approx(-30_102.96)
+    assert result["trade_summary"]["closed_trade_net_pnl_amount"] == pytest.approx(-30_135.16)
 
 
 def test_unlimited_symbols_still_obeys_sequential_right_side_entry():
@@ -382,7 +382,7 @@ def test_unlimited_symbols_still_obeys_sequential_right_side_entry():
     )
 
     assert len(result["final_positions"]) == 1
-    assert sum(item["position_pct"] for item in result["final_positions"]) == pytest.approx(29.92)
+    assert sum(item["position_pct"] for item in result["final_positions"]) == pytest.approx(29.95)
 
 
 def test_unconfirmed_market_opens_only_first_right_side_symbol_without_profit_buffer():
@@ -399,7 +399,7 @@ def test_unconfirmed_market_opens_only_first_right_side_symbol_without_profit_bu
     )
 
     assert len(result["final_positions"]) == 1
-    assert sum(item["position_pct"] for item in result["final_positions"]) == pytest.approx(29.92)
+    assert sum(item["position_pct"] for item in result["final_positions"]) == pytest.approx(29.95)
 
 
 def test_up_market_opens_only_first_right_side_symbol_without_ten_percent_profit():
@@ -417,13 +417,13 @@ def test_up_market_opens_only_first_right_side_symbol_without_ten_percent_profit
     )
 
     assert len(result["final_positions"]) == 1
-    assert result["final_positions"][0]["position_pct"] == pytest.approx(29.92)
+    assert result["final_positions"][0]["position_pct"] == pytest.approx(29.95)
     assert "整理平台收盘放量突破" in result["events"][0]["reason"]
 
 
 def test_new_breakout_lot_waits_for_next_open_because_of_t_plus_one():
     bars = breakout_bars()
-    bars.loc[bars.index[-1], ["open", "high", "low", "close"]] = [10.0, 11.0, 9.8, 11.0]
+    bars.loc[bars.index[-1], ["open", "high", "low", "close"]] = [10.0, 10.4, 9.8, 10.4]
     entry_date = bars.iloc[-1]["date"]
     next_date = entry_date + pd.offsets.BDay(1)
     bars = pd.concat([bars, pd.DataFrame([{
@@ -449,12 +449,12 @@ def test_new_breakout_lot_waits_for_next_open_because_of_t_plus_one():
 
 def test_failed_breakout_can_sell_then_rebuy_on_next_day_breakout():
     bars = breakout_bars()
-    bars.loc[bars.index[-1], ["open", "high", "low", "close"]] = [10.0, 11.0, 9.8, 11.0]
+    bars.loc[bars.index[-1], ["open", "high", "low", "close"]] = [10.0, 10.4, 9.8, 10.4]
     entry_date = bars.iloc[-1]["date"]
     next_date = entry_date + pd.offsets.BDay(1)
     bars = pd.concat([bars, pd.DataFrame([{
-        "date": next_date, "open": 9.8, "high": 11.5,
-        "low": 9.7, "close": 11.2, "volume": 3000,
+        "date": next_date, "open": 9.8, "high": 10.5,
+        "low": 9.7, "close": 10.45, "volume": 3000,
     }])], ignore_index=True)
     date = entry_date.strftime("%Y-%m-%d")
 
@@ -932,8 +932,8 @@ def test_after_close_snapshot_becomes_effective_on_next_trading_day():
     signal_date = bars.iloc[-1]["date"]
     next_date = signal_date + pd.offsets.BDay(1)
     bars = pd.concat([bars, pd.DataFrame([{
-        "date": next_date, "open": 10.0, "high": 11.5,
-        "low": 10.0, "close": 11.2, "volume": 3000,
+        "date": next_date, "open": 10.0, "high": 10.5,
+        "low": 10.0, "close": 10.45, "volume": 3000,
     }])], ignore_index=True)
     snapshot_date = signal_date.strftime("%Y-%m-%d")
 
@@ -972,11 +972,11 @@ def test_entry_evidence_floor_rejects_single_unconfirmed_structure():
         {"A": bars}, {date: [{"code": "A"}]},
         {date: {"phase": "active", "window_up_streak": 5}},
         requested_start=date, end_date=date,
-        min_entry_evidence_score=6,
+        min_entry_evidence_score=8,
     )
 
     assert result["events"] == []
-    assert result["min_entry_evidence_score"] == pytest.approx(6.0)
+    assert result["min_entry_evidence_score"] == pytest.approx(8.0)
 
 
 def test_generic_high_is_replaced_by_close_confirmed_consolidation_breakout():
@@ -990,24 +990,24 @@ def test_generic_high_is_replaced_by_close_confirmed_consolidation_breakout():
     assert signal["stop"] == pytest.approx(10.0)
 
 
-def test_strong_trend_breakout_requires_ma_trend_leadership_and_volume():
+def test_21_day_close_high_breakout_is_not_standalone_entry():
     dates = pd.bdate_range("2025-01-01", periods=121)
     closes = [60.0 + index * 0.5 for index in range(120)] + [125.0]
     volumes = [1000.0] * 120 + [1500.0]
+    lows = [value * 0.98 for value in closes]
+    lows[-10] = closes[-10] * 0.75
     data = _prepare_frame(pd.DataFrame({
         "date": dates,
         "open": [value * 0.99 for value in closes],
         "high": [value * 1.01 for value in closes],
-        "low": [value * 0.98 for value in closes],
+        "low": lows,
         "close": closes,
         "volume": volumes,
     }))
 
     signal = infer_technical_entry(data, len(data) - 1)
 
-    assert signal["signal_type"] == "strong_trend_breakout"
-    assert signal["order_type"] == "close"
-    assert signal["entry_evidence_score"] >= 7
+    assert signal is None
 
 
 def test_long_cycle_deduction_only_scores_an_existing_large_wave_structure():
@@ -1036,8 +1036,8 @@ def test_long_cycle_deduction_only_scores_an_existing_large_wave_structure():
         "anchor_high": 15.0,
     })
 
-    assert "deduction_low_price_volume_ma120" in scored["entry_evidence"]
-    assert "large_wave_structure" in scored["entry_evidence"]
+    assert "deduction_low_price_volume_ma120+3" in scored["entry_evidence"]
+    assert "large_wave_structure+2" in scored["entry_evidence"]
     assert scored["entry_evidence_score"] >= 9
 
 
@@ -1123,9 +1123,9 @@ def test_support_pullback_can_only_add_after_float_profit_buffer():
     bars = pd.DataFrame({
         "date": dates,
         "open": [10.0] * 79 + [10.0, 12.2, 12.3],
-        "high": [10.0] * 79 + [11.0, 12.4, 12.5],
+        "high": [10.0] * 79 + [10.4, 12.4, 12.5],
         "low": [10.0] * 79 + [10.0, 12.0, 11.9],
-        "close": [10.0] * 79 + [11.0, 12.2, 12.2],
+        "close": [10.0] * 79 + [10.4, 12.2, 12.2],
         "volume": [1000] * 79 + [3000, 1000, 1000],
     })
     start = dates[-3].strftime("%Y-%m-%d")
@@ -1150,10 +1150,10 @@ def test_close_confirmed_initial_batch_must_prove_before_addition():
     dates = pd.bdate_range("2026-01-01", periods=82)
     bars = pd.DataFrame({
         "date": dates,
-        "open": [9.8] * 79 + [9.8, 12.0, 11.4],
-        "high": [9.9] * 79 + [12.3, 12.2, 11.6],
-        "low": [9.7] * 79 + [9.7, 10.9, 10.9],
-        "close": [9.8] * 79 + [12.2, 11.5, 11.4],
+        "open": [12.0] * 79 + [12.0, 12.0, 11.4],
+        "high": [12.0] * 79 + [12.4, 12.2, 11.6],
+        "low": [11.9] * 79 + [11.9, 10.9, 10.9],
+        "close": [12.0] * 79 + [12.4, 11.5, 11.4],
         "volume": [1000] * 82,
     })
     start = dates[-3].strftime("%Y-%m-%d")
@@ -1539,7 +1539,7 @@ def test_minimum_five_yuan_commission_is_applied_to_small_order():
     assert result["transaction_cost_pct"] == pytest.approx(0.025)
     assert result["events"][0]["realized_account_pct"] == pytest.approx(-0.025)
     assert result["events"][0]["execution_quantity"] == pytest.approx(500.0)
-    assert result["final_cash"] == pytest.approx(14_495.0)
+    assert result["final_cash"] == pytest.approx(14_795.0)
     assert result["final_positions"][0]["batches"][0]["quantity"] == pytest.approx(500.0)
 
 

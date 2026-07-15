@@ -570,7 +570,7 @@ def main(argv=None):
         help="60-session return correlation used to group related exposure when tags are missing",
     )
     parser.add_argument(
-        "--min-entry-evidence-score", type=float, default=6.0,
+        "--min-entry-evidence-score", type=float, default=8.0,
         help="minimum multi-signal technical evidence score for an executable entry",
     )
     parser.add_argument(

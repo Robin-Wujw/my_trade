@@ -193,8 +193,7 @@ def _trade_basis_from_feature_row(row) -> dict:
         score += 2.0
         reasons.append("贴近上扬MA20支撑")
     if near_breakout:
-        score += 3.0
-        reasons.append("距离21日收盘高点3%以内")
+        reasons.append("候选观察：接近21日收盘高点（非买点）")
     if volume_ratio >= 1.2:
         score += 2.0
         reasons.append(f"量能高于5/10日基准{volume_ratio:.2f}倍")

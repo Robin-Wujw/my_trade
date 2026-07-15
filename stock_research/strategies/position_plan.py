@@ -179,7 +179,8 @@ def backtest_position_plan(
         if right_position > 0:
             continue
 
-        # Flat: use objective trend pullbacks or volume-confirmed 21-day breakouts.
+        # Flat: use objective trend pullbacks; generic 21-day high breakouts are
+        # too aggressive to act as standalone entries.
         previous = history.iloc[:-1]
         if len(previous) < 60:
             for level in levels:
@@ -197,22 +198,12 @@ def backtest_position_plan(
             and previous.iloc[-1]["close"] > pullback_level
             and row["low"] <= pullback_level and row["close"] >= pullback_level
         )
-        volume_baseline = (
-            max(previous["volume"].tail(5).mean(), previous["volume"].tail(10).mean())
-            if len(history) >= 11 else None
-        )
-        breakout_level = float(previous["close"].tail(21).max())
-        right_breakout = (
-            len(previous) >= 21 and row["close"] > breakout_level
-            and volume_baseline is not None and row["volume"] > volume_baseline
-            and row["close"] > row["ma20"]
-        )
-        if right_pullback or right_breakout:
+        if right_pullback:
             right_entry_date, right_cost = row["date"], float(row["close"])
             right_position = target_right_position_pct
             right_parts_remaining, right_triggers_sold = 3, set()
-            right_condition_stop = breakout_level if right_breakout else pullback_level
-            reason = "放量突破21日收盘高点" if right_breakout else "上扬MA20/MA60结构回踩MA20"
+            right_condition_stop = pullback_level
+            reason = "上扬MA20/MA60结构回踩MA20"
             event(row, "右侧买入", reason, row["close"], right_position, "right")
             continue
         for level in levels:

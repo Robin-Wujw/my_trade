@@ -119,7 +119,7 @@ def analyze_watch_stock(identity, frame, reminders=(), data_status=None) -> dict
     elif ma20 is not None and close >= ma20:
         ma20_rising = len(data) >= 25 and float(data.iloc[-1]["ma20"]) > float(data.iloc[-6]["ma20"])
         ma60_rising = len(data) >= 65 and float(data.iloc[-1]["ma60"]) > float(data.iloc[-6]["ma60"])
-        opinion = "均线向上，继续等待放量突破21日收盘高点或上扬均线拉回" if ma20_rising and ma60_rising else "价格在20日线上方，但中长期均线方向未确认，继续观察"
+        opinion = "均线向上，继续等待明确结构买点或上扬均线拉回" if ma20_rising and ma60_rising else "价格在20日线上方，但中长期均线方向未确认，继续观察"
     else:
         opinion = "暂无临近交易条件，继续观察"
     return {
