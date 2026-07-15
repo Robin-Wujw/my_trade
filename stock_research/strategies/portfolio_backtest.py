@@ -546,8 +546,6 @@ def run_portfolio_backtest(
         return current_phase in {"watch", "active"} or current_up_streak >= 3
 
     def left_symbol_limit_reached(code=None):
-        if not right_market_active():
-            return False
         left_codes = left_side_codes()
         if code is not None and code in left_codes:
             return False
@@ -1023,7 +1021,7 @@ def run_portfolio_backtest(
             current_down_streak = 0
             current_up_streak = 0
 
-        if right_market_active() and len(left_side_codes()) > 1:
+        if len(left_side_codes()) > 1:
             def left_keep_rank(code):
                 state = states[code]
                 score = float(last_candidate_scores.get(code, 0.0) or 0.0)
@@ -1039,7 +1037,7 @@ def run_portfolio_backtest(
                 if code in pending_left_exits or code in pending_left_quota_exits:
                     continue
                 pending_left_quota_exits[code] = (
-                    f"右侧行情左侧标的限额; 保留={keep_code}"
+                    f"全行情左侧标的限额; 保留={keep_code}"
                 )
 
         for code, state in states.items():
@@ -1217,7 +1215,7 @@ def run_portfolio_backtest(
                 size, pnl = execute_sell(quantity, sell, lot["cost"])
                 state.left.remove(lot)
                 add_event(
-                    date, code, "左侧右侧行情限额清仓", sell, -size,
+                    date, code, "左侧全行情限额清仓", sell, -size,
                     f"{lot['batch']}; {reason}; 次日开盘退出", pnl,
                     cost_basis=lot["cost"], execution_quantity=-quantity,
                     entry_fee_cash=entry_fee_cash, grid_slot=int(lot["slot"]),

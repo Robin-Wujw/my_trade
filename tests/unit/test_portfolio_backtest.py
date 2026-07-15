@@ -658,7 +658,7 @@ def test_left_core_only_position_does_not_consume_capacity():
     assert position["capacity_counted"] is False
 
 
-def test_right_side_market_allows_only_one_left_symbol():
+def test_all_market_phases_allow_only_one_left_symbol():
     dates = pd.bdate_range("2026-01-01", periods=81)
     bars = pd.DataFrame({
         "date": dates,
@@ -682,15 +682,16 @@ def test_right_side_market_allows_only_one_left_symbol():
                 "value_line": 100.0, "candidate_score": 10,
             },
         ]},
-        {date: {"phase": "watch", "window_up_streak": 3}},
+        {date: {"phase": "waiting", "window_up_streak": 0}},
         requested_start=date, end_date=date, max_positions=5,
     )
 
     assert [item["code"] for item in result["final_positions"]] == ["A"]
     assert result["maximum_left_side_symbols"] == 1
+    assert result["maximum_right_market_left_side_symbols"] == 0
 
 
-def test_right_side_market_reduces_existing_left_symbols_to_one():
+def test_waiting_market_does_not_seed_multiple_left_symbols():
     dates = pd.bdate_range("2026-01-01", periods=83)
     bars = pd.DataFrame({
         "date": dates,
@@ -701,8 +702,8 @@ def test_right_side_market_reduces_existing_left_symbols_to_one():
         "volume": [1000.0] * 83,
     })
     first = dates[80].strftime("%Y-%m-%d")
-    right_market = dates[81].strftime("%Y-%m-%d")
-    exit_day = dates[82].strftime("%Y-%m-%d")
+    second_day = dates[81].strftime("%Y-%m-%d")
+    third_day = dates[82].strftime("%Y-%m-%d")
 
     result = run_portfolio_backtest(
         {"A": bars, "B": bars},
@@ -718,21 +719,22 @@ def test_right_side_market_reduces_existing_left_symbols_to_one():
         ]},
         {
             first: {"phase": "waiting", "window_up_streak": 0},
-            right_market: {"phase": "watch", "window_up_streak": 3},
-            exit_day: {"phase": "watch", "window_up_streak": 3},
+            second_day: {"phase": "waiting", "window_up_streak": 0},
+            third_day: {"phase": "watch", "window_up_streak": 3},
         },
-        requested_start=first, end_date=exit_day, max_positions=5,
+        requested_start=first, end_date=third_day, max_positions=5,
     )
 
     assert [item["code"] for item in result["final_positions"]] == ["A"]
     quota_exits = [
         event for event in result["events"]
-        if event["action"] == "左侧右侧行情限额清仓"
+        if event["action"] == "左侧全行情限额清仓"
     ]
-    assert {event["code"] for event in quota_exits} == {"B"}
+    assert quota_exits == []
+    assert result["maximum_left_side_symbols"] == 1
 
 
-def test_total_symbol_cap_counts_left_cores_that_do_not_use_capacity():
+def test_left_core_still_blocks_a_second_left_symbol():
     dates = pd.bdate_range("2026-01-01", periods=83)
     bars = pd.DataFrame({
         "date": dates,
@@ -769,8 +771,9 @@ def test_total_symbol_cap_counts_left_cores_that_do_not_use_capacity():
         max_positions=5, max_total_held_symbols=5,
     )
 
-    assert {item["code"] for item in result["final_positions"]} == set(initial_codes)
-    assert result["maximum_total_held_symbols"] == 5
+    assert [item["code"] for item in result["final_positions"]] == ["A"]
+    assert result["maximum_left_side_symbols"] == 1
+    assert result["maximum_total_held_symbols"] == 1
     assert all(item["capacity_counted"] is False for item in result["final_positions"])
 
 
