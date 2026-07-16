@@ -1,0 +1,8 @@
+=== 候选池列名 ===
+
+✗ 没有allow_left字段！
+
+这可能是根本原因：
+- 代码中left_candidate_can_add检查allow_left
+- 但allow_left默认值是False
+- 候选池CSV如果没有这个字段，检查会失败

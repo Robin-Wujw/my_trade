@@ -1,0 +1,42 @@
+=== 2024-09-24 候选池排名 ===
+
+1. 中国人寿 (sh.601628)
+   候选分: 139.5
+   来源: standard_mainline
+   trade_basis_score: 12.0
+   质量: 92, 增长: 136.4%
+   价格/价值线: 0.5857253753252262
+   技术对齐: trade_ready
+
+2. 中际旭创 (sz.300308)
+   候选分: 129.8
+   来源: value_model
+   trade_basis_score: 8.0
+   质量: 100, 增长: 300.1%
+   价格/价值线: 0.978620471796503
+   技术对齐: trade_ready
+
+3. 中信博 (sh.688408)
+   候选分: 123.9
+   来源: value_model
+   trade_basis_score: 9.0
+   质量: 92, 增长: 192.9%
+   价格/价值线: 0.9437098988023116
+   技术对齐: trade_ready
+
+4. 迎驾贡酒 (sh.603198)
+   候选分: 121.7
+   来源: value_model+standard_mainline
+   trade_basis_score: 10.0
+   质量: 90, 增长: 32.6%
+   价格/价值线: 1.0623102388762322
+   技术对齐: trade_ready
+
+5. 达梦数据 (sh.688692)
+   候选分: 121.1
+   来源: standard_mainline
+   trade_basis_score: 9.0
+   质量: 88, 增长: 43.1%
+   价格/价值线: 1.890333127711668
+   技术对齐: trade_ready
+

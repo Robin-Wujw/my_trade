@@ -275,6 +275,34 @@ def test_fully_cached_range_does_not_call_network(monkeypatch, tmp_path):
     assert repeated["date"].tolist() == loaded["date"].tolist()
 
 
+def test_csv_fast_path_rejects_future_qfq_anchor(monkeypatch, tmp_path):
+    monkeypatch.setattr(formula33, "KLINE_CACHE_DIR", str(tmp_path / "csv"))
+    cached = _frame_for(["2026-07-09", "2026-07-10"], scale=1.0)
+    formula33.save_cached_kline("akshare", "sz.000001", cached)
+    formula33.save_kline_cache_metadata(
+        "akshare",
+        "sz.000001",
+        cached,
+        qfq_anchor_date="2026-07-16",
+    )
+
+    fetched = _frame_for(["2026-07-09", "2026-07-10"], scale=2.0)
+    monkeypatch.setattr(
+        formula33,
+        "load_kline_akshare",
+        lambda *_args, **_kwargs: fetched,
+    )
+
+    loaded = formula33.load_kline_with_cache(
+        "akshare",
+        "sz.000001",
+        "2026-07-09",
+        "2026-07-10",
+    )
+
+    assert loaded["close"].tolist() == [22.0, 22.0]
+
+
 def test_cached_friday_fetches_only_missing_monday(monkeypatch, tmp_path):
     rows = _frame_for(pd.date_range("2026-04-01", "2026-07-10", freq="D").strftime("%Y-%m-%d"))
     repository = _make_repository(tmp_path, rows)

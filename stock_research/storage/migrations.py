@@ -322,6 +322,23 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_candidate_snapshot_leadership ON derived.candidate_snapshots (snapshot_version, observation_date, leadership_score)",
         ),
     ),
+    Migration(
+        version=9,
+        name="stock_kline_real_amount",
+        statements=(
+            "ALTER TABLE raw.stock_kline_daily ADD COLUMN amount DOUBLE",
+        ),
+    ),
+    Migration(
+        version=10,
+        name="stock_kline_adjustment_anchor",
+        statements=(
+            "ALTER TABLE raw.stock_kline_daily ADD COLUMN adjustment VARCHAR DEFAULT 'qfq'",
+            "ALTER TABLE raw.stock_kline_daily ADD COLUMN qfq_anchor_date DATE",
+            "ALTER TABLE raw.stock_kline_daily ADD COLUMN cache_version VARCHAR",
+            "CREATE INDEX IF NOT EXISTS idx_stock_kline_anchor ON raw.stock_kline_daily (source, code, qfq_anchor_date)",
+        ),
+    ),
 )
 
 

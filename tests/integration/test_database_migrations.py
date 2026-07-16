@@ -23,6 +23,15 @@ def test_initialize_creates_schemas_and_is_idempotent(tmp_path):
             "select version, name, code_version "
             "from ops.schema_migrations order by version"
         ).fetchall()
+        kline_columns = {
+            row[0]
+            for row in connection.execute(
+                """
+                select column_name from information_schema.columns
+                where table_schema = 'raw' and table_name = 'stock_kline_daily'
+                """
+            ).fetchall()
+        }
         tables = {
             tuple(row)
             for row in connection.execute(
@@ -41,7 +50,10 @@ def test_initialize_creates_schemas_and_is_idempotent(tmp_path):
         (6, "candidate_basis_and_query_indexes", "test"),
         (7, "candidate_snapshot_coverage", "test"),
         (8, "candidate_leadership_fields", "test"),
+        (9, "stock_kline_real_amount", "test"),
+        (10, "stock_kline_adjustment_anchor", "test"),
     ]
+    assert {"adjustment", "qfq_anchor_date", "cache_version"} <= kline_columns
     assert {
         ("ops", "schema_migrations"),
         ("ops", "runs"),

@@ -111,9 +111,17 @@ def moving_average_deduction_snapshot(
     }
 
 
-def _divergence(price: pd.Series, indicator: pd.Series, reset: pd.Series | None = None, lookback: int = 60):
+def _divergence(
+    price: pd.Series,
+    indicator: pd.Series,
+    reset: pd.Series | None = None,
+    lookback: int = 60,
+    *,
+    price_low: pd.Series | None = None,
+):
     """Compare the latest point with the previous local extreme in the active cycle."""
-    work = pd.DataFrame({"price": price, "indicator": indicator}).dropna().tail(lookback)
+    low = price if price_low is None else price_low
+    work = pd.DataFrame({"price": price, "price_low": low, "indicator": indicator}).dropna().tail(lookback)
     if reset is not None and not work.empty:
         reset_values = reset.reindex(work.index).fillna(False)
         reset_indexes = np.flatnonzero(reset_values.to_numpy())
@@ -124,10 +132,10 @@ def _divergence(price: pd.Series, indicator: pd.Series, reset: pd.Series | None 
     previous = work.iloc[:-1]
     current = work.iloc[-1]
     high_index = previous["price"].idxmax()
-    low_index = previous["price"].idxmin()
+    low_index = previous["price_low"].idxmin()
     if current["price"] > previous.loc[high_index, "price"] and current["indicator"] < previous.loc[high_index, "indicator"]:
         return -1
-    if current["price"] < previous.loc[low_index, "price"] and current["indicator"] > previous.loc[low_index, "indicator"]:
+    if current["price_low"] < previous.loc[low_index, "price_low"] and current["indicator"] > previous.loc[low_index, "indicator"]:
         return 1
     return 0
 
@@ -199,11 +207,16 @@ def technical_snapshot(frame: pd.DataFrame) -> dict:
 
     kd_gap = _last(k - d)
     kd_gap_extreme = abs(kd_gap) >= 20 if kd_gap is not None else False
-    kd_div = _divergence(high, (k_high + d_high) / 2, kd_reset)
-    rsi_div = _divergence(high, rsi, rsi_reset)
-    macd_div = _divergence(high, macd)
-    bearish_divergences = sum(value == -1 for value in (kd_div, rsi_div, macd_div))
-    bullish_divergences = sum(value == 1 for value in (kd_div, rsi_div, macd_div))
+    wr_strength = ((100 - wr10) + (100 - wr20)) / 2
+    wr_reset = (wr10 >= 80) & (wr20 >= 80)
+
+    kd_div = _divergence(high, (k_high + d_high) / 2, kd_reset, price_low=low)
+    rsi_div = _divergence(high, rsi, rsi_reset, price_low=low)
+    macd_div = _divergence(high, macd, price_low=low)
+    wr_div = _divergence(high, wr_strength, wr_reset, price_low=low)
+    divergence_values = (kd_div, rsi_div, macd_div, wr_div)
+    bearish_divergences = sum(value == -1 for value in divergence_values)
+    bullish_divergences = sum(value == 1 for value in divergence_values)
     price = float(close.iloc[-1])
     ene_position = (price - float(ene_lower.iloc[-1])) / max(float(ene_upper.iloc[-1] - ene_lower.iloc[-1]), 1e-12) * 100
 
@@ -227,7 +240,7 @@ def technical_snapshot(frame: pd.DataFrame) -> dict:
     opportunity += 6 if wr_extreme == "oversold" else -3 if wr_extreme == "overbought" else 0
     opportunity = round(min(100, max(0, opportunity)), 1)
     risk = round(min(100, max(0, risk)), 1)
-    confidence = round(min(100, 45 + len(data) / 5 + 8 * sum(v != 0 for v in (kd_div, rsi_div, macd_div))), 1)
+    confidence = round(min(100, 45 + len(data) / 5 + 8 * sum(v != 0 for v in divergence_values)), 1)
     action_score = round(min(100, max(0, opportunity * 0.6 + (100 - risk) * 0.4)), 1)
 
     return {
@@ -240,6 +253,9 @@ def technical_snapshot(frame: pd.DataFrame) -> dict:
         "macd_dif": _last(dif), "macd_dea": _last(dea), "macd_hist": _last(macd), "macd_divergence": macd_div,
         "ene_upper": _last(ene_upper), "ene_mid": _last(ma10), "ene_lower": _last(ene_lower), "ene_position": round(ene_position, 1),
         "wr10": _last(wr10), "wr20": _last(wr20), "wr_extreme": wr_extreme,
+        "wr_divergence": wr_div,
+        "bearish_divergence_count": bearish_divergences,
+        "bullish_divergence_count": bullish_divergences,
         "bias10": _last(bias10), "bias20": _last(bias20),
         "volume_ma5": volume_ma5, "volume_ma10": volume_ma10,
         "volume_ref5": volume_ref5, "volume_ref10": volume_ref10,

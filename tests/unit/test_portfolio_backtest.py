@@ -19,7 +19,12 @@ from stock_research.indicators.price_structure import (
     trend_amplitude_valid,
 )
 from stock_research.strategies.historical_candidates import (
+    CANDIDATE_SNAPSHOT_COLUMNS,
     _leadership_snapshot,
+    _passes_fundamental_gate,
+    _rank_right_side_candidates,
+    _right_quant_selection_rows,
+    save_historical_candidate_snapshots,
     _trade_basis_snapshot,
     _validate_required_financial_periods,
     report_period_for,
@@ -210,6 +215,179 @@ def test_unified_pool_reserves_five_core_candidates_from_leadership_crowding():
     assert {item["code"] for item in selected if item["code"].startswith("CORE")} == {
         f"CORE{index}" for index in range(5)
     }
+
+
+def test_right_quant_ranking_prefers_visible_strength_with_lower_risk():
+    weak = {
+        "code": "WEAK",
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+        "mktcap": 300,
+        "trade_basis_score": 6,
+        "known_volume_ratio": 1.0,
+        "return_20d": 0.06,
+        "return_60d": 0.08,
+        "return_120d": 0.12,
+        "distance_120d_high": -0.20,
+        "volatility_20": 0.06,
+        "drawdown_60": -0.30,
+        "ma20_slope": 0.01,
+        "ma60_slope": 0.00,
+        "right_acceleration": 0.01,
+        "above_ma20": True,
+    }
+    strong = {
+        **weak,
+        "code": "STRONG",
+        "trade_basis_score": 9,
+        "known_volume_ratio": 1.8,
+        "return_20d": 0.18,
+        "return_60d": 0.32,
+        "return_120d": 0.45,
+        "distance_120d_high": -0.03,
+        "volatility_20": 0.025,
+        "drawdown_60": -0.08,
+        "ma20_slope": 0.08,
+        "ma60_slope": 0.05,
+        "right_acceleration": 0.07,
+    }
+
+    ranked = _rank_right_side_candidates([weak, strong])
+
+    assert ranked[0]["code"] == "STRONG"
+    assert ranked[0]["right_quant_rank"] == 1
+    assert ranked[0]["right_quant_score"] > ranked[1]["right_quant_score"]
+    assert "动量强度" in ranked[0]["right_quant_reason"]
+    assert "60日回撤" in ranked[0]["right_quant_reason"]
+
+
+def test_right_quant_selection_keeps_the_fundamental_gate_unchanged():
+    assert _passes_fundamental_gate(70, 0.10, 100)
+    assert not _passes_fundamental_gate(69.99, 0.10, 100)
+    assert not _passes_fundamental_gate(70, 0.099, 100)
+    assert not _passes_fundamental_gate(70, 0.10, 99.99)
+
+    rows = []
+    for index in range(90):
+        rows.append({
+            "code": f"LOW{index:03d}",
+            "quality_score": 90,
+            "earnings_yoy": 0.20,
+            "mktcap": 200,
+            "trade_basis_score": 6,
+            "trade_basis_reason": "右侧证据一般",
+            "known_volume_ratio": 1.0,
+            "return_20d": 0.05,
+            "return_60d": 0.05,
+            "return_120d": 0.05,
+            "distance_120d_high": -0.20,
+            "volatility_20": 0.06,
+            "drawdown_60": -0.30,
+        "ma20_slope": 0.00,
+        "ma60_slope": 0.00,
+        "right_acceleration": 0.00,
+        "leadership_score": 0.0,
+        "structure_proximity_score": 0.0,
+        "volume_node_count_60": 0,
+        "volume_node_distance": 0.30,
+        "above_ma20": True,
+    })
+    rows.append({
+        **rows[0],
+        "code": "PASS",
+        "trade_basis_score": 10,
+        "trade_basis_reason": "量价配合",
+        "known_volume_ratio": 2.0,
+        "return_20d": 0.30,
+        "return_60d": 0.50,
+        "return_120d": 0.80,
+        "distance_120d_high": -0.01,
+        "volatility_20": 0.02,
+        "drawdown_60": -0.03,
+        "ma20_slope": 0.10,
+        "ma60_slope": 0.08,
+        "right_acceleration": 0.13,
+        "leadership_score": 25.0,
+        "structure_proximity_score": 90.0,
+        "volume_node_count_60": 4,
+        "volume_node_distance": 0.02,
+    })
+
+    rows.append({
+        **rows[-1],
+        "code": "LOW_QUALITY_STRONG",
+        "quality_score": 69.99,
+        "return_20d": 0.50,
+        "return_60d": 0.90,
+        "return_120d": 1.20,
+    })
+
+    fundamental_pool = [
+        row for row in rows
+        if _passes_fundamental_gate(
+            row.get("quality_score"),
+            row.get("earnings_yoy"),
+            row.get("mktcap"),
+        )
+    ]
+    selected = _right_quant_selection_rows(fundamental_pool)
+
+    assert [item["code"] for item in selected] == ["PASS"]
+    assert selected[0]["candidate_source"] == "growth_leadership"
+    assert selected[0]["signal_eligible"] is True
+    assert "基本面硬条件通过" in selected[0]["selection_reason"]
+
+
+def test_right_quant_score_changes_final_growth_candidate_ranking():
+    selected = normalize_candidate_snapshots({"2026-07-10": [
+        {
+            "code": "LOW_QUANT",
+            "candidate_source": "growth_leadership",
+            "quality_score": 90,
+            "earnings_yoy": 0.30,
+            "mktcap": 300,
+            "trade_basis_score": 8,
+            "leadership_score": 10,
+            "right_quant_score": 60,
+        },
+        {
+            "code": "HIGH_QUANT",
+            "candidate_source": "growth_leadership",
+            "quality_score": 90,
+            "earnings_yoy": 0.30,
+            "mktcap": 300,
+            "trade_basis_score": 8,
+            "leadership_score": 10,
+            "right_quant_score": 90,
+        },
+    ]})["2026-07-10"]
+
+    assert [item["code"] for item in selected] == ["HIGH_QUANT", "LOW_QUANT"]
+    assert selected[0]["candidate_score"] > selected[1]["candidate_score"]
+
+
+def test_saved_candidate_snapshots_keep_right_quant_columns(tmp_path):
+    save_historical_candidate_snapshots(
+        tmp_path,
+        {"2026-07-10": [{
+            "date": "2026-07-10",
+            "code": "sz.000001",
+            "name": "sample",
+            "report_period": "2026-03-31",
+            "candidate_source": "value_model",
+            "quality_score": 90,
+            "earnings_yoy": 0.30,
+            "mktcap": 150,
+        }]},
+        start_date="2026-07-10",
+        end_date="2026-07-10",
+    )
+
+    frame = pd.read_csv(tmp_path / "candidates_2026-07-10.csv")
+
+    assert list(frame.columns[:len(CANDIDATE_SNAPSHOT_COLUMNS)]) == CANDIDATE_SNAPSHOT_COLUMNS
+    assert "right_quant_score" in frame.columns
+    assert "drawdown_60" in frame.columns
 
 
 def breakout_bars():
@@ -541,8 +719,16 @@ def test_candidate_sources_grant_left_and_right_permissions_independently():
             "code": "BOTH",
             "candidate_source": "value_model+growth_leadership",
             "mktcap": 150,
+            "quality_score": 90,
+            "earnings_yoy": 0.30,
         },
-        {"code": "RIGHT", "candidate_source": "growth_leadership", "mktcap": 150},
+        {
+            "code": "RIGHT",
+            "candidate_source": "growth_leadership",
+            "mktcap": 150,
+            "quality_score": 90,
+            "earnings_yoy": 0.30,
+        },
     ]})["2026-07-10"]
     by_code = {item["code"]: item for item in selected}
 
@@ -595,6 +781,11 @@ def test_candidate_nan_text_fields_do_not_falsify_value_model():
 
 
 def test_model_candidates_require_visible_100b_market_cap():
+    missing_fundamentals = normalize_candidate({
+        "code": "MISSING_FUNDAMENTALS",
+        "candidate_source": "growth_leadership",
+        "mktcap": 100.0,
+    })
     missing = normalize_candidate({
         "code": "MISSING",
         "candidate_source": "growth_leadership",
@@ -616,6 +807,10 @@ def test_model_candidates_require_visible_100b_market_cap():
         "mktcap": 100.0,
     })
 
+    assert missing_fundamentals["signal_eligible"] is False
+    assert missing_fundamentals["candidate_failure_reason"] == (
+        "quality_score_missing;earnings_yoy_missing"
+    )
     assert missing["signal_eligible"] is False
     assert missing["candidate_failure_reason"] == "mktcap_missing"
     assert small["signal_eligible"] is False
@@ -971,11 +1166,11 @@ def test_unified_candidate_interface_honors_signal_eligible():
     assert result["final_positions"] == []
 
 
-def test_daily_top10_quota_diagnostic_can_still_wait_for_right_signal():
+def test_daily_top10_quota_diagnostic_needs_mainline_growth_overlap_for_right_signal():
     bars = breakout_bars()
     date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
 
-    result = run_portfolio_backtest(
+    pure_growth = run_portfolio_backtest(
         {"A": bars},
         {date: [{
             "code": "A",
@@ -996,9 +1191,31 @@ def test_daily_top10_quota_diagnostic_can_still_wait_for_right_signal():
         requested_start=date,
         end_date=date,
     )
+    overlap = run_portfolio_backtest(
+        {"A": bars},
+        {date: [{
+            "code": "A",
+            "name": "A",
+            "candidate_source": "growth_leadership+standard_mainline",
+            "selected_for_trading": False,
+            "signal_eligible": False,
+            "candidate_failure_reason": (
+                "not_selected_for_trading: daily_top10_quota_or_core_reservation"
+            ),
+            "quality_score": 90,
+            "earnings_yoy": 0.30,
+            "mktcap": 300,
+            "trade_basis_score": 9,
+            "leadership_score": 20,
+        }]},
+        {date: {"phase": "active", "window_up_streak": 5}},
+        requested_start=date,
+        end_date=date,
+    )
 
-    assert [event["action"] for event in result["events"]] == ["右侧买入"]
-    assert result["events"][0]["code"] == "A"
+    assert pure_growth["events"] == []
+    assert [event["action"] for event in overlap["events"]] == ["右侧买入"]
+    assert overlap["events"][0]["code"] == "A"
 
 
 def test_after_close_snapshot_becomes_effective_on_next_trading_day():
@@ -1207,6 +1424,10 @@ def test_leading_pullback_pilot_is_explicit_sensitivity_mode():
     snapshots = {date: [{
         "code": "A",
         "name": "A",
+        "candidate_source": "growth_leadership+standard_mainline",
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+        "mktcap": 300,
         "trade_basis_score": 8,
         "leadership_score": 25,
     }]}

@@ -1,11 +1,13 @@
 """Point-in-time portfolio replay over dated selection snapshots."""
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 import re
 
 import pandas as pd
 
+from stock_research.indicators.technical_quant import _sma_cn
 from stock_research.strategies.candidate_interface import (
     MAX_DAILY_CANDIDATES,
     normalize_candidate_snapshots,
@@ -22,6 +24,81 @@ from stock_research.indicators.technical_entries import (
     infer_technical_entry,
 )
 from stock_research.strategies.ohlc_execution import fill_buy_stop, fill_limit_order, fill_sell_stop
+
+
+def _technical_rsv(price: pd.Series, low: pd.Series, high: pd.Series, period: int = 9) -> pd.Series:
+    lowest = low.rolling(period, min_periods=period).min()
+    highest = high.rolling(period, min_periods=period).max()
+    width = highest.sub(lowest)
+    return price.sub(lowest).div(width.where(width > 0)).mul(100).clip(0, 100)
+
+
+def _divergence_series(
+    price_high: pd.Series,
+    price_low: pd.Series,
+    indicator: pd.Series,
+    reset: pd.Series | None = None,
+    *,
+    lookback: int = 60,
+) -> pd.Series:
+    work = pd.DataFrame({
+        "price_high": pd.to_numeric(price_high, errors="coerce"),
+        "price_low": pd.to_numeric(price_low, errors="coerce"),
+        "indicator": pd.to_numeric(indicator, errors="coerce"),
+    }, index=indicator.index)
+    reset_flags = (
+        reset.reindex(work.index).fillna(False).astype(bool)
+        if reset is not None else pd.Series(False, index=work.index)
+    )
+    values = []
+    active_rows = 0
+    highest_price = highest_indicator = None
+    lowest_price = lowest_indicator = None
+    for position, (_, row) in enumerate(work.iterrows()):
+        if bool(reset_flags.iloc[position]):
+            active_rows = 0
+            highest_price = highest_indicator = None
+            lowest_price = lowest_indicator = None
+            values.append(0)
+            continue
+        if row.isna().any():
+            values.append(0)
+            continue
+        current_high = float(row["price_high"])
+        current_low = float(row["price_low"])
+        current_indicator = float(row["indicator"])
+        signal = 0
+        if active_rows >= 4:
+            if (
+                highest_price is not None
+                and current_high > highest_price
+                and current_indicator < highest_indicator
+            ):
+                signal = -1
+            elif (
+                lowest_price is not None
+                and current_low < lowest_price
+                and current_indicator > lowest_indicator
+            ):
+                signal = 1
+        values.append(signal)
+        if highest_price is None or current_high >= highest_price:
+            highest_price = current_high
+            highest_indicator = current_indicator
+        if lowest_price is None or current_low <= lowest_price:
+            lowest_price = current_low
+            lowest_indicator = current_indicator
+        active_rows = min(int(lookback), active_rows + 1)
+        if active_rows >= int(lookback):
+            active = work.iloc[max(0, position - int(lookback) + 2):position + 1].dropna()
+            if not active.empty:
+                high_index = active["price_high"].idxmax()
+                low_index = active["price_low"].idxmin()
+                highest_price = float(active.loc[high_index, "price_high"])
+                highest_indicator = float(active.loc[high_index, "indicator"])
+                lowest_price = float(active.loc[low_index, "price_low"])
+                lowest_indicator = float(active.loc[low_index, "indicator"])
+    return pd.Series(values, index=work.index)
 
 
 @dataclass
@@ -107,6 +184,43 @@ def _prepare_frame(frame):
     data = data.sort_values("date").drop_duplicates("date").reset_index(drop=True)
     for period in (5, 10, 20, 60, 120):
         data[f"ma{period}"] = data["close"].rolling(period).mean()
+    close = data["close"]
+    high = data["high"]
+    low = data["low"]
+    close_rsv = _technical_rsv(close, low, high, 9)
+    kd_k_close = _sma_cn(close_rsv, 3, 1)
+    kd_d_close = _sma_cn(kd_k_close, 3, 1)
+    high_rsv = _technical_rsv(high, low, high, 9)
+    low_rsv = _technical_rsv(low, low, high, 9)
+    kd_k_high = kd_k_close.shift(1).mul(2 / 3).add(high_rsv.div(3))
+    kd_d_high = kd_d_close.shift(1).mul(2 / 3).add(kd_k_high.div(3))
+    kd_k_low = kd_k_close.shift(1).mul(2 / 3).add(low_rsv.div(3))
+    kd_d_low = kd_d_close.shift(1).mul(2 / 3).add(kd_k_low.div(3))
+    delta = close.diff()
+    rsi_up = _sma_cn(delta.clip(lower=0), 999, 1)
+    rsi_abs = _sma_cn(delta.abs(), 999, 1)
+    rsi999 = rsi_up.div(rsi_abs.where(rsi_abs > 0)).mul(100).clip(0, 100)
+    hh10 = high.rolling(10, min_periods=10).max()
+    ll10 = low.rolling(10, min_periods=10).min()
+    hh20 = high.rolling(20, min_periods=20).max()
+    ll20 = low.rolling(20, min_periods=20).min()
+    wr10 = hh10.sub(close).div(hh10.sub(ll10).where(hh10 > ll10)).mul(100).clip(0, 100)
+    wr20 = hh20.sub(close).div(hh20.sub(ll20).where(hh20 > ll20)).mul(100).clip(0, 100)
+    kd_divergence = _divergence_series(
+        high, low, kd_k_high.add(kd_d_high).div(2), (kd_k_low < 20) & (kd_d_low < 20)
+    )
+    rsi_divergence = _divergence_series(high, low, rsi999, rsi999 < 50)
+    wr_divergence = _divergence_series(
+        high, low, (100 - wr10).add(100 - wr20).div(2), (wr10 >= 80) & (wr20 >= 80)
+    )
+    data["kd_divergence"] = kd_divergence
+    data["rsi_divergence"] = rsi_divergence
+    data["wr_divergence"] = wr_divergence
+    data["bearish_divergence_count"] = (
+        kd_divergence.eq(-1).astype(int)
+        + rsi_divergence.eq(-1).astype(int)
+        + wr_divergence.eq(-1).astype(int)
+    )
     return data
 
 
@@ -642,6 +756,7 @@ def run_portfolio_backtest(
         return (
             candidate_is_daily_quota_diagnostic(candidate)
             and _enabled(candidate.get("allow_right"), default=False)
+            and "standard_mainline" in str(candidate.get("candidate_source") or "").split("+")
             and candidate_passes_hard_gate(candidate)
             and not left_value_falsification_reason(candidate)
         )
@@ -1633,6 +1748,9 @@ def run_portfolio_backtest(
                         history, lot["cost"], lot["date"], entry_mode="right",
                         condition_stop=lot["stop"], time_limit_days=time_limit,
                         space_stop_pct=space_stop_pct,
+                        bearish_divergence=bool(
+                            pd.to_numeric(row.get("bearish_divergence_count"), errors="coerce") >= 2
+                        ),
                     )
                     if risk.get("space_stop_triggered"):
                         quantity = float(lot["quantity"])
@@ -2240,18 +2358,19 @@ def run_portfolio_backtest(
         ) if sell_trades else 0.0,
     }
     right_buys = [event for event in events if event["action"] == "右侧买入"]
+    right_buy_signal_type_counts = Counter(
+        str(event.get("signal_type") or "unknown")
+        for event in right_buys
+    )
     structure_signal_counts = {
-        "uptrend_ratio_pullback": sum(
-            "上涨波段" in event["reason"] and "拉回支撑" in event["reason"]
-            for event in right_buys
+        "uptrend_ratio_pullback": int(
+            right_buy_signal_type_counts.get("uptrend_support_pullback", 0)
         ),
-        "uptrend_50_reclaim": sum(
-            "上涨波段50%有效跌破后重新突破" in event["reason"]
-            for event in right_buys
+        "uptrend_50_reclaim": int(
+            right_buy_signal_type_counts.get("uptrend_50_reclaim", 0)
         ),
-        "pullback_50_breakout": sum(
-            "回调波段50%向上突破" in event["reason"]
-            for event in right_buys
+        "pullback_50_breakout": int(
+            right_buy_signal_type_counts.get("pullback_50_breakout", 0)
         ),
     }
     return {
@@ -2311,6 +2430,7 @@ def run_portfolio_backtest(
         "entry_blocks": entry_blocks,
         "board_lot_policy": {"sh.688": 200, "default": 100},
         "structure_signal_counts": structure_signal_counts,
+        "right_buy_signal_type_counts": dict(right_buy_signal_type_counts),
         "realized_return_pct": round(realized * 100, 3),
         "unrealized_return_pct": round((final_equity - 1 - realized) * 100, 3),
         "final_return_pct": round((final_equity - 1) * 100, 3),
