@@ -13,6 +13,8 @@
 - [多 agent 白大协作协议](knowledge/multi-agent-baida-protocol.md)：主 agent、白大 agent、量化 agent 的职责、调用顺序和策略落地检查清单。
 - [均线均量扣抵思想](knowledge/ma-volume-deduction.md)：扣抵方向、支撑压力、周期分工和项目量化映射。
 - [持仓建仓、止损与分仓止盈体系](knowledge/position-entry-exit-system.md)：显式网格、左转右、独立止损、分仓止盈和提醒配置。
+- [前复权未来函数与右侧选股漏斗审计](qfq-lookahead-and-right-funnel-audit-2026-07-16.md)：解释长周期回测为什么必须先处理复权锚点和时点数据。
+- [右侧低频量化选股模型更新](right-side-low-frequency-quant-model-2026-07-16.md)：解释当前右侧漏斗的趋势效率、盈亏比代理、结构位置和量价确认。
 
 日报新增的技术量化、双波段关键价和两个月突破追踪均以 [结果输出阅读指南](knowledge/output-guide.md) 为展示口径，以根目录 [STRATEGY.md](../STRATEGY.md) 为计算口径。
 

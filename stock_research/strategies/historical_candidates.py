@@ -38,6 +38,8 @@ CANDIDATE_SNAPSHOT_COLUMNS = [
     "quant_quality_rank", "quant_growth_rank", "quant_liquidity_rank",
     "quant_momentum_rank", "quant_low_risk_rank", "quant_trend_stability_rank",
     "quant_overheat_control_rank", "quant_alpha_rank",
+    "quant_trend_efficiency_rank", "quant_payoff_rank",
+    "quant_structure_rank", "quant_volume_confirm_rank",
     "volatility_20", "drawdown_60", "ma20_slope", "ma60_slope",
     "right_acceleration", "range_21_pct", "close_position_21",
     "volume_node_count_60", "volume_node_distance",
@@ -795,6 +797,11 @@ def _rank_right_side_candidates(rows: list[dict]) -> list[dict]:
     alpha_gap_count = number_column("alpha_gap_5d_count")
     divergence_score = number_column("divergence_score")
     bearish_divergence_count = number_column("bearish_divergence_count")
+    structure_proximity_score = number_column("structure_proximity_score")
+    volume_node_count = number_column("volume_node_count_60")
+    volume_node_distance = number_column("volume_node_distance")
+    close_position_21 = number_column("close_position_21")
+    range_21 = number_column("range_21_pct")
 
     quality_rank = pct_rank(quality)
     growth_rank = pct_rank(growth.clip(lower=-0.5, upper=2.0))
@@ -837,14 +844,53 @@ def _rank_right_side_candidates(rows: list[dict]) -> list[dict]:
         pct_rank(divergence_score) * 0.70
         + pct_rank(-bearish_divergence_count) * 0.30
     )
+    trend_efficiency = return_60.clip(lower=-0.50, upper=1.50).div(
+        downside_volatility.mul(8.0).abs()
+        .add(volatility.mul(3.0).abs())
+        .add(drawdown.abs())
+        .add(0.05)
+    )
+    trend_efficiency_rank = (
+        pct_rank(trend_efficiency) * 0.55
+        + trend_stability_rank * 0.25
+        + low_risk_rank * 0.20
+    )
+    controlled_pullback = (
+        (1.0 - (distance_high.abs().sub(0.08).abs().div(0.24))).clip(0.0, 1.0)
+        .where(return_60.fillna(-1.0).ge(0), 0.0)
+    )
+    structure_rank = (
+        pct_rank(structure_proximity_score) * 0.35
+        + pct_rank(volume_node_count) * 0.20
+        + pct_rank(-volume_node_distance.abs()) * 0.15
+        + pct_rank(close_position_21) * 0.15
+        + pct_rank(-range_21) * 0.15
+    )
+    volume_confirm_rank = (
+        pct_rank(alpha_volume_price_corr.clip(lower=-1.0, upper=1.0)) * 0.35
+        + pct_rank(alpha_turnover_expansion.clip(lower=-0.5, upper=1.5)) * 0.25
+        + pct_rank(volume_node_count) * 0.25
+        + pct_rank(alpha_intraday_strength.clip(lower=-1.0, upper=1.0)) * 0.15
+    )
+    payoff_rank = (
+        trend_efficiency_rank * 0.30
+        + pct_rank(controlled_pullback) * 0.20
+        + structure_rank * 0.20
+        + volume_confirm_rank * 0.15
+        + divergence_rank * 0.10
+        + growth_rank * 0.05
+    )
     attack_score = (
         quality_rank * 10.0
         + growth_rank * 12.0
         + liquidity_rank * 8.0
-        + momentum_rank * 35.0
-        + relative_strength_rank * 15.0
-        + alpha_rank * 14.0
-        + trend_stability_rank * 12.0
+        + momentum_rank * 24.0
+        + relative_strength_rank * 12.0
+        + alpha_rank * 10.0
+        + trend_stability_rank * 9.0
+        + payoff_rank * 18.0
+        + structure_rank * 8.0
+        + volume_confirm_rank * 7.0
         + low_risk_rank * 6.0
         + overheat_control_rank * 6.0
         + divergence_rank * 4.0
@@ -853,7 +899,9 @@ def _rank_right_side_candidates(rows: list[dict]) -> list[dict]:
         quality_rank * 15.0
         + growth_rank * 15.0
         + liquidity_rank * 10.0
-        + momentum_rank * 30.0
+        + momentum_rank * 22.0
+        + payoff_rank * 15.0
+        + trend_efficiency_rank * 10.0
         + low_risk_rank * 15.0
         + trend_stability_rank * 10.0
         + overheat_control_rank * 5.0
@@ -886,14 +934,18 @@ def _rank_right_side_candidates(rows: list[dict]) -> list[dict]:
         row["quant_overheat_control_rank"] = round(float(overheat_control_rank.iloc[index]) * 100.0, 3)
         row["quant_alpha_rank"] = round(float(alpha_rank.iloc[index]) * 100.0, 3)
         row["quant_divergence_rank"] = round(float(divergence_rank.iloc[index]) * 100.0, 3)
+        row["quant_trend_efficiency_rank"] = round(float(trend_efficiency_rank.iloc[index]) * 100.0, 3)
+        row["quant_payoff_rank"] = round(float(payoff_rank.iloc[index]) * 100.0, 3)
+        row["quant_structure_rank"] = round(float(structure_rank.iloc[index]) * 100.0, 3)
+        row["quant_volume_confirm_rank"] = round(float(volume_confirm_rank.iloc[index]) * 100.0, 3)
         row["right_momentum_rank"] = row["quant_momentum_rank"]
         row["right_trend_rank"] = row["quant_trend_stability_rank"]
         row["right_volume_rank"] = row["quant_liquidity_rank"]
         row["right_risk_rank"] = row["quant_low_risk_rank"]
         row["right_acceleration_rank"] = row["quant_overheat_control_rank"]
-        row["right_mainline_rank"] = 0.0
-        row["right_structure_rank"] = 0.0
-        row["right_volume_node_rank"] = 0.0
+        row["right_mainline_rank"] = 100.0 if bool(mainline_fresh.iloc[index] and mainline_boards.iloc[index]) else 0.0
+        row["right_structure_rank"] = row["quant_structure_rank"]
+        row["right_volume_node_rank"] = row["quant_volume_confirm_rank"]
         row["right_quant_score"] = round(float(quant_score.iloc[index]), 3)
         row["right_quant_reason"] = (
             f"质量排名{row['quant_quality_rank']:.1f}；"
@@ -901,6 +953,10 @@ def _rank_right_side_candidates(rows: list[dict]) -> list[dict]:
             f"流动性排名{row['quant_liquidity_rank']:.1f}；"
             f"动量强度排名{row['quant_momentum_rank']:.1f}；"
             f"相对强度排名{float(relative_strength_rank.iloc[index]) * 100.0:.1f}；"
+            f"趋势效率排名{row['quant_trend_efficiency_rank']:.1f}；"
+            f"盈亏比代理排名{row['quant_payoff_rank']:.1f}；"
+            f"结构位置排名{row['quant_structure_rank']:.1f}；"
+            f"量价确认排名{row['quant_volume_confirm_rank']:.1f}；"
             f"60日回撤风险排名{row['quant_low_risk_rank']:.1f}；"
             f"趋势稳定排名{row['quant_trend_stability_rank']:.1f}；"
             f"短期不过热排名{row['quant_overheat_control_rank']:.1f}；"
@@ -939,56 +995,66 @@ def _right_quant_selection_rows(rows: list[dict]) -> list[dict]:
         avg_amount_20 = (
             float(avg_amount_value)
             if pd.notna(avg_amount_value)
-            else 1_000_000_000.0
+            else 0.0
         )
         momentum_rank = float(ranked.get("quant_momentum_rank") or 0.0)
         low_risk_rank = float(ranked.get("quant_low_risk_rank") or 0.0)
         trend_stability_rank = float(ranked.get("quant_trend_stability_rank") or 0.0)
         overheat_control_rank = float(ranked.get("quant_overheat_control_rank") or 0.0)
         alpha_rank = float(ranked.get("quant_alpha_rank") or 0.0)
+        payoff_rank = float(ranked.get("quant_payoff_rank") or 0.0)
+        trend_efficiency_rank = float(ranked.get("quant_trend_efficiency_rank") or 0.0)
+        structure_rank = float(ranked.get("quant_structure_rank") or 0.0)
+        volume_confirm_rank = float(ranked.get("quant_volume_confirm_rank") or 0.0)
         drawdown_60 = float(ranked.get("drawdown_60") or -1.0)
 
         qualified = (
             rank <= 90
-            and score >= 66.0
+            and score >= 68.0
             and avg_amount_20 >= 500_000_000.0
-            and momentum_rank >= 68.0
+            and momentum_rank >= 62.0
             and alpha_rank >= 50.0
             and trend_stability_rank >= 52.0
             and low_risk_rank >= 30.0
             and overheat_control_rank >= 30.0
+            and payoff_rank >= 55.0
+            and trend_efficiency_rank >= 45.0
             and return_20d >= 0.0
             and drawdown_60 >= -0.32
         )
         strong_trend_exception = (
             rank <= 60
-            and score >= 70.0
+            and score >= 72.0
             and avg_amount_20 >= 1_000_000_000.0
             and momentum_rank >= 78.0
             and alpha_rank >= 45.0
             and trend_stability_rank >= 50.0
             and low_risk_rank >= 25.0
             and overheat_control_rank >= 30.0
+            and payoff_rank >= 45.0
             and return_20d <= 0.70
             and drawdown_60 >= -0.38
         )
-        balanced_pullback_setup = (
+        high_payoff_setup = (
             rank <= 85
-            and score >= 64.0
+            and score >= 66.0
             and avg_amount_20 >= 1_000_000_000.0
-            and momentum_rank >= 58.0
+            and momentum_rank >= 52.0
             and alpha_rank >= 45.0
             and low_risk_rank >= 60.0
+            and payoff_rank >= 68.0
+            and structure_rank >= 55.0
+            and volume_confirm_rank >= 45.0
             and overheat_control_rank >= 45.0
             and return_20d >= 0.04
             and drawdown_60 >= -0.16
         )
-        if not qualified and not strong_trend_exception and not balanced_pullback_setup:
+        if not qualified and not strong_trend_exception and not high_payoff_setup:
             continue
         right_quant_setup = (
-            "balanced_pullback" if balanced_pullback_setup
-            else "strong_trend" if strong_trend_exception
-            else "standard_quant"
+            "高盈亏比" if high_payoff_setup
+            else "强趋势" if strong_trend_exception
+            else "标准量化"
         )
         selected.append({
             **ranked,
@@ -1004,6 +1070,7 @@ def _right_quant_selection_rows(rows: list[dict]) -> list[dict]:
             "selection_reason": (
                 "基本面硬条件通过；右侧使用专业量化横截面漏斗入选；"
                 + f"综合排名第{rank}名；综合分{score:.1f}；"
+                + f"低频设置={right_quant_setup}；"
                 + f"{ranked['right_quant_reason']}"
             ),
         })

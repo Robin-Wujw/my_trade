@@ -282,16 +282,17 @@ def test_right_quant_selection_keeps_the_fundamental_gate_unchanged():
             "return_120d": 0.05,
             "distance_120d_high": -0.20,
             "volatility_20": 0.06,
+            "avg_amount_20": 800_000_000.0,
             "drawdown_60": -0.30,
-        "ma20_slope": 0.00,
-        "ma60_slope": 0.00,
-        "right_acceleration": 0.00,
-        "leadership_score": 0.0,
-        "structure_proximity_score": 0.0,
-        "volume_node_count_60": 0,
-        "volume_node_distance": 0.30,
-        "above_ma20": True,
-    })
+            "ma20_slope": 0.00,
+            "ma60_slope": 0.00,
+            "right_acceleration": 0.00,
+            "leadership_score": 0.0,
+            "structure_proximity_score": 0.0,
+            "volume_node_count_60": 0,
+            "volume_node_distance": 0.30,
+            "above_ma20": True,
+        })
     rows.append({
         **rows[0],
         "code": "PASS",
@@ -303,6 +304,7 @@ def test_right_quant_selection_keeps_the_fundamental_gate_unchanged():
         "return_120d": 0.80,
         "distance_120d_high": -0.01,
         "volatility_20": 0.02,
+        "avg_amount_20": 2_000_000_000.0,
         "drawdown_60": -0.03,
         "ma20_slope": 0.10,
         "ma60_slope": 0.08,
@@ -335,7 +337,43 @@ def test_right_quant_selection_keeps_the_fundamental_gate_unchanged():
     assert [item["code"] for item in selected] == ["PASS"]
     assert selected[0]["candidate_source"] == "growth_leadership"
     assert selected[0]["signal_eligible"] is True
+    assert selected[0]["right_quant_setup"] in {"标准量化", "强趋势", "高盈亏比"}
     assert "基本面硬条件通过" in selected[0]["selection_reason"]
+
+
+def test_right_quant_selection_rejects_missing_liquidity_data():
+    rows = [{
+        "code": "NO_AMOUNT",
+        "quality_score": 95,
+        "earnings_yoy": 0.60,
+        "mktcap": 500,
+        "trade_basis_score": 10,
+        "trade_basis_reason": "量价配合",
+        "known_volume_ratio": 2.0,
+        "return_5d": 0.05,
+        "return_20d": 0.25,
+        "return_60d": 0.55,
+        "return_120d": 0.85,
+        "distance_120d_high": -0.08,
+        "volatility_20": 0.02,
+        "drawdown_60": -0.05,
+        "ma20_slope": 0.10,
+        "ma60_slope": 0.08,
+        "right_acceleration": 0.12,
+        "leadership_score": 25.0,
+        "structure_proximity_score": 90.0,
+        "volume_node_count_60": 4,
+        "volume_node_distance": 0.02,
+        "close_position_21": 0.90,
+        "range_21_pct": 0.08,
+        "alpha_volume_price_corr_20": 0.80,
+        "alpha_turnover_expansion_20": 0.80,
+        "alpha_intraday_strength_20": 0.70,
+    }]
+
+    selected = _right_quant_selection_rows(rows)
+
+    assert selected == []
 
 
 def test_right_quant_score_changes_final_growth_candidate_ranking():
