@@ -40,6 +40,7 @@ CANDIDATE_SNAPSHOT_COLUMNS = [
     "quant_overheat_control_rank", "quant_alpha_rank",
     "quant_trend_efficiency_rank", "quant_payoff_rank",
     "quant_structure_rank", "quant_volume_confirm_rank",
+    "quant_market_regime",
     "volatility_20", "drawdown_60", "ma20_slope", "ma60_slope",
     "right_acceleration", "range_21_pct", "close_position_21",
     "volume_node_count_60", "volume_node_distance",
@@ -911,6 +912,48 @@ def _rank_right_side_candidates(rows: list[dict]) -> list[dict]:
         attack_score * 0.75
         + defense_score * 0.25
     )
+    median_return_20 = return_20.median(skipna=True)
+    median_return_60 = return_60.median(skipna=True)
+    positive_20_ratio = return_20.gt(0).mean()
+    if (
+        pd.notna(median_return_20)
+        and pd.notna(median_return_60)
+        and median_return_20 >= 0.08
+        and median_return_60 >= 0.12
+        and positive_20_ratio >= 0.60
+    ):
+        market_regime = "进攻"
+        regime_score = (
+            momentum_rank * 5.0
+            + relative_strength_rank * 4.0
+            + volume_confirm_rank * 3.0
+            + payoff_rank * 2.0
+        )
+    elif (
+        pd.notna(median_return_20)
+        and pd.notna(median_return_60)
+        and (
+            median_return_20 < 0.0
+            or median_return_60 < 0.0
+            or positive_20_ratio < 0.45
+        )
+    ):
+        market_regime = "防守"
+        regime_score = (
+            low_risk_rank * 5.0
+            + overheat_control_rank * 3.0
+            + structure_rank * 3.0
+            + payoff_rank * 3.0
+        )
+    else:
+        market_regime = "平衡"
+        regime_score = (
+            payoff_rank * 5.0
+            + trend_efficiency_rank * 4.0
+            + structure_rank * 3.0
+            + volume_confirm_rank * 2.0
+        )
+    quant_score = quant_score + regime_score
     if "mainline_snapshot_fresh" in frame:
         mainline_fresh = frame["mainline_snapshot_fresh"].fillna(False).astype(bool)
     else:
@@ -938,6 +981,7 @@ def _rank_right_side_candidates(rows: list[dict]) -> list[dict]:
         row["quant_payoff_rank"] = round(float(payoff_rank.iloc[index]) * 100.0, 3)
         row["quant_structure_rank"] = round(float(structure_rank.iloc[index]) * 100.0, 3)
         row["quant_volume_confirm_rank"] = round(float(volume_confirm_rank.iloc[index]) * 100.0, 3)
+        row["quant_market_regime"] = market_regime
         row["right_momentum_rank"] = row["quant_momentum_rank"]
         row["right_trend_rank"] = row["quant_trend_stability_rank"]
         row["right_volume_rank"] = row["quant_liquidity_rank"]
@@ -957,6 +1001,7 @@ def _rank_right_side_candidates(rows: list[dict]) -> list[dict]:
             f"盈亏比代理排名{row['quant_payoff_rank']:.1f}；"
             f"结构位置排名{row['quant_structure_rank']:.1f}；"
             f"量价确认排名{row['quant_volume_confirm_rank']:.1f}；"
+            f"市场状态{market_regime}；"
             f"60日回撤风险排名{row['quant_low_risk_rank']:.1f}；"
             f"趋势稳定排名{row['quant_trend_stability_rank']:.1f}；"
             f"短期不过热排名{row['quant_overheat_control_rank']:.1f}；"
