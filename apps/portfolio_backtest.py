@@ -88,6 +88,7 @@ def load_price_frames(codes, directory, *, start_date=None, end_date=None):
             normalized_codes,
             start_date=str(start_date or "1900-01-01"),
             end_date=str(end_date or "2999-12-31"),
+            max_qfq_anchor_date=None if end_date is None else str(end_date),
         )
         if not loaded.empty:
             frames.update({
@@ -578,7 +579,7 @@ def main(argv=None):
         help="minimum current return for the last tranche not to consume a slot",
     )
     parser.add_argument(
-        "--profit-tranches", type=int, choices=(2, 3, 4, 5), default=5,
+        "--profit-tranches", type=int, choices=(2, 3, 4, 5), default=2,
         help="number of profit-taking tranches; the last is reserved for maximum-profit-half",
     )
     parser.add_argument(

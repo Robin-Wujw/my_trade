@@ -19,6 +19,11 @@ def main(argv=None):
         "--output-directory",
         default=str(PATHS.runtime_root / "backtests" / "candidate_snapshots" / "unified-selection-v4"),
     )
+    parser.add_argument(
+        "--raw-kline-directory",
+        default=str(PATHS.cache / "formula33_kline" / "akshare_raw"),
+        help="AkShare不复权K线缓存目录，用于反推观察日锚定前复权价",
+    )
     args = parser.parse_args(argv)
     database = Database(PATHS.database, code_version="candidate-history-v3")
     database.initialize()
@@ -28,6 +33,7 @@ def main(argv=None):
         args.end_date,
         value_cache_directory=PATHS.cache / "q1_value",
         kline_directory=PATHS.cache / "formula33_kline" / "akshare",
+        raw_kline_directory=args.raw_kline_directory,
         universe_path=PATHS.cache / "stock_universe.csv",
         mainline_directory=PATHS.cache,
         research_repository=research_repository,

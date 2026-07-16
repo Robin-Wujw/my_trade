@@ -78,6 +78,39 @@ def test_kline_repository_loads_multiple_codes_in_one_batch(tmp_path):
     ]
 
 
+def test_kline_repository_filters_future_qfq_anchor(tmp_path):
+    database = Database(tmp_path / "my_trade.duckdb", code_version="test")
+    database.initialize()
+    repository = KlineRepository(database, lock_path=tmp_path / "kline.lock")
+    repository.upsert_stock_kline(
+        "akshare",
+        "000001",
+        pd.DataFrame([{
+            "date": "2026-07-09", "open": 10, "high": 11,
+            "low": 9, "close": 10.5, "volume": 1000,
+            "tradestatus": "1",
+        }]),
+        qfq_anchor_date="2026-07-16",
+    )
+
+    strict = repository.load_stock_kline(
+        "akshare",
+        "000001",
+        start_date="2026-07-09",
+        end_date="2026-07-09",
+        max_qfq_anchor_date="2026-07-09",
+    )
+    loose = repository.load_stock_kline(
+        "akshare",
+        "000001",
+        start_date="2026-07-09",
+        end_date="2026-07-09",
+    )
+
+    assert strict.empty
+    assert loose["close"].tolist() == [10.5]
+
+
 def test_kline_repository_load_uses_process_lock(tmp_path, monkeypatch):
     database = Database(tmp_path / "my_trade.duckdb", code_version="test")
     database.initialize()

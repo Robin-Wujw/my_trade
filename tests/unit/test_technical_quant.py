@@ -24,6 +24,7 @@ def test_snapshot_quantifies_all_requested_indicators():
         "kd_k_close", "kd_d_close", "kd_k_high", "kd_d_high",
         "kd_k_low", "kd_d_low", "kd_gap", "rsi999", "macd_hist",
         "ene_upper", "ene_mid", "ene_lower", "wr10", "wr20",
+        "wr_divergence", "bearish_divergence_count", "bullish_divergence_count",
         "bias10", "volume_ma5", "volume_ma10", "base_volume_ratio",
         "technical_opportunity_score", "technical_risk_score",
         "technical_confidence", "technical_action_score",

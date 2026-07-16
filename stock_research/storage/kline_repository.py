@@ -103,24 +103,40 @@ class KlineRepository:
         raise RuntimeError("unreachable")  # pragma: no cover
 
     @staticmethod
-    def _normalized_frame(source: str, code: str, frame: pd.DataFrame) -> pd.DataFrame:
+    def _normalized_frame(
+        source: str,
+        code: str,
+        frame: pd.DataFrame,
+        *,
+        adjustment: str = "qfq",
+        qfq_anchor_date: str | None = None,
+        cache_version: str | None = None,
+    ) -> pd.DataFrame:
         if frame is None or frame.empty or "date" not in frame.columns:
             return pd.DataFrame(columns=[
                 "source", "code", "trade_date", "open", "high", "low",
-                "close", "volume", "tradestatus",
+                "close", "volume", "amount", "tradestatus", "adjustment",
+                "qfq_anchor_date", "cache_version",
             ])
         data = frame.copy()
         data["trade_date"] = pd.to_datetime(data["date"], errors="coerce").dt.normalize()
-        for column in ["open", "high", "low", "close", "volume"]:
+        for column in ["open", "high", "low", "close", "volume", "amount"]:
             data[column] = pd.to_numeric(data.get(column), errors="coerce")
         if "tradestatus" not in data.columns:
             data["tradestatus"] = None
         data["tradestatus"] = data["tradestatus"].astype("string")
         data["source"] = str(source)
         data["code"] = str(code)
+        data["adjustment"] = str(adjustment)
+        anchor = pd.to_datetime(qfq_anchor_date, errors="coerce")
+        if pd.isna(anchor):
+            anchor = data["trade_date"].max()
+        data["qfq_anchor_date"] = anchor.normalize() if pd.notna(anchor) else pd.NaT
+        data["cache_version"] = None if cache_version is None else str(cache_version)
         columns = [
             "source", "code", "trade_date", "open", "high", "low",
-            "close", "volume", "tradestatus",
+            "close", "volume", "amount", "tradestatus", "adjustment",
+            "qfq_anchor_date", "cache_version",
         ]
         return (
             data.dropna(subset=["trade_date", "high", "low", "close"])[columns]
@@ -138,18 +154,36 @@ class KlineRepository:
                 """
                 INSERT INTO raw.stock_kline_daily (
                     source, code, trade_date, open, high, low, close, volume,
-                    tradestatus, updated_at
+                    amount, tradestatus, adjustment, qfq_anchor_date,
+                    cache_version, updated_at
                 )
                 SELECT source, code, trade_date, open, high, low, close, volume,
-                       tradestatus, CURRENT_TIMESTAMP
+                       amount, tradestatus, adjustment, qfq_anchor_date,
+                       cache_version, CURRENT_TIMESTAMP
                 FROM incoming_stock_kline
                 """
             )
         finally:
             connection.unregister("incoming_stock_kline")
 
-    def upsert_stock_kline(self, source: str, code: str, frame: pd.DataFrame) -> int:
-        data = self._normalized_frame(source, code, frame)
+    def upsert_stock_kline(
+        self,
+        source: str,
+        code: str,
+        frame: pd.DataFrame,
+        *,
+        adjustment: str = "qfq",
+        qfq_anchor_date: str | None = None,
+        cache_version: str | None = None,
+    ) -> int:
+        data = self._normalized_frame(
+            source,
+            code,
+            frame,
+            adjustment=adjustment,
+            qfq_anchor_date=qfq_anchor_date,
+            cache_version=cache_version,
+        )
         if data.empty:
             return 0
 
@@ -198,6 +232,9 @@ class KlineRepository:
         *,
         start_date: str,
         end_date: str,
+        adjustment: str = "qfq",
+        qfq_anchor_date: str | None = None,
+        cache_version: str | None = None,
     ) -> int:
         """Atomically replace one adjusted-price window for a stock."""
         start = pd.to_datetime(start_date, errors="coerce")
@@ -211,7 +248,14 @@ class KlineRepository:
         if not raw_data.empty:
             raw_data["date"] = pd.to_datetime(raw_data["date"], errors="coerce")
             raw_data = raw_data[(raw_data["date"] >= start) & (raw_data["date"] <= end)]
-        data = self._normalized_frame(source, code, raw_data)
+        data = self._normalized_frame(
+            source,
+            code,
+            raw_data,
+            adjustment=adjustment,
+            qfq_anchor_date=qfq_anchor_date,
+            cache_version=cache_version,
+        )
 
         def replace_rows():
             connection = None
@@ -252,18 +296,28 @@ class KlineRepository:
         *,
         start_date: str,
         end_date: str,
+        max_qfq_anchor_date: str | None = None,
     ) -> pd.DataFrame:
         def read_rows():
             connection = self.database.connect(read_only=True)
             try:
+                anchor_clause = ""
+                params = [str(source), str(code), start_date, end_date]
+                if max_qfq_anchor_date is not None:
+                    anchor_clause = (
+                        " AND qfq_anchor_date IS NOT NULL"
+                        " AND qfq_anchor_date <= ?"
+                    )
+                    params.append(max_qfq_anchor_date)
                 return connection.execute(
                     """
-                    SELECT trade_date, code, open, high, low, close, volume, tradestatus
+                    SELECT trade_date, code, open, high, low, close, volume, amount, tradestatus
                     FROM raw.stock_kline_daily
                     WHERE source = ? AND code = ? AND trade_date >= ? AND trade_date <= ?
+                    """ + anchor_clause + """
                     ORDER BY trade_date
                     """,
-                    [str(source), str(code), start_date, end_date],
+                    params,
                 ).fetchdf()
             finally:
                 connection.close()
@@ -272,7 +326,7 @@ class KlineRepository:
         if frame.empty:
             return frame
         frame["date"] = pd.to_datetime(frame.pop("trade_date"), errors="coerce").dt.strftime("%Y-%m-%d")
-        return frame[["date", "code", "open", "high", "low", "close", "volume", "tradestatus"]]
+        return frame[["date", "code", "open", "high", "low", "close", "volume", "amount", "tradestatus"]]
 
     def load_stock_klines(
         self,
@@ -281,12 +335,13 @@ class KlineRepository:
         *,
         start_date: str,
         end_date: str,
+        max_qfq_anchor_date: str | None = None,
     ) -> pd.DataFrame:
         """Load a portfolio universe with one DuckDB scan and one connection."""
         normalized_codes = sorted({str(code) for code in codes if str(code)})
         if not normalized_codes:
             return pd.DataFrame(columns=[
-                "date", "code", "open", "high", "low", "close", "volume", "tradestatus",
+                "date", "code", "open", "high", "low", "close", "volume", "amount", "tradestatus",
             ])
 
         def read_rows():
@@ -294,17 +349,27 @@ class KlineRepository:
             code_frame = pd.DataFrame({"code": normalized_codes})
             connection.register("requested_stock_codes", code_frame)
             try:
+                anchor_clause = ""
+                params = [str(source), start_date, end_date]
+                if max_qfq_anchor_date is not None:
+                    anchor_clause = (
+                        " AND stored.qfq_anchor_date IS NOT NULL"
+                        " AND stored.qfq_anchor_date <= ?"
+                    )
+                    params.append(max_qfq_anchor_date)
                 return connection.execute(
                     """
                     SELECT stored.trade_date, stored.code, stored.open, stored.high,
-                           stored.low, stored.close, stored.volume, stored.tradestatus
+                           stored.low, stored.close, stored.volume, stored.amount,
+                           stored.tradestatus
                     FROM raw.stock_kline_daily AS stored
                     INNER JOIN requested_stock_codes AS requested USING (code)
                     WHERE stored.source = ?
                       AND stored.trade_date >= ? AND stored.trade_date <= ?
+                    """ + anchor_clause + """
                     ORDER BY stored.code, stored.trade_date
                     """,
-                    [str(source), start_date, end_date],
+                    params,
                 ).fetchdf()
             finally:
                 connection.close()
@@ -312,7 +377,7 @@ class KlineRepository:
         frame = self._with_lock_retry(read_rows)
         if frame.empty:
             return pd.DataFrame(columns=[
-                "date", "code", "open", "high", "low", "close", "volume", "tradestatus",
+                "date", "code", "open", "high", "low", "close", "volume", "amount", "tradestatus",
             ])
         frame["date"] = pd.to_datetime(frame.pop("trade_date"), errors="coerce").dt.strftime("%Y-%m-%d")
-        return frame[["date", "code", "open", "high", "low", "close", "volume", "tradestatus"]]
+        return frame[["date", "code", "open", "high", "low", "close", "volume", "amount", "tradestatus"]]

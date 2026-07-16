@@ -55,7 +55,7 @@ def normalize_candidate(candidate):
     if sources:
         row["allow_left"] = "value_model" in sources
         row["allow_right"] = bool(
-            sources & {"standard_mainline", "growth_leadership"}
+            sources & {"standard_mainline", "growth_leadership", "quant_right"}
         )
     else:
         row["allow_left"] = bool(row.get("allow_left", False))
@@ -67,6 +67,11 @@ def normalize_candidate(candidate):
         if price_to_value is not None and 0.80 <= price_to_value <= 1.08:
             valuation_bonus = max(0.0, 5.0 * (1.08 - price_to_value) / 0.28)
         trade_basis_bonus = _number(row.get("trade_basis_score")) or 0.0
+        right_quant_score = _number(row.get("right_quant_score"))
+        right_quant_bonus = (
+            min(max(right_quant_score, 0.0) * 0.35, 30.0)
+            if right_quant_score is not None else 0.0
+        )
         core_score = (
             quality
             + min(max(growth, 0.0), 1.0) * 20.0
@@ -75,7 +80,15 @@ def normalize_candidate(candidate):
             + min(max(trade_basis_bonus, 0.0), 12.0)
         )
         row["core_candidate_score"] = round(core_score, 6)
-        original_score = core_score + min(max(leadership_score, 0.0), 30.0)
+        original_score = core_score + max(
+            min(max(leadership_score, 0.0), 30.0),
+            right_quant_bonus,
+        )
+        if "quant_right" in sources and right_quant_score is not None:
+            quant_score = max(float(right_quant_score), 0.0)
+            setup_bonus = 10.0 if _clean_text(row.get("right_quant_setup")) == "balanced_pullback" else 0.0
+            row["core_candidate_score"] = round(95.0 + quant_score + setup_bonus, 6)
+            original_score = max(original_score, 95.0 + quant_score + setup_bonus)
     row["candidate_score"] = round(original_score, 6)
     row["value_falsification_reason"] = _clean_text(
         row.get("value_falsification_reason")
@@ -101,10 +114,19 @@ def normalize_candidate(candidate):
     if isinstance(eligible, str):
         eligible = eligible.strip().lower() in {"1", "true", "yes", "y"}
     eligibility_reasons = []
+    requires_full_fundamentals = bool(
+        sources & {"standard_mainline", "growth_leadership", "quant_right"}
+    )
+    if requires_full_fundamentals and quality is None:
+        eligibility_reasons.append("quality_score_missing")
+        eligible = False
     if quality is not None:
         if quality < 70.0:
             eligibility_reasons.append("quality_score_below_70")
         eligible = eligible and quality >= 70.0
+    if requires_full_fundamentals and growth is None:
+        eligibility_reasons.append("earnings_yoy_missing")
+        eligible = False
     if growth is not None:
         if growth < 0.10:
             eligibility_reasons.append("earnings_yoy_below_10pct")
@@ -120,6 +142,18 @@ def normalize_candidate(candidate):
         if market_cap < 100.0:
             eligibility_reasons.append("mktcap_below_100")
         eligible = eligible and market_cap >= 100.0
+    data_status = _clean_text(row.get("data_status"))
+    if data_status and data_status != "traded":
+        eligibility_reasons.append(f"data_status_{data_status}")
+        eligible = False
+    valid_price_bar = row.get("valid_price_bar")
+    if valid_price_bar is not None and not _truthy(valid_price_bar):
+        eligibility_reasons.append("invalid_price_bar")
+        eligible = False
+    is_traded_bar = row.get("is_traded_bar")
+    if is_traded_bar is not None and not _truthy(is_traded_bar):
+        eligibility_reasons.append("not_traded_bar")
+        eligible = False
     if eligibility_reasons and not row["candidate_failure_reason"]:
         row["candidate_failure_reason"] = ";".join(eligibility_reasons)
     row["signal_eligible"] = bool(eligible)

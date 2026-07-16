@@ -1062,15 +1062,51 @@ def _kline_cache_file_signature(source, code):
     }
 
 
-def save_kline_cache_metadata(source, code, df):
+def _kline_anchor_date_from_frame(df):
+    normalized = normalize_kline_df(df)
+    if normalized.empty:
+        return None
+    return str(normalized["date"].max())
+
+
+def _kline_anchor_allowed(payload, max_qfq_anchor_date=None):
+    if max_qfq_anchor_date is None:
+        return True
+    anchor = pd.to_datetime(payload.get("qfq_anchor_date"), errors="coerce")
+    maximum = pd.to_datetime(max_qfq_anchor_date, errors="coerce")
+    if pd.isna(anchor) or pd.isna(maximum):
+        return False
+    return anchor.normalize() <= maximum.normalize()
+
+
+def _legacy_kline_cache_can_infer_anchor(df, max_qfq_anchor_date=None):
+    if max_qfq_anchor_date is None:
+        return False
+    anchor_date = _kline_anchor_date_from_frame(df)
+    if not anchor_date:
+        return False
+    payload = {"qfq_anchor_date": anchor_date}
+    return _kline_anchor_allowed(payload, max_qfq_anchor_date)
+
+
+def _kline_cache_metadata_missing(source, code):
+    return not bool(_read_json(kline_cache_metadata_path(source, code)))
+
+
+def save_kline_cache_metadata(source, code, df, *, qfq_anchor_date=None):
     normalized = normalize_kline_df(df)
     signature = _kline_cache_file_signature(source, code)
     if normalized.empty or not signature:
         return False
+    anchor_date = qfq_anchor_date or _kline_anchor_date_from_frame(normalized)
     payload = {
         "version": KLINE_QFQ_CACHE_VERSION,
+        "cache_version": KLINE_QFQ_CACHE_VERSION,
         "source": str(source),
         "code": str(code),
+        "adjustment": "qfq",
+        "qfq_anchor_date": str(anchor_date) if anchor_date else None,
+        "provider_actual_end_date": str(normalized["date"].max()),
         "rows": int(len(normalized)),
         "min_date": str(normalized["date"].min()),
         "max_date": str(normalized["date"].max()),
@@ -1080,7 +1116,7 @@ def save_kline_cache_metadata(source, code, df):
     return True
 
 
-def kline_cache_metadata_matches(source, code, df):
+def kline_cache_metadata_matches(source, code, df, *, max_qfq_anchor_date=None):
     if df is None or df.empty:
         return False
     payload = _read_json(kline_cache_metadata_path(source, code))
@@ -1090,6 +1126,7 @@ def kline_cache_metadata_matches(source, code, df):
     normalized = normalize_kline_df(df)
     return (
         payload.get("version") == KLINE_QFQ_CACHE_VERSION
+        and payload.get("adjustment") == "qfq"
         and payload.get("source") == str(source)
         and payload.get("code") == str(code)
         and payload.get("rows") == len(normalized)
@@ -1097,6 +1134,7 @@ def kline_cache_metadata_matches(source, code, df):
         and payload.get("max_date") == str(normalized["date"].max())
         and payload.get("size") == signature["size"]
         and payload.get("mtime_ns") == signature["mtime_ns"]
+        and _kline_anchor_allowed(payload, max_qfq_anchor_date)
     )
 
 
@@ -1112,16 +1150,42 @@ def normalize_kline_df(df):
     if df is None or df.empty:
         return pd.DataFrame()
     df = df.copy()
-    keep_cols = ["date", "code", "open", "high", "low", "close", "volume", "tradestatus"]
+    keep_cols = [
+        "date",
+        "code",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "tradestatus",
+    ]
     for col in keep_cols:
         if col not in df.columns:
             df[col] = np.nan
     df = df[keep_cols]
     df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    for col in ["open", "high", "low", "close", "volume"]:
+    for col in ["open", "high", "low", "close", "volume", "amount"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.dropna(subset=["date", "high", "low", "close"]).sort_values("date")
     return df.drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
+
+
+def combine_kline_frames(frames):
+    """Combine same-source K-lines while keeping non-null enrichment fields."""
+    available = [frame for frame in frames if frame is not None and not frame.empty]
+    if not available:
+        return pd.DataFrame()
+    combined = normalize_kline_df(pd.concat(available, ignore_index=True, sort=False))
+    if combined.empty:
+        return combined
+    return (
+        combined.sort_values("date")
+        .groupby("date", as_index=False)
+        .last()
+        .reset_index(drop=True)
+    )
 
 
 def load_cached_kline(source, code):
@@ -1134,7 +1198,15 @@ def load_cached_kline(source, code):
     return pd.DataFrame()
 
 
-def load_persisted_kline(repository, source, code, start_date, end_date):
+def load_persisted_kline(
+    repository,
+    source,
+    code,
+    start_date,
+    end_date,
+    *,
+    max_qfq_anchor_date=None,
+):
     if repository is None:
         return pd.DataFrame()
     try:
@@ -1144,6 +1216,7 @@ def load_persisted_kline(repository, source, code, start_date, end_date):
                 code,
                 start_date=start_date,
                 end_date=end_date,
+                max_qfq_anchor_date=max_qfq_anchor_date,
             )
         )
     except Exception as exc:
@@ -1175,13 +1248,22 @@ def save_cached_kline(source, code, df):
         raise RuntimeError(f"{code} CSV K-line cache write failed: {exc}") from exc
 
 
-def save_persisted_kline(repository, source, code, df, *, replace_range=None):
+def save_persisted_kline(
+    repository,
+    source,
+    code,
+    df,
+    *,
+    replace_range=None,
+    qfq_anchor_date=None,
+):
     if repository is None or df is None or df.empty:
         return 0
     try:
         normalized = normalize_kline_df(df)
         if normalized.empty:
             raise ValueError("K-line persistence contains no valid OHLC rows")
+        anchor_date = qfq_anchor_date or _kline_anchor_date_from_frame(normalized)
         if replace_range is not None:
             return repository.replace_stock_kline_range(
                 source,
@@ -1189,8 +1271,18 @@ def save_persisted_kline(repository, source, code, df, *, replace_range=None):
                 normalized,
                 start_date=replace_range[0],
                 end_date=replace_range[1],
+                adjustment="qfq",
+                qfq_anchor_date=anchor_date,
+                cache_version=KLINE_QFQ_CACHE_VERSION,
             )
-        return repository.upsert_stock_kline(source, code, normalized)
+        return repository.upsert_stock_kline(
+            source,
+            code,
+            normalized,
+            adjustment="qfq",
+            qfq_anchor_date=anchor_date,
+            cache_version=KLINE_QFQ_CACHE_VERSION,
+        )
     except Exception as exc:
         raise RuntimeError(f"{code} DuckDB K-line write failed: {exc}") from exc
 
@@ -1349,13 +1441,32 @@ def load_kline_with_cache(
     cache_event=None,
 ):
     required_history_rows = max(0, int(minimum_history_rows))
-    file_cached = load_cached_kline(source, code)
+    raw_file_cached = load_cached_kline(source, code)
+    file_cached = raw_file_cached
     no_trade_marker = load_kline_no_trade_marker(source, code)
-    if not file_cached.empty and kline_cache_metadata_matches(
+    file_cache_metadata_ok = not file_cached.empty and kline_cache_metadata_matches(
         source,
         code,
         file_cached,
+        max_qfq_anchor_date=end_date,
+    )
+    if (
+        not file_cache_metadata_ok
+        and not file_cached.empty
+        and repository is None
+        and _kline_cache_metadata_missing(source, code)
+        and _legacy_kline_cache_can_infer_anchor(file_cached, end_date)
     ):
+        save_kline_cache_metadata(source, code, file_cached)
+        file_cache_metadata_ok = kline_cache_metadata_matches(
+            source,
+            code,
+            file_cached,
+            max_qfq_anchor_date=end_date,
+        )
+    if not file_cache_metadata_ok:
+        file_cached = pd.DataFrame()
+    if not file_cached.empty:
         file_window = filter_kline_range(file_cached, start_date, end_date)
         marker_covers_end = (
             observation_trade_status == "suspended"
@@ -1373,16 +1484,36 @@ def load_kline_with_cache(
                 cache_event["complete_file_cache"] = True
             return file_window
 
-    persisted = load_persisted_kline(repository, source, code, start_date, end_date)
+    persisted = load_persisted_kline(
+        repository,
+        source,
+        code,
+        start_date,
+        end_date,
+        max_qfq_anchor_date=end_date,
+    )
+    if (
+        repository is not None
+        and file_cached.empty
+        and not raw_file_cached.empty
+        and _kline_cache_metadata_missing(source, code)
+        and _legacy_kline_cache_can_infer_anchor(raw_file_cached, end_date)
+    ):
+        save_kline_cache_metadata(source, code, raw_file_cached)
+        if kline_cache_metadata_matches(
+            source,
+            code,
+            raw_file_cached,
+            max_qfq_anchor_date=end_date,
+        ):
+            file_cached = raw_file_cached
     if (
         repository is not None
         and not file_cached.empty
         and not persisted.empty
         and _qfq_ohlc_changed(file_cached, persisted)
     ):
-        file_cached = normalize_kline_df(
-            pd.concat([file_cached, persisted], ignore_index=True, sort=False)
-        )
+        file_cached = combine_kline_frames([file_cached, persisted])
         save_cached_kline(source, code, file_cached)
     if repository is not None and not file_cached.empty:
         csv_in_range = filter_kline_range(file_cached, start_date, end_date)
@@ -1391,17 +1522,14 @@ def load_kline_with_cache(
         missing_in_database = csv_dates - database_dates
         if missing_in_database:
             invalidate_kline_cache_metadata(source, code)
-            save_persisted_kline(
-                repository,
-                source,
-                code,
-                csv_in_range[csv_in_range["date"].isin(missing_in_database)],
-            )
-    cached = normalize_kline_df(
-        pd.concat([file_cached, persisted], ignore_index=True, sort=False)
-        if not persisted.empty or not file_cached.empty
-        else pd.DataFrame()
-    )
+        save_persisted_kline(
+            repository,
+            source,
+            code,
+            csv_in_range[csv_in_range["date"].isin(missing_in_database)],
+            qfq_anchor_date=end_date,
+        )
+    cached = combine_kline_frames([file_cached, persisted])
     effective_expected_trade_dates = set(expected_trade_dates or [])
     if observation_trade_status == "suspended":
         effective_expected_trade_dates.discard(str(end_date))
@@ -1544,9 +1672,7 @@ def load_kline_with_cache(
             outside_window = cached[
                 (cached["date"] < refresh_start) | (cached["date"] > refresh_end)
             ]
-            cached = normalize_kline_df(
-                pd.concat([outside_window, refreshed], ignore_index=True, sort=False)
-            )
+            cached = combine_kline_frames([outside_window, refreshed])
             invalidate_kline_cache_metadata(source, code)
             save_persisted_kline(
                 repository,
@@ -1554,6 +1680,7 @@ def load_kline_with_cache(
                 code,
                 refreshed,
                 replace_range=(refresh_start, refresh_end),
+                qfq_anchor_date=refresh_end,
             )
             save_cached_kline(source, code, cached)
             if repository is not None:
@@ -1584,9 +1711,7 @@ def load_kline_with_cache(
                     )
                 write_no_trade_marker = True
         if not needs_full_refresh and not fresh.empty:
-            candidate = normalize_kline_df(
-                pd.concat([cached, fresh], ignore_index=True, sort=False)
-            )
+            candidate = combine_kline_frames([cached, fresh])
             if len(filter_kline_range(candidate, start_date, end_date)) < required_history_rows:
                 raise RuntimeError(
                     f"{code} incomplete K-line response; "
@@ -1594,7 +1719,13 @@ def load_kline_with_cache(
                 )
             cached = candidate
             save_cached_kline(source, code, cached)
-            save_persisted_kline(repository, source, code, fresh)
+            save_persisted_kline(
+                repository,
+                source,
+                code,
+                fresh,
+                qfq_anchor_date=_kline_anchor_date_from_frame(fresh),
+            )
             if repository is not None:
                 save_kline_cache_metadata(source, code, cached)
         if write_no_trade_marker:
@@ -1664,7 +1795,7 @@ def load_kline_tushare(code, start_date, end_date, retries=4, retry_delay=1.5):
     }
     daily = ts_api.query(
         "daily",
-        fields="ts_code,trade_date,open,high,low,close,vol",
+        fields="ts_code,trade_date,open,high,low,close,vol,amount",
         **params,
     )
     factors = ts_api.query(
@@ -1677,7 +1808,9 @@ def load_kline_tushare(code, start_date, end_date, retries=4, retry_delay=1.5):
     merged = daily.merge(factors, on=["ts_code", "trade_date"], how="inner")
     if merged.empty:
         raise RuntimeError(f"{ts_code} Tushare 日线与复权因子没有重叠日期")
-    for column in ["open", "high", "low", "close", "vol", "adj_factor"]:
+    if "amount" not in merged:
+        merged["amount"] = pd.NA
+    for column in ["open", "high", "low", "close", "vol", "amount", "adj_factor"]:
         merged[column] = pd.to_numeric(merged[column], errors="coerce")
     merged = merged.dropna(subset=["trade_date", "open", "high", "low", "close", "adj_factor"])
     if merged.empty:
@@ -1696,6 +1829,7 @@ def load_kline_tushare(code, start_date, end_date, retries=4, retry_delay=1.5):
         "low": merged["low"],
         "close": merged["close"],
         "volume": merged["vol"],
+        "amount": merged["amount"] * 1000.0,
     }).sort_values("date").reset_index(drop=True)
 
 
@@ -1706,6 +1840,39 @@ def resolve_price_source(requested, start_date, end_date, retries, retry_delay):
         raise RuntimeError("--price-source tushare 需要配置 Tushare token")
     print("前复权 K 线来源: Tushare（显式小批量模式）")
     return "tushare"
+
+
+def _normalize_akshare_kline_columns(df):
+    """Map AkShare K-line columns while preserving provider OHLC values."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    aliases = {
+        "\u65e5\u671f": "date",
+        "\u80a1\u7968\u4ee3\u7801": "code",
+        "\u5f00\u76d8": "open",
+        "\u6536\u76d8": "close",
+        "\u6700\u9ad8": "high",
+        "\u6700\u4f4e": "low",
+        "\u6210\u4ea4\u91cf": "volume",
+        "\u6210\u4ea4\u989d": "amount",
+        "\u6362\u624b\u7387": "turnover",
+        "date": "date",
+        "code": "code",
+        "open": "open",
+        "close": "close",
+        "high": "high",
+        "low": "low",
+        "volume": "volume",
+        "amount": "amount",
+        "turnover": "turnover",
+    }
+    return df.rename(
+        columns={
+            column: aliases[str(column).strip()]
+            for column in df.columns
+            if str(column).strip() in aliases
+        }
+    ).copy()
 
 
 def load_kline_akshare(code, start_date, end_date, retries=4, retry_delay=1.5):
