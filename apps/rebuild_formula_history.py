@@ -16,9 +16,13 @@ def main(argv=None):
         "--output",
         default=str(PATHS.runtime_root / "backtests" / "formula33_phase_research_v1.csv"),
     )
+    parser.add_argument(
+        "--kline-directory",
+        default=str(PATHS.cache / "formula33_kline" / "akshare"),
+    )
     args = parser.parse_args(argv)
     frame = rebuild_formula_history(
-        PATHS.cache / "formula33_kline" / "akshare",
+        args.kline_directory,
         args.start_date,
         args.end_date,
     )

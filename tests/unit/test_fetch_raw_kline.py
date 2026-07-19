@@ -1,6 +1,7 @@
 import pandas as pd
 
 from scripts import fetch_akshare_raw_kline as raw_kline
+from scripts import fetch_tushare_raw_kline_by_date as raw_by_date
 
 
 def test_normalize_baostock_frame_outputs_raw_kline_schema():
@@ -90,3 +91,40 @@ def test_auto_provider_falls_back_to_tushare(monkeypatch):
 
     assert provider == "tushare"
     pd.testing.assert_frame_equal(frame, expected)
+
+
+def test_tushare_by_date_market_mapping_and_flush(tmp_path):
+    assert raw_by_date._market_from_tushare_code("600000.SH") == ("600000", "sh")
+    assert raw_by_date._market_from_tushare_code("000001.SZ") == ("000001", "sz")
+
+    rows = {
+        ("000001", "sz"): [
+            {
+                "date": "2024-01-03",
+                "code": "sz.000001",
+                "open": 1.0,
+                "close": 1.1,
+                "high": 1.2,
+                "low": 0.9,
+                "volume": 100,
+                "amount": 1000,
+            },
+            {
+                "date": "2024-01-02",
+                "code": "sz.000001",
+                "open": 1.0,
+                "close": 1.0,
+                "high": 1.1,
+                "low": 0.9,
+                "volume": 90,
+                "amount": 900,
+            },
+        ]
+    }
+
+    written = raw_by_date._flush_rows(tmp_path, rows, force=False)
+    result = pd.read_csv(tmp_path / "sz_000001.csv")
+
+    assert written == 1
+    assert rows == {}
+    assert list(result["date"]) == ["2024-01-02", "2024-01-03"]

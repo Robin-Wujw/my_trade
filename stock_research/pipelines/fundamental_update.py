@@ -7,6 +7,7 @@ import json
 import math
 import os
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
@@ -45,9 +46,19 @@ def parse_args(argv=None):
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--offline", action="store_true", help="只使用缓存并生成覆盖率/截面")
+    parser.add_argument(
+        "--skip-financial-updates",
+        action="store_true",
+        help="build the snapshot from existing q1_value cache without AkShare financial backfill",
+    )
     parser.add_argument("--min-price-coverage", type=float, default=0.90)
     parser.add_argument("--min-financial-coverage", type=float, default=0.35)
     parser.add_argument("--target-financial-coverage", type=float, default=0.95)
+    parser.add_argument(
+        "--require-target-financial-coverage",
+        action="store_true",
+        help="fail closed unless financial coverage reaches target-financial-coverage",
+    )
     parser.add_argument("--output", default="")
     parser.add_argument("--alert", action="store_true", help="覆盖率不足时发送PushPlus告警")
     return parser.parse_args(argv)
@@ -68,7 +79,7 @@ def load_json(path, default=None):
 
 def save_json(path, value):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
+    tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     with open(tmp, "w", encoding="utf-8") as handle:
         json.dump(value, handle, ensure_ascii=False, indent=2, default=lambda v: v.item() if hasattr(v, "item") else str(v))
     os.replace(tmp, path)
@@ -151,7 +162,7 @@ def update_missing(universe, markets, args):
     missing.sort(key=lambda code: (code in state.get("errors", {}), code))
     if args.max_updates > 0:
         missing = missing[:args.max_updates]
-    if args.offline or not missing:
+    if args.offline or args.skip_financial_updates or not missing:
         return 0, 0, len(missing)
     success = failed = 0
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
@@ -392,3 +403,5 @@ def main(argv=None):
         )
     if status == "unsafe":
         raise SystemExit(2)
+    if args.require_target_financial_coverage and status != "safe":
+        raise SystemExit(3)

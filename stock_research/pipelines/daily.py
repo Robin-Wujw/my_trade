@@ -328,6 +328,7 @@ def build_default_steps(
         "--max-updates", str(config.financial_updates), "--workers", "2",
         "--min-price-coverage", "0.90", "--min-financial-coverage", "0.35",
         "--target-financial-coverage", "0.95",
+        "--require-target-financial-coverage",
     ]
     selection_args = ["--value-ratio", "1.08", "--normal-top", "30"]
     if report_period:

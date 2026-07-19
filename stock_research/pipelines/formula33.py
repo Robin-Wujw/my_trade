@@ -29,6 +29,7 @@ import multiprocessing
 import os
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from stock_research.api import akshare as ak
 from stock_research.api import baostock as bs
@@ -44,6 +45,10 @@ from openpyxl.utils import get_column_letter
 from stock_research.core.completion_manifest import CompletionManifest
 from stock_research.core.paths import PATHS
 from stock_research.indicators.formula33 import calc_kdj_k, calc_rsi, calc_wr
+from stock_research.market.miniqmt_data import (
+    load_cached_miniqmt_frame,
+    load_miniqmt_price_frames,
+)
 from stock_research.storage import Database, KlineRepository
 from stock_research.strategies.formula33 import (
     build_window_trend,
@@ -97,9 +102,12 @@ def parse_args(argv=None):
     parser.add_argument("--maxtasksperchild", type=int, default=200, help="多进程模式下每个worker处理多少任务后重启")
     parser.add_argument(
         "--price-source",
-        choices=["tushare", "akshare", "baostock"],
+        choices=["tushare", "akshare", "baostock", "miniqmt", "miniqmt-akshare"],
         default="akshare",
-        help="前复权K线来源；默认 AkShare，Tushare 低频账号仅适合显式小批量使用",
+        help=(
+            "前复权K线来源；miniqmt 严格使用 MiniQMT，"
+            "miniqmt-akshare 表示 MiniQMT 优先、AkShare 兜底"
+        ),
     )
     parser.add_argument("--metadata-source", choices=["akshare", "baostock", "auto"], default="akshare", help="交易日/股票池/上市日期来源，默认优先 AkShare")
     parser.add_argument("--min-mktcap", type=float, default=100.0, help="最低总市值，单位亿元")
@@ -166,6 +174,20 @@ def _read_json(path):
 def _snapshot_path(kind, observation_date, suffix):
     date_key = pd.Timestamp(observation_date).strftime("%Y%m%d")
     return os.path.join(FORMULA33_SNAPSHOT_DIR, f"{kind}_{date_key}.{suffix}")
+
+
+def _latest_snapshot_path(kind, observation_date, suffix):
+    target = pd.Timestamp(observation_date).normalize()
+    candidates = []
+    directory = Path(FORMULA33_SNAPSHOT_DIR)
+    for path in directory.glob(f"{kind}_*.{suffix}"):
+        date_text = path.stem.removeprefix(f"{kind}_")
+        date = pd.to_datetime(date_text, format="%Y%m%d", errors="coerce")
+        if pd.notna(date) and date.normalize() <= target:
+            candidates.append((date.normalize(), path))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
 
 
 def _lookup_coverage(universe, lookup):
@@ -635,8 +657,23 @@ def load_universe_snapshot(observation_date):
         return cached.drop_duplicates("code").reset_index(drop=True)
 
     previous = load_cached_universe()
-    fresh = get_universe_akshare()
+    try:
+        fresh = get_universe_akshare()
+    except Exception as exc:
+        fresh = pd.DataFrame()
+        fetch_error = exc
+    else:
+        fetch_error = None
     if not _valid_universe_frame(fresh):
+        if _valid_universe_frame(previous) and len(previous) >= 1000:
+            fallback = previous.drop_duplicates("code").reset_index(drop=True)
+            _atomic_write_csv(fallback, path)
+            print(
+                f"Formula33 universe snapshot fallback: date={observation_date} "
+                f"rows={len(fallback)} source=stock_universe.csv "
+                f"reason={fetch_error or 'fresh_universe_invalid'}"
+            )
+            return fallback
         return pd.DataFrame()
     if len(previous) >= 100 and len(fresh) < int(np.ceil(len(previous) * 0.98)):
         raise RuntimeError(
@@ -710,15 +747,22 @@ def load_stock_basic_akshare():
 
 def load_stock_basic_snapshot(observation_date, universe):
     path = _snapshot_path("stock_basic", observation_date, "csv")
-    try:
-        cached = pd.read_csv(path, dtype={"code": str})
-    except (OSError, ValueError, pd.errors.ParserError):
-        cached = pd.DataFrame()
-    if {"code", "ipoDate"}.issubset(cached.columns):
-        cached_lookup = dict(zip(cached["code"], cached["ipoDate"]))
-        if _lookup_coverage(universe, cached_lookup) >= MIN_LIST_DATE_COVERAGE:
+    latest_path = _latest_snapshot_path("stock_basic", observation_date, "csv")
+    for candidate_path in [Path(path), latest_path]:
+        if candidate_path is None:
+            continue
+        try:
+            cached = pd.read_csv(candidate_path, dtype={"code": str})
+        except (OSError, ValueError, pd.errors.ParserError):
+            cached = pd.DataFrame()
+        if {"code", "ipoDate"}.issubset(cached.columns):
+            cached_lookup = dict(zip(cached["code"], cached["ipoDate"]))
+            if _lookup_coverage(universe, cached_lookup) < MIN_LIST_DATE_COVERAGE:
+                continue
+            cached_date = candidate_path.stem.removeprefix("stock_basic_")
             print(
-                f"Formula33 stock-basic snapshot hit: date={observation_date} "
+                f"Formula33 stock-basic snapshot hit: date={cached_date} "
+                f"requested={pd.Timestamp(observation_date).strftime('%Y%m%d')} "
                 f"rows={len(cached)}"
             )
             return cached
@@ -1404,6 +1448,8 @@ def _fetch_kline_range(source, code, start_date, end_date, retries, retry_delay)
         "tushare": load_kline_tushare,
         "akshare": load_kline_akshare,
         "baostock": load_kline_baostock,
+        "miniqmt": load_kline_miniqmt,
+        "miniqmt-akshare": load_kline_miniqmt_akshare,
     }
     try:
         loader = loaders[source]
@@ -1424,6 +1470,42 @@ def filter_kline_range(df, start_date, end_date):
     df = normalize_kline_df(df)
     mask = (df["date"] >= start_date) & (df["date"] <= end_date)
     return df[mask].copy().reset_index(drop=True)
+
+
+def _suspended_response_has_usable_history(
+    cached,
+    fresh,
+    start_date,
+    end_date,
+    required_history_rows,
+):
+    if fresh is None or fresh.empty:
+        return False
+    candidate = combine_kline_frames([cached, fresh])
+    if candidate.empty:
+        return False
+    window = filter_kline_range(candidate, start_date, end_date)
+    return (
+        candidate["date"].min() <= start_date
+        and len(window) >= int(required_history_rows)
+    )
+
+
+def _load_stale_miniqmt_history_for_suspension(source, code, start_date, end_date):
+    if not str(source).startswith("miniqmt"):
+        return pd.DataFrame()
+    try:
+        return normalize_kline_df(
+            load_cached_miniqmt_frame(
+                to_bs_code(code),
+                period="1d",
+                dividend_type="front",
+                start_date=str(start_date),
+                end_date=str(end_date),
+            )
+        )
+    except Exception:
+        return pd.DataFrame()
 
 
 def load_kline_with_cache(
@@ -1533,6 +1615,33 @@ def load_kline_with_cache(
     effective_expected_trade_dates = set(expected_trade_dates or [])
     if observation_trade_status == "suspended":
         effective_expected_trade_dates.discard(str(end_date))
+    if (
+        cached.empty
+        and observation_trade_status == "suspended"
+        and required_history_rows > 0
+    ):
+        stale = _load_stale_miniqmt_history_for_suspension(
+            source, code, start_date, end_date,
+        )
+        if _suspended_response_has_usable_history(
+            pd.DataFrame(),
+            stale,
+            start_date,
+            end_date,
+            required_history_rows,
+        ):
+            save_kline_no_trade_marker(source, code, end_date)
+            save_cached_kline(source, code, stale)
+            if repository is not None:
+                save_persisted_kline(
+                    repository,
+                    source,
+                    code,
+                    stale,
+                    qfq_anchor_date=_kline_anchor_date_from_frame(stale),
+                )
+                save_kline_cache_metadata(source, code, stale)
+            return filter_kline_range(stale, start_date, end_date)
     logical_fetch_ranges = []
     if not cached.empty:
         cached_min = cached["date"].min()
@@ -1559,6 +1668,19 @@ def load_kline_with_cache(
                     observation_trade_status == "suspended"
                     and no_trade_marker.get("observation_date") == str(end_date)
                 )
+                confirmed_suspended_with_history = (
+                    observation_trade_status == "suspended"
+                    and required_history_rows > 0
+                    and cached_min <= start_date
+                    and history_deep_enough
+                )
+                if confirmed_suspended_with_history:
+                    save_kline_no_trade_marker(source, code, end_date)
+                    if repository is not None:
+                        if file_cached.empty:
+                            save_cached_kline(source, code, cached)
+                        save_kline_cache_metadata(source, code, cached)
+                    return filter_kline_range(cached, start_date, end_date)
                 if not marker_matches:
                     logical_fetch_ranges.append((right_start, end_date))
     else:
@@ -1663,7 +1785,15 @@ def load_kline_with_cache(
                 and logical_start <= end_date <= logical_end
                 and end_date not in response_dates
             ):
-                if not _has_kline_overlap(cached, refreshed):
+                if not _has_kline_overlap(
+                    cached, refreshed,
+                ) and not _suspended_response_has_usable_history(
+                    cached,
+                    refreshed,
+                    start_date,
+                    end_date,
+                    required_history_rows,
+                ):
                     raise RuntimeError(
                         f"{code} suspended observation response did not include "
                         "a cached overlap date"
@@ -1704,7 +1834,15 @@ def load_kline_with_cache(
                 and logical_start <= end_date <= logical_end
                 and end_date not in response_dates
             ):
-                if not _has_kline_overlap(cached, fresh):
+                if not _has_kline_overlap(
+                    cached, fresh,
+                ) and not _suspended_response_has_usable_history(
+                    cached,
+                    fresh,
+                    start_date,
+                    end_date,
+                    required_history_rows,
+                ):
                     raise RuntimeError(
                         f"{code} suspended observation response did not include "
                         "a cached overlap date"
@@ -1831,6 +1969,63 @@ def load_kline_tushare(code, start_date, end_date, retries=4, retry_delay=1.5):
         "volume": merged["vol"],
         "amount": merged["amount"] * 1000.0,
     }).sort_values("date").reset_index(drop=True)
+
+
+def load_kline_miniqmt(code, start_date, end_date, retries=4, retry_delay=1.5):
+    """Load MiniQMT front-adjusted daily bars through the local QMT bridge."""
+    normalized_code = to_bs_code(code)
+    summary = {}
+    frame = pd.DataFrame()
+    for refresh in (False, True):
+        frames, summary = load_miniqmt_price_frames(
+            [normalized_code],
+            start_date=str(start_date),
+            end_date=str(end_date),
+            period="1d",
+            dividend_type="front",
+            refresh=refresh,
+            persist=False,
+        )
+        frame = frames.get(normalized_code)
+        if frame is None or frame.empty:
+            continue
+        dates = pd.to_datetime(frame["date"], errors="coerce").dropna()
+        if not dates.empty and (
+            dates.min().normalize() <= pd.Timestamp(start_date).normalize()
+            and dates.max().normalize() >= pd.Timestamp(end_date).normalize()
+        ):
+            return frame
+    if frame is None or frame.empty:
+        missing = ", ".join(summary.get("missing_sample", [])[:5])
+        errors = summary.get("fetch", {}).get("errors", [])
+        error_text = ""
+        if errors:
+            error_text = str(errors[0].get("traceback") or errors[0])[:500]
+        raise RuntimeError(
+            f"{code} MiniQMT K-line empty; missing={missing}; {error_text}"
+        )
+    return frame
+
+
+def load_kline_miniqmt_akshare(code, start_date, end_date, retries=4, retry_delay=1.5):
+    """Use MiniQMT as the primary K-line provider and AkShare as fallback."""
+    try:
+        return load_kline_miniqmt(
+            code,
+            start_date,
+            end_date,
+            retries=retries,
+            retry_delay=retry_delay,
+        )
+    except Exception as exc:
+        print(f"{code} MiniQMT K线失败，回退 AkShare: {exc}")
+        return load_kline_akshare(
+            code,
+            start_date,
+            end_date,
+            retries=retries,
+            retry_delay=retry_delay,
+        )
 
 
 def resolve_price_source(requested, start_date, end_date, retries, retry_delay):

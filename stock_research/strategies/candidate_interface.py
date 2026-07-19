@@ -6,6 +6,11 @@ import math
 
 MAX_DAILY_CANDIDATES = 10
 MIN_CORE_DAILY_CANDIDATES = 5
+LEFT_VALUE_EXPLOSIVE_GROWTH_YOY = 1.0
+LEFT_VALUE_SMALL_CAP_BUFFER = 150.0
+LEFT_VALUE_DEEP_DISCOUNT_RATIO = 0.90
+LEFT_VALUE_MIN_PRICE_TO_VALUE = 0.80
+LEFT_VALUE_MAX_PRICE_TO_VALUE = 1.08
 
 
 def _number(value):
@@ -31,6 +36,51 @@ def _clean_text(value) -> str:
         return ""
     text = str(value).strip()
     return "" if text.lower() in {"nan", "none", "<na>"} else text
+
+
+def _append_failure_reason(row, reason: str) -> None:
+    if not reason:
+        return
+    existing = _clean_text(row.get("candidate_failure_reason"))
+    parts = [item.strip() for item in existing.split(";") if item.strip()]
+    if reason not in parts:
+        parts.append(reason)
+    row["candidate_failure_reason"] = ";".join(parts)
+
+
+def left_value_safety_reasons(row) -> list[str]:
+    """Return visible-data reasons why a value-line row is not left executable."""
+    price_to_value = _number(row.get("price_to_value"))
+    growth = _number(row.get("earnings_yoy", row.get("yoy")))
+    market_cap = _number(row.get("mktcap"))
+    if price_to_value is None or growth is None or market_cap is None:
+        return []
+    if (
+        growth >= LEFT_VALUE_EXPLOSIVE_GROWTH_YOY
+        and market_cap < LEFT_VALUE_SMALL_CAP_BUFFER
+        and price_to_value > LEFT_VALUE_DEEP_DISCOUNT_RATIO
+    ):
+        return ["left_high_growth_small_cap_needs_deeper_discount"]
+    return []
+
+
+def left_value_permission_reasons(row) -> list[str]:
+    """Return reasons why a value-model row cannot open a left-side plan."""
+    reasons = []
+    if _number(row.get("quality_score")) is None:
+        reasons.append("quality_score_missing")
+    if _number(row.get("earnings_yoy", row.get("yoy"))) is None:
+        reasons.append("earnings_yoy_missing")
+    if _number(row.get("mktcap")) is None:
+        reasons.append("mktcap_missing")
+    price_to_value = _number(row.get("price_to_value"))
+    if price_to_value is None:
+        reasons.append("price_to_value_missing")
+    elif not LEFT_VALUE_MIN_PRICE_TO_VALUE <= price_to_value <= LEFT_VALUE_MAX_PRICE_TO_VALUE:
+        reasons.append("price_to_value_out_of_range")
+    if reasons:
+        return reasons
+    return left_value_safety_reasons(row)
 
 
 def normalize_candidate(candidate):
@@ -60,6 +110,14 @@ def normalize_candidate(candidate):
     else:
         row["allow_left"] = bool(row.get("allow_left", False))
         row["allow_right"] = bool(row.get("allow_right", True))
+    left_permission_reasons = (
+        left_value_permission_reasons(row)
+        if "value_model" in sources or row["allow_left"] else []
+    )
+    if left_permission_reasons:
+        row["allow_left"] = False
+        for reason in left_permission_reasons:
+            _append_failure_reason(row, reason)
     if quality is not None and growth is not None:
         mainline_bonus = 15.0 if "standard_mainline" in source or bool(row.get("is_mainline")) else 0.0
         valuation_bonus = 0.0
@@ -154,8 +212,11 @@ def normalize_candidate(candidate):
     if is_traded_bar is not None and not _truthy(is_traded_bar):
         eligibility_reasons.append("not_traded_bar")
         eligible = False
-    if eligibility_reasons and not row["candidate_failure_reason"]:
-        row["candidate_failure_reason"] = ";".join(eligibility_reasons)
+    for reason in eligibility_reasons:
+        _append_failure_reason(row, reason)
+    if not row["allow_left"] and not row["allow_right"]:
+        eligible = False
+        _append_failure_reason(row, "no_executable_lane")
     row["signal_eligible"] = bool(eligible)
     return row
 

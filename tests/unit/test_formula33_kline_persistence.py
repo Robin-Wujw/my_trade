@@ -156,6 +156,92 @@ def test_explicit_tushare_source_does_not_consume_probe_quota(monkeypatch):
     ) == "tushare"
 
 
+def test_miniqmt_kline_source_uses_miniqmt_bridge(monkeypatch):
+    miniqmt_frame = _frame_for(["2026-07-09", "2026-07-10"])
+    calls = []
+
+    def load_miniqmt(codes, **kwargs):
+        calls.append((codes, kwargs))
+        return {"sz.000001": miniqmt_frame}, {
+            "missing_sample": [],
+            "fetch": {"errors": []},
+        }
+
+    monkeypatch.setattr(formula33, "load_miniqmt_price_frames", load_miniqmt)
+    monkeypatch.setattr(
+        formula33,
+        "load_kline_akshare",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("strict MiniQMT source must not call AkShare")
+        ),
+    )
+
+    result = formula33.load_kline_miniqmt(
+        "sz.000001", "2026-07-09", "2026-07-10"
+    )
+
+    assert result["date"].tolist() == ["2026-07-09", "2026-07-10"]
+    assert calls == [
+        (
+            ["sz.000001"],
+            {
+                "start_date": "2026-07-09",
+                "end_date": "2026-07-10",
+                "period": "1d",
+                "dividend_type": "front",
+                "refresh": False,
+                "persist": False,
+            },
+        )
+    ]
+
+
+def test_miniqmt_kline_source_refreshes_when_cache_is_short(monkeypatch):
+    cached = _frame_for("2026-07-09")
+    refreshed = _frame_for(["2026-07-09", "2026-07-10"])
+    calls = []
+
+    def load_miniqmt(codes, **kwargs):
+        calls.append(kwargs["refresh"])
+        frame = refreshed if kwargs["refresh"] else cached
+        return {"sz.000001": frame}, {
+            "missing_sample": [],
+            "fetch": {"errors": []},
+        }
+
+    monkeypatch.setattr(formula33, "load_miniqmt_price_frames", load_miniqmt)
+
+    result = formula33.load_kline_miniqmt(
+        "sz.000001", "2026-07-09", "2026-07-10"
+    )
+
+    assert calls == [False, True]
+    assert result["date"].tolist() == ["2026-07-09", "2026-07-10"]
+
+
+def test_miniqmt_akshare_source_falls_back_only_after_miniqmt_failure(monkeypatch):
+    fallback = _frame_for("2026-07-10", scale=2.0)
+
+    monkeypatch.setattr(
+        formula33,
+        "load_kline_miniqmt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("MiniQMT unavailable")
+        ),
+    )
+    monkeypatch.setattr(
+        formula33,
+        "load_kline_akshare",
+        lambda *_args, **_kwargs: fallback,
+    )
+
+    result = formula33.load_kline_miniqmt_akshare(
+        "sz.000001", "2026-07-10", "2026-07-10"
+    )
+
+    assert result["close"].tolist() == [22.0]
+
+
 def test_duckdb_value_wins_over_stale_csv_for_the_same_trade_date(
     monkeypatch,
     tmp_path,

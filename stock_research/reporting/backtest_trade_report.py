@@ -18,16 +18,53 @@ _REASON_REPLACEMENTS = {
     "14:55/close proxy": "14:55收盘代理价成交",
 }
 
+_BLOCK_REASON_REPLACEMENTS = {
+    "entry_evidence_below_min": "买点证据分低于执行门槛",
+    "order_not_filled": "价格未触发成交",
+    "support_pullback_not_first_entry": "支撑拉回仅允许已有右仓加仓，不能作为该轮首仓/左转右触发",
+}
 
-def readable_reason(value) -> str:
+_SIGNAL_TYPE_REPLACEMENTS = {
+    "bull_run_half_pullback": "连阳一半拉回",
+    "uptrend_support_pullback": "上涨波段支撑拉回",
+    "pullback_50_breakout": "回调50%放量突破",
+    "uptrend_50_reclaim": "上涨50%收复",
+}
+
+
+def _fmt_number(value, digits=3) -> str:
+    number = _number(value, digits)
+    return "" if number is None else f"{number:,.{digits}f}"
+
+
+def readable_reason(value, event: dict | None = None) -> str:
     parts = []
+    action = str((event or {}).get("action") or "")
+    left_grid = action.startswith("左侧网格")
     for raw in str(value or "").split(";"):
         part = raw.strip()
         if not part or re.fullmatch(r"[Rr]\d+", part):
             continue
+        if left_grid:
+            part = part.replace("上一格卖出", "上一格网格卖价")
         for source, target in _REASON_REPLACEMENTS.items():
-            part = part.replace(source, target)
+            replacement = target
+            if left_grid and source == "intraday_cross":
+                replacement = "盘中触及预设网格价成交"
+            elif left_grid and source == "gap_or_open_fill":
+                replacement = "开盘触及预设网格价成交"
+            part = part.replace(source, replacement)
         parts.append(part)
+    if left_grid and event:
+        details = []
+        value_line = _fmt_number(event.get("value_line"))
+        if value_line:
+            details.append(f"价值线{value_line}")
+        grid_slot = _number(event.get("grid_slot"), 0)
+        if grid_slot is not None:
+            details.append(f"网格槽{int(grid_slot)}")
+        if details:
+            parts.append("，".join(details))
     return "；".join(parts) or "策略条件触发"
 
 
@@ -46,6 +83,20 @@ def _signed_money(value) -> str:
     if number is None:
         return ""
     return f"{number:+,.2f}元"
+
+
+def _entry_cost_per_share(event: dict):
+    cost = _number(event.get("cost_basis"), 3)
+    if cost is not None:
+        return cost
+    price = _number(event.get("execution_price", event.get("price")), 3)
+    if price is not None:
+        return price
+    amount = _number(event.get("trade_amount"), 6)
+    quantity = _number(event.get("quantity"), 6)
+    if amount is None or quantity in {None, 0.0}:
+        return None
+    return _number(amount / quantity, 3)
 
 
 def _action_summary(event: dict, side: str, quantity: int, holdings_after: int) -> str:
@@ -74,8 +125,15 @@ def _action_summary(event: dict, side: str, quantity: int, holdings_after: int) 
 
 def _trade_result(side: str, event: dict) -> str:
     if side == "买入":
-        cost = _number(event.get("transaction_cost_amount"))
-        return f"建仓成本{cost:,.2f}元" if cost is not None else "建仓"
+        cost = _entry_cost_per_share(event)
+        fee = _number(event.get("transaction_cost_amount"))
+        if cost is None and fee is None:
+            return "建仓"
+        if cost is None:
+            return f"建仓，费用{fee:,.2f}元"
+        if fee is None:
+            return f"成本价{cost:,.3f}元/股"
+        return f"成本价{cost:,.3f}元/股；费用{fee:,.2f}元"
     pnl = _number(event.get("profit_loss_amount"))
     pct = _number(event.get("profit_loss_pct"), 4)
     if pnl is None:
@@ -109,7 +167,7 @@ def build_readable_trade_frame(trade_ledger) -> pd.DataFrame:
             "数量(股)": quantity,
             "成交金额(元)": _number(event.get("trade_amount")),
             "手续费税费滑点(元)": _number(event.get("transaction_cost_amount")),
-            "买卖理由": readable_reason(event.get("reason")),
+            "买卖理由": readable_reason(event.get("reason"), event),
             "本次已实现盈亏(元)": pnl,
             "本次收益率(%)": _number(event.get("profit_loss_pct"), 4) if side == "卖出" else None,
             "交易后持股(股)": holdings_after,
@@ -128,6 +186,9 @@ def build_readable_trade_frame(trade_ledger) -> pd.DataFrame:
                 if event.get("anchor_low_date") and event.get("anchor_high_date")
                 else ""
             ),
+            "账户模式": str(event.get("account_mode") or ""),
+            "价值线": _number(event.get("value_line"), 3),
+            "网格槽": _number(event.get("grid_slot"), 0),
         })
     return pd.DataFrame(rows)
 
@@ -140,6 +201,103 @@ def _money(value) -> str:
 def _pct(value) -> str:
     number = _number(value, 4)
     return "—" if number is None else f"{number:+.2f}%"
+
+
+def _bool_text(value) -> str:
+    if value is True:
+        return "是"
+    if value is False:
+        return "否"
+    return "—"
+
+
+def _mode_text(value) -> str:
+    mapping = {"left": "左侧", "right": "右侧", "mixed": "左右混合"}
+    return mapping.get(str(value or ""), str(value or "—"))
+
+
+def _block_reason_text(value) -> str:
+    raw = str(value or "")
+    return _BLOCK_REASON_REPLACEMENTS.get(raw, raw or "未成交")
+
+
+def _signal_type_text(value) -> str:
+    raw = str(value or "")
+    return _SIGNAL_TYPE_REPLACEMENTS.get(raw, raw or "—")
+
+
+def _render_relevant_entry_blocks(result: dict, *, max_rows_per_code: int = 20) -> list[str]:
+    positions = result.get("final_positions") or []
+    held_codes = {str(item.get("code") or "") for item in positions}
+    held_codes.discard("")
+    if not held_codes:
+        return []
+    blocks = [
+        item for item in result.get("entry_blocks") or []
+        if str(item.get("code") or "") in held_codes
+    ]
+    if not blocks:
+        return []
+    grouped: dict[str, list[dict]] = {}
+    names: dict[str, str] = {
+        str(item.get("code") or ""): str(item.get("name") or item.get("code") or "")
+        for item in positions
+    }
+    for item in blocks:
+        code = str(item.get("code") or "")
+        grouped.setdefault(code, []).append(item)
+        block_name = str(item.get("name") or "")
+        if block_name and block_name != code:
+            names[code] = block_name
+    last_trade_dates: dict[str, str] = {}
+    for event in result.get("trade_ledger") or []:
+        code = str(event.get("code") or "")
+        if code in held_codes and event.get("date"):
+            last_trade_dates[code] = max(last_trade_dates.get(code, ""), str(event.get("date")))
+    lines = [
+        "",
+        "## 期末持仓相关未成交信号",
+        "",
+        "| 股票 | 日期 | 信号 | 证据分 | 交易分 | 领导力 | 未成交/未左转右原因 |",
+        "|---|---|---|---:|---:|---:|---|",
+    ]
+    for code in sorted(grouped):
+        all_items = sorted(grouped[code], key=lambda row: str(row.get("date") or ""))
+        last_trade_date = last_trade_dates.get(code, "")
+        after_last_trade = [
+            item for item in all_items
+            if str(item.get("date") or "") > last_trade_date
+        ]
+        head_count = max_rows_per_code // 2
+        selected = after_last_trade[:head_count] + all_items[-(max_rows_per_code - head_count):]
+        seen = set()
+        items = []
+        for item in sorted(selected, key=lambda row: str(row.get("date") or "")):
+            key = (
+                str(item.get("date") or ""),
+                str(item.get("signal_type") or ""),
+                str(item.get("reason") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(item)
+        overflow = max(0, len(all_items) - len(items))
+        if overflow:
+            lines.append(
+                f"| {names.get(code, code)}（{code}） | — | — | — | — | — | "
+                f"另有{overflow}条同标的未成交信号，详见summary.entry_blocks |"
+            )
+        for item in items:
+            lines.append(
+                f"| {names.get(code, code)}（{code}） | {item.get('date') or ''} | "
+                f"{_signal_type_text(item.get('signal_type'))} | "
+                f"{_number(item.get('entry_evidence_score'), 2)} | "
+                f"{_number(item.get('trade_basis_score'), 2)} | "
+                f"{_number(item.get('leadership_score'), 2)} | "
+                f"{_block_reason_text(item.get('reason'))} |"
+            )
+    return lines
 
 
 def render_trade_report_markdown(result: dict) -> str:
@@ -183,20 +341,23 @@ def render_trade_report_markdown(result: dict) -> str:
         lines.append("期末空仓。")
     else:
         lines.extend([
-            "| 股票 | 数量 | 成本价 | 收盘价 | 投入成本 | 市值 | 浮动盈亏 | 浮盈率 |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|",
+            "| 股票 | 模式 | 数量 | 成本价 | 收盘价 | 价值线 | 市值 | 浮动盈亏 | 浮盈率 | 高收益尾仓 | 计入容量 |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|",
         ])
         for item in positions:
             lines.append(
                 f"| {item.get('name') or item.get('code')}（{item.get('code')}） | "
+                f"{_mode_text(item.get('position_mode'))} | "
                 f"{int(float(item.get('quantity') or 0))} | {item.get('cost')} | "
-                f"{item.get('close')} | {_money(item.get('invested_amount'))} | "
+                f"{item.get('close')} | {_fmt_number(item.get('left_value_line')) or '—'} | "
                 f"{_money(item.get('market_value'))} | {_money(item.get('unrealized_pnl_amount'))} | "
-                f"{_pct(item.get('unrealized_pnl_pct'))} |"
+                f"{_pct(item.get('unrealized_pnl_pct'))} | "
+                f"{_bool_text(item.get('profit_tail'))} | {_bool_text(item.get('capacity_counted'))} |"
             )
+    lines.extend(_render_relevant_entry_blocks(result))
     lines.extend([
         "",
-        "> 说明：买入行的“本次盈亏”只包含当次交易成本；卖出行包含按该次卖出数量分摊的买入成本与全部卖出费用。",
+        "> 说明：买入行的结果展示成本价/股和当次费用，“本次已实现盈亏”只包含当次交易成本；卖出行包含按该次卖出数量分摊的买入成本与全部卖出费用。",
         "",
     ])
     return "\n".join(lines)

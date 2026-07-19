@@ -22,6 +22,7 @@ from stock_research.api.pushplus import send_pushplus
 from stock_research.core.paths import PATHS
 from stock_research.indicators.technical_quant import moving_average_deduction_snapshot
 from stock_research.indicators.waves import infer_downtrend_recovery, level_price
+from stock_research.strategies.candidate_interface import left_value_safety_reasons
 from stock_research.strategies.factor_selection import apply_deduction_to_trend
 from stock_research.reporting.diff import (
     build_diff_html,
@@ -50,7 +51,7 @@ VALUE_UNDERVALUED_RATIO = 0.85
 VALUE_LOW_VALUE_RATIO = 1.00
 VALUE_REASONABLE_RATIO = 1.10
 VALUE_WATCH_RATIO = 1.08
-VALUE_WATCH_MIN_QUALITY_SCORE = 55
+VALUE_WATCH_MIN_QUALITY_SCORE = 70
 VALUE_QUALITY_MAX_RATIO = 1.80
 PEPB_REASONABLE_RATIO = 1.10
 PEPB_REASONABLE_PERCENTILE = 0.25
@@ -1491,9 +1492,14 @@ def is_value_watch_candidate(row, max_price_to_value=VALUE_WATCH_RATIO):
     if price_to_value > max_price_to_value:
         return False
     mktcap = row.get("mktcap")
-    if mktcap is not None and pd.notna(mktcap) and mktcap < VALUE_MIN_MKTCAP:
+    if mktcap is None or pd.isna(mktcap) or mktcap < VALUE_MIN_MKTCAP:
         return False
     if row.get("quality_score", 0) < VALUE_WATCH_MIN_QUALITY_SCORE:
+        return False
+    yoy = row.get("earnings_yoy", row.get("yoy"))
+    if yoy is None or pd.isna(yoy) or yoy < 0.10:
+        return False
+    if left_value_safety_reasons(row):
         return False
     return True
 
@@ -1749,6 +1755,9 @@ def score_stock(code, name, industry, method, today_str, year, quarter, value_mi
         "eps_excl_raw": extra.get("eps_excl_raw"),
         "eps_adjustment_factor": extra.get("eps_adjustment_factor"),
         "eps_excl_source": extra.get("eps_excl_source"),
+        "earnings_yoy": extra.get("yoy") if extra.get("yoy") is not None else extra.get("eps_yoy"),
+        "roe": extra.get("roe"),
+        "eps": extra.get("eps"),
         "current_valuation": extra.get("current_valuation"),
         "low_avg": extra.get("low_avg"),
         "pepb_ratio": extra.get("ratio"),
@@ -1767,6 +1776,16 @@ def score_stock(code, name, industry, method, today_str, year, quarter, value_mi
     else:
         row["total_score"] = round(max(low_value_score, high_quality_score), 1)
         row["selection_mode"] = "观察"
+    row.update(calc_multi_factor_score(row))
+    row["multi_factor_gate"] = passes_multi_factor_right_gate(row)
+    row["multi_factor_bonus"] = calc_multi_factor_bonus(row)
+    if row["multi_factor_bonus"] > 0:
+        row["total_score"] = round(row["total_score"] + row["multi_factor_bonus"], 1)
+        row["right_quant_score"] = row["multi_factor_score"]
+        row["right_quant_setup"] = "multi_factor_boost"
+    else:
+        row["right_quant_score"] = None
+        row["right_quant_setup"] = ""
     row["risk_flags"] = build_risk_flags(row)
     return row, ""
 
@@ -2174,7 +2193,8 @@ def print_compact_rows(title, rows, top, columns=None):
     base_columns = [
         "code", "name", "theme", "selection_bucket", "close", "total_score",
         "price_to_value", "value_line", "quality_score", "trend_score",
-        "liquidity_score", "mainline_score", "mainline_label", "risk_flags",
+        "liquidity_score", "multi_factor_score", "multi_factor_label",
+        "multi_factor_bonus", "mainline_score", "mainline_label", "risk_flags",
     ]
     cols = columns or base_columns
     frame = pd.DataFrame(rows[:top])
@@ -2201,7 +2221,8 @@ def print_daily_report(today_str, core_rows, low_value_rows, high_quality_rows, 
     print_theme_summary(all_rows)
     print_compact_rows("2. 右侧主线候选", high_quality_rows, display_top, [
         "code", "name", "theme", "close", "total_score", "quality_score", "trend_score",
-        "liquidity_score", "mainline_score", "mainline_label", "ret20", "ret60", "risk_flags",
+        "liquidity_score", "multi_factor_score", "multi_factor_label", "mainline_score",
+        "mainline_label", "ret20", "ret60", "risk_flags",
     ])
     print_compact_rows("3. 价值线附近观察", value_watch_rows, display_top, [
         "code", "name", "theme", "close", "price_to_value", "value_line", "total_score",
@@ -2230,6 +2251,9 @@ build_risk_flags = _factor_strategy.build_risk_flags
 calc_low_value_score = _factor_strategy.calc_low_value_score
 calc_high_quality_score = _factor_strategy.calc_high_quality_score
 calc_total_score = _factor_strategy.calc_total_score
+calc_multi_factor_score = _factor_strategy.calc_multi_factor_score
+passes_multi_factor_right_gate = _factor_strategy.passes_multi_factor_right_gate
+calc_multi_factor_bonus = _factor_strategy.calc_multi_factor_bonus
 
 
 def main(argv=None):

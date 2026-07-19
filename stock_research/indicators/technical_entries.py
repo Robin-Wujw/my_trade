@@ -223,27 +223,10 @@ def infer_technical_entry(data: pd.DataFrame, index: int) -> dict | None:
     volume_ratio = float(row["volume"]) / baseline if baseline > 0 else 0.0
     signals = []
 
-    # W bottom: two confirmed lows of similar depth with a neckline between.
-    recent = previous.tail(120).reset_index(drop=True)
-    pivots = confirmed_turning_points(recent, left=3, right=3)
-    if len(pivots["lows"]) >= 2:
-        first_low, second_low = pivots["lows"][-2:]
-        if second_low - first_low >= 10:
-            low1 = float(recent.iloc[first_low]["low"])
-            low2 = float(recent.iloc[second_low]["low"])
-            similar_lows = abs(low2 / low1 - 1) <= 0.08
-            between = recent.iloc[first_low + 1:second_low]
-            if similar_lows and not between.empty:
-                neckline = float(between["high"].max())
-                if (
-                    float(prior["close"]) <= neckline < float(row["close"])
-                    and float(row["close"]) <= neckline * (1 + SUPPORT_ZONE_PCT)
-                    and volume_ratio >= 1.0
-                ):
-                    signals.append(_close_signal(
-                        "w_bottom_neckline", 6, neckline, neckline,
-                        "W底收盘放量突破颈线", volume_ratio,
-                    ))
+    # W bottoms are easy to overfit in a strong trend: a high-level relay can
+    # look like two similar lows even though it is not a bottoming area.  Keep
+    # the author cases for structure arithmetic, but do not auto-trade W
+    # bottoms until there is an auditable bottom-zone definition.
 
     # Gap long candle crossing MA20/MA60.
     ma_barrier = max(float(prior["ma20"]), float(prior["ma60"]))
@@ -273,6 +256,50 @@ def infer_technical_entry(data: pd.DataFrame, index: int) -> dict | None:
             "consolidation_breakout", 4, box_high, box_high,
             "整理平台收盘放量突破; 平台上沿止损", volume_ratio,
         ))
+
+    # Leader pivots are the professional replacement for a generic 21-day high:
+    # only rising-trend consolidations with visible volume confirmation can
+    # become trend-continuation entries.
+    high_base = previous.tail(21)
+    high_base_close = float(high_base["close"].max())
+    high_base_low = float(high_base["low"].min())
+    row_range = float(row["high"]) - float(row["low"])
+    close_position = (
+        (float(row["close"]) - float(row["low"])) / row_range
+        if row_range > 0 else 1.0
+    )
+    ma20 = _number(prior.get("ma20"))
+    ma60 = _number(prior.get("ma60"))
+    prior_ma20 = _number(previous.iloc[-6].get("ma20")) if len(previous) >= 6 else None
+    ma_alignment = (
+        ma20 is not None
+        and ma60 is not None
+        and prior_ma20 is not None
+        and (
+            float(prior["close"]) > ma20 >= ma60
+            or float(row["close"]) > ma20 >= ma60
+        )
+        and ma20 > prior_ma20
+    )
+    if (
+        high_base_close > 0
+        and high_base_close / high_base_low - 1 <= 0.35
+        and float(prior["close"]) <= high_base_close < float(row["close"])
+        and float(row["close"]) <= high_base_close * 1.12
+        and close_position >= 0.55
+        and volume_ratio >= 1.0
+        and ma_alignment
+    ):
+        stop = high_base_close * 0.95
+        signal = _close_signal(
+            "leader_pivot_breakout", 5, high_base_close, stop,
+            "leader pivot close breakout; stop 5pct below breakout line",
+            volume_ratio,
+        )
+        signal["base_days"] = 21
+        signal["base_range_pct"] = high_base_close / high_base_low - 1
+        signal["target_price"] = high_base_close + (high_base_close - stop) * 3.0
+        signals.append(signal)
 
     # Most recent high-volume bullish node, entered only 2%-4% above it.
     valid_nodes = _valid_volume_price_nodes(previous)

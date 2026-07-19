@@ -1,0 +1,8 @@
+{
+  "qmt_root": "D:/Softwares/zhzqqmt/<your-qmt-install>",
+  "userdata_path": "D:/Softwares/zhzqqmt/<your-qmt-install>/userdata_mini",
+  "python_executable": "D:/Softwares/zhzqqmt/<your-qmt-install>/bin.x64/pythonw.exe",
+  "accounts": [
+    "000000000000"
+  ]
+}

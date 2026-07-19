@@ -1,16 +1,24 @@
 import pandas as pd
 import pytest
 
+from apps import portfolio_backtest as portfolio_backtest_app
 from apps.portfolio_backtest import (
     candidate_manifest_empty_dates,
+    candidate_manifest_financial_status,
     default_data_end_date,
+    ensure_financial_cache_for_backtest,
+    ensure_miniqmt_kline_cache_for_backtest,
     financial_cache_file_count,
+    first_candidate_dates,
     formula33_refresh_window_args,
     invalidate_formula33_manifest_if_kline_cache_incomplete,
     load_candidate_snapshots,
+    load_price_frames,
     report_period_visible_date,
     summarize_kline_cache_coverage,
     validate_backtest_input_coverage,
+    validate_candidate_manifest_financial_point_in_time,
+    validate_price_frame_coverage,
 )
 from stock_research.indicators.price_structure import (
     configured_price_structures,
@@ -24,6 +32,7 @@ from stock_research.strategies.historical_candidates import (
     _passes_fundamental_gate,
     _rank_right_side_candidates,
     _right_quant_selection_rows,
+    _financial_point_in_time_status,
     save_historical_candidate_snapshots,
     _trade_basis_snapshot,
     _validate_required_financial_periods,
@@ -35,6 +44,7 @@ from stock_research.indicators.technical_entries import (
     infer_technical_entry,
 )
 from stock_research.strategies.candidate_interface import (
+    left_value_safety_reasons,
     normalize_candidate,
     normalize_candidate_snapshots,
 )
@@ -45,8 +55,10 @@ from stock_research.strategies.portfolio_backtest import (
     _capped_entry_size,
     _entry_risk_still_controls_lot,
     _effective_profit_tranches,
+    _leader_trend_add_signal,
     _price_structure_signal,
     _prepare_frame,
+    _semantic_right_entry_gate,
     _is_profit_tail,
     _profit_ids_to_execute,
     _qualifies_profit_tail,
@@ -101,6 +113,166 @@ def test_board_lot_rules_use_two_hundred_for_star_market():
 
     assert regular["trade_ledger"][0]["quantity"] == 900
     assert star["trade_ledger"][0]["quantity"] == 800
+
+
+def test_raw_execution_adjusts_position_across_ex_rights_factor_change():
+    bars = breakout_bars()
+    split_dates = pd.bdate_range(
+        bars.iloc[-1]["date"] + pd.Timedelta(days=1), periods=2,
+    )
+    split_price = 10.4 / 3
+    split_bars = pd.DataFrame({
+        "date": split_dates,
+        "open": [split_price, split_price],
+        "high": [split_price, split_price],
+        "low": [split_price, split_price],
+        "close": [split_price, split_price],
+        "volume": [3000, 3000],
+        "raw_to_qfq_factor": [1.0, 1.0],
+    })
+    bars["raw_to_qfq_factor"] = 3.0
+    bars = pd.concat([bars, split_bars], ignore_index=True)
+    snapshot_date = breakout_bars().iloc[-2]["date"].strftime("%Y-%m-%d")
+
+    result = run_portfolio_backtest(
+        {"sz.000001": bars},
+        {snapshot_date: [{"code": "sz.000001"}]},
+        {},
+        requested_start=snapshot_date,
+        end_date=bars.iloc[-1]["date"].strftime("%Y-%m-%d"),
+        initial_capital=100_000,
+        commission_rate=0,
+        minimum_commission=0,
+        signals_effective_next_day=True,
+    )
+
+    adjustment = [
+        event for event in result["events"]
+        if event["action"] == "除权持仓调整"
+    ]
+    assert adjustment
+    position = result["final_positions"][0]
+    assert position["cost"] == pytest.approx(split_price, rel=1e-3)
+    assert position["unrealized_pnl_pct"] == pytest.approx(0.0)
+
+
+def test_raw_execution_ignores_small_cash_dividend_factor_drift():
+    bars = breakout_bars()
+    dividend_dates = pd.bdate_range(
+        bars.iloc[-1]["date"] + pd.Timedelta(days=1), periods=2,
+    )
+    dividend_bars = pd.DataFrame({
+        "date": dividend_dates,
+        "open": [10.15, 10.2],
+        "high": [10.25, 10.3],
+        "low": [10.05, 10.1],
+        "close": [10.2, 10.25],
+        "volume": [3000, 3000],
+        "raw_to_qfq_factor": [1.94, 1.94],
+    })
+    bars["raw_to_qfq_factor"] = 2.0
+    bars = pd.concat([bars, dividend_bars], ignore_index=True)
+    snapshot_date = breakout_bars().iloc[-2]["date"].strftime("%Y-%m-%d")
+
+    result = run_portfolio_backtest(
+        {"sz.000001": bars},
+        {snapshot_date: [{"code": "sz.000001"}]},
+        {},
+        requested_start=snapshot_date,
+        end_date=bars.iloc[-1]["date"].strftime("%Y-%m-%d"),
+        initial_capital=100_000,
+        commission_rate=0,
+        minimum_commission=0,
+        signals_effective_next_day=True,
+    )
+
+    assert not [
+        event for event in result["events"]
+        if event["action"] == "除权持仓调整"
+    ]
+
+
+def test_load_price_frames_can_bypass_database_for_raw_execution_prices(tmp_path):
+    cache_dir = tmp_path / "formula33_kline"
+    raw_dir = cache_dir / "akshare_raw"
+    qfq_dir = cache_dir / "akshare"
+    raw_dir.mkdir(parents=True)
+    qfq_dir.mkdir(parents=True)
+    pd.DataFrame([
+        {
+            "date": "2024-09-24",
+            "open": 253.0,
+            "high": 255.5,
+            "low": 246.76,
+            "close": 254.29,
+            "volume": 15649454,
+            "amount": 3949080823.0,
+        },
+    ]).to_csv(raw_dir / "sz_002594.csv", index=False)
+    pd.DataFrame([
+        {"date": "2024-09-24", "close": 83.760681772},
+    ]).to_csv(qfq_dir / "sz_002594.csv", index=False)
+
+    frames = load_price_frames(
+        ["sz.002594"],
+        raw_dir,
+        start_date="2024-09-24",
+        end_date="2024-09-24",
+        prefer_database=False,
+    )
+
+    assert frames["sz.002594"].loc[0, "close"] == pytest.approx(254.29)
+    assert frames["sz.002594"].loc[0, "raw_to_qfq_factor"] == pytest.approx(3.03591, rel=1e-4)
+
+
+def test_price_frame_coverage_requires_all_candidate_codes_to_endpoint():
+    frames = {
+        "A": pd.DataFrame({"date": ["2026-07-10", "2026-07-14"]}),
+        "B": pd.DataFrame({"date": ["2026-07-10"]}),
+    }
+
+    with pytest.raises(RuntimeError, match="price K-line frames"):
+        validate_price_frame_coverage(
+            frames,
+            {"A", "B", "C"},
+            "2026-07-10",
+            "2026-07-14",
+        )
+
+    assert validate_price_frame_coverage(
+        {"A": frames["A"]},
+        {"A"},
+        "2026-07-10",
+        "2026-07-14",
+    )["code_count"] == 1
+
+
+def test_price_frame_coverage_uses_first_candidate_date():
+    frames = {
+        "A": pd.DataFrame({"date": ["2026-01-10", "2026-07-17"]}),
+        "B": pd.DataFrame({"date": ["2026-01-15", "2026-07-17"]}),
+    }
+    snapshots = {
+        "2026-01-10": [{"code": "A"}],
+        "2026-01-15": [{"code": "B"}],
+    }
+
+    assert validate_price_frame_coverage(
+        frames,
+        {"A", "B"},
+        "2026-01-01",
+        "2026-07-17",
+        code_start_dates=first_candidate_dates(snapshots),
+    )["code_count"] == 2
+
+    with pytest.raises(RuntimeError, match="late_start"):
+        validate_price_frame_coverage(
+            frames,
+            {"B"},
+            "2026-01-01",
+            "2026-07-17",
+            code_start_dates={"B": pd.Timestamp("2026-01-10")},
+        )
 
 
 def test_profit_parts_adapt_to_actual_board_lots_instead_of_forcing_small_exit():
@@ -197,6 +369,7 @@ def test_unified_pool_reserves_five_core_candidates_from_leadership_crowding():
         "quality_score": 70,
         "earnings_yoy": 0.10,
         "mktcap": 100,
+        "price_to_value": 1.0,
         "candidate_source": "value_model",
     } for index in range(5)]
     leaders = [{
@@ -405,7 +578,7 @@ def test_right_quant_score_changes_final_growth_candidate_ranking():
 
 
 def test_saved_candidate_snapshots_keep_right_quant_columns(tmp_path):
-    save_historical_candidate_snapshots(
+    manifest = save_historical_candidate_snapshots(
         tmp_path,
         {"2026-07-10": [{
             "date": "2026-07-10",
@@ -426,6 +599,103 @@ def test_saved_candidate_snapshots_keep_right_quant_columns(tmp_path):
     assert list(frame.columns[:len(CANDIDATE_SNAPSHOT_COLUMNS)]) == CANDIDATE_SNAPSHOT_COLUMNS
     assert "right_quant_score" in frame.columns
     assert "drawdown_60" in frame.columns
+    assert "yoy >= 1.00" in manifest["selection_standard"]["value"]
+    assert "price/value_line > 0.90" in manifest["selection_standard"]["value"]
+
+
+def test_left_value_safety_rejects_zhongxinbo_style_thin_margin():
+    candidate = {
+        "code": "sh.688408",
+        "candidate_source": "value_model",
+        "quality_score": 92.5,
+        "earnings_yoy": 1.9286,
+        "mktcap": 127.13,
+        "price_to_value": 0.9437,
+    }
+
+    normalized = normalize_candidate(candidate)
+
+    assert left_value_safety_reasons(candidate) == [
+        "left_high_growth_small_cap_needs_deeper_discount"
+    ]
+    assert normalized["allow_left"] is False
+    assert normalized["signal_eligible"] is False
+    assert "left_high_growth_small_cap_needs_deeper_discount" in normalized["candidate_failure_reason"]
+    assert "no_executable_lane" in normalized["candidate_failure_reason"]
+
+
+def test_left_value_safety_allows_large_cap_or_deeper_discount():
+    large_cap = normalize_candidate({
+        "code": "sz.300308",
+        "candidate_source": "value_model",
+        "quality_score": 100,
+        "earnings_yoy": 3.0,
+        "mktcap": 940,
+        "price_to_value": 0.9786,
+    })
+    deep_discount = normalize_candidate({
+        "code": "sh.600000",
+        "candidate_source": "value_model",
+        "quality_score": 85,
+        "earnings_yoy": 1.5,
+        "mktcap": 120,
+        "price_to_value": 0.86,
+    })
+
+    assert large_cap["allow_left"] is True
+    assert large_cap["signal_eligible"] is True
+    assert deep_discount["allow_left"] is True
+    assert deep_discount["signal_eligible"] is True
+
+
+def test_left_value_lane_requires_complete_visible_value_fields():
+    pure_value = normalize_candidate({
+        "code": "OLD_VALUE",
+        "candidate_source": "value_model",
+        "quality_score": 85,
+        "earnings_yoy": 0.30,
+        "mktcap": 150,
+    })
+    right_overlap = normalize_candidate({
+        "code": "RIGHT_OVERLAP",
+        "candidate_source": "value_model+growth_leadership",
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+        "mktcap": 150,
+    })
+
+    assert pure_value["allow_left"] is False
+    assert pure_value["signal_eligible"] is False
+    assert "price_to_value_missing" in pure_value["candidate_failure_reason"]
+    assert "no_executable_lane" in pure_value["candidate_failure_reason"]
+    assert right_overlap["allow_left"] is False
+    assert right_overlap["allow_right"] is True
+    assert right_overlap["signal_eligible"] is True
+    assert "price_to_value_missing" in right_overlap["candidate_failure_reason"]
+
+
+def test_left_value_safety_boundary_thresholds_are_inclusive_only_where_documented():
+    equal_discount = normalize_candidate({
+        "code": "EQUAL_DISCOUNT",
+        "candidate_source": "value_model",
+        "quality_score": 85,
+        "earnings_yoy": 1.0,
+        "mktcap": 120,
+        "price_to_value": 0.90,
+    })
+    equal_market_cap = normalize_candidate({
+        "code": "EQUAL_MARKET_CAP",
+        "candidate_source": "value_model",
+        "quality_score": 85,
+        "earnings_yoy": 1.0,
+        "mktcap": 150,
+        "price_to_value": 0.91,
+    })
+
+    assert equal_discount["allow_left"] is True
+    assert equal_discount["signal_eligible"] is True
+    assert equal_market_cap["allow_left"] is True
+    assert equal_market_cap["signal_eligible"] is True
 
 
 def breakout_bars():
@@ -752,13 +1022,21 @@ def test_explicit_right_permission_blocks_a_direct_right_entry():
 
 def test_candidate_sources_grant_left_and_right_permissions_independently():
     selected = normalize_candidate_snapshots({"2026-07-10": [
-        {"code": "VALUE", "candidate_source": "value_model", "mktcap": 150},
+        {
+            "code": "VALUE",
+            "candidate_source": "value_model",
+            "quality_score": 90,
+            "earnings_yoy": 0.30,
+            "mktcap": 150,
+            "price_to_value": 1.0,
+        },
         {
             "code": "BOTH",
             "candidate_source": "value_model+growth_leadership",
             "mktcap": 150,
             "quality_score": 90,
             "earnings_yoy": 0.30,
+            "price_to_value": 1.0,
         },
         {
             "code": "RIGHT",
@@ -808,6 +1086,7 @@ def test_candidate_nan_text_fields_do_not_falsify_value_model():
         "quality_score": 80,
         "earnings_yoy": 0.20,
         "mktcap": 150,
+        "price_to_value": 1.0,
         "value_falsification_reason": float("nan"),
         "candidate_failure_reason": float("nan"),
     }]})["2026-07-10"]
@@ -843,6 +1122,7 @@ def test_model_candidates_require_visible_100b_market_cap():
         "quality_score": 90,
         "earnings_yoy": 0.30,
         "mktcap": 100.0,
+        "price_to_value": 1.0,
     })
 
     assert missing_fundamentals["signal_eligible"] is False
@@ -881,6 +1161,7 @@ def test_value_grid_keeps_core_sells_two_upper_units_and_rebuys_them():
         {first: [{
             "code": "A", "candidate_source": "value_model",
             "value_line": 100.0, "industry": "test", "mktcap": 150,
+            "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
         }]},
         {}, requested_start=first, end_date=last,
     )
@@ -893,6 +1174,15 @@ def test_value_grid_keeps_core_sells_two_upper_units_and_rebuys_them():
     assert result["final_positions"][0]["position_mode"] == "left"
     assert result["final_positions"][0]["left_position_pct"] == pytest.approx(10)
     assert {item["grid_slot"] for item in result["final_positions"][0]["left_batches"]} == set(range(5))
+    assert result["maximum_total_held_symbols"] == 1
+    assert result["maximum_left_side_symbols"] == 1
+    assert result["trade_mix_summary"]["trade_count_by_account"] == {"left": 9}
+    assert result["trade_mix_summary"]["buy_count_by_account"] == {"left": 7}
+    assert result["trade_mix_summary"]["sell_count_by_account"] == {"left": 2}
+    assert result["trade_mix_summary"]["traded_symbol_count_by_account"] == {"left": 1}
+    assert result["trade_mix_summary"]["left_grid_trade_count_by_symbol_top"] == [
+        {"symbol": "A A", "trade_count": 9},
+    ]
 
 
 def test_value_grid_candidate_removal_stops_new_left_buys_without_clearing():
@@ -914,6 +1204,7 @@ def test_value_grid_candidate_removal_stops_new_left_buys_without_clearing():
             first: [{
                 "code": "A", "candidate_source": "value_model",
                 "value_line": 100.0, "industry": "test", "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
             }],
             dates[81].strftime("%Y-%m-%d"): [],
         },
@@ -944,8 +1235,9 @@ def test_left_to_right_stops_grid_and_uses_right_side_batches(monkeypatch):
             return None
         return {
             "rank": 2,
-            "stop": 90.0,
-            "trigger": 100.0,
+            "stop": 106.0,
+            "trigger": 109.0,
+            "target_price": 118.0,
             "order_type": "close",
             "reason": "test left-to-right",
             "known_volume_ratio": 1.0,
@@ -964,14 +1256,20 @@ def test_left_to_right_stops_grid_and_uses_right_side_batches(monkeypatch):
             first: [{
                 "code": "A", "candidate_source": "value_model",
                 "value_line": 100.0, "industry": "test", "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
+                "trade_basis_score": 8, "leadership_score": 18,
             }],
             turn: [{
                 "code": "A", "candidate_source": "value_model",
                 "value_line": 100.0, "industry": "test", "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
+                "trade_basis_score": 8, "leadership_score": 18,
             }],
             last: [{
                 "code": "A", "candidate_source": "value_model",
                 "value_line": 100.0, "industry": "test", "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
+                "trade_basis_score": 8, "leadership_score": 18,
             }],
         },
         {}, requested_start=first, end_date=last,
@@ -992,7 +1290,7 @@ def test_left_to_right_stops_grid_and_uses_right_side_batches(monkeypatch):
         "L1", "L2", "L3", "L4", "L5",
     }
     assert all(item["batch"].startswith("R") for item in promoted)
-    assert {round(item["stop"], 3) for item in position["batches"]} == {90.0}
+    assert {round(item["stop"], 3) for item in position["batches"]} == {106.0}
     switch_index = actions.index("左转右接管左仓")
     managed_after_switch = result["events"][switch_index + 1:]
     assert not any(
@@ -1021,6 +1319,7 @@ def test_value_grid_financial_falsification_exits_left_at_next_open():
             first: [{
                 "code": "A", "candidate_source": "value_model",
                 "value_line": 100.0, "industry": "test", "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
             }],
             fail: [{
                 "code": "A", "candidate_source": "value_model",
@@ -1059,6 +1358,7 @@ def test_left_core_only_position_does_not_consume_capacity():
             first: [{
                 "code": "A", "candidate_source": "value_model",
                 "value_line": 100.0, "industry": "test", "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
             }],
             last: [],
         },
@@ -1089,10 +1389,12 @@ def test_all_market_phases_allow_only_one_left_symbol():
             {
                 "code": "A", "candidate_source": "value_model",
                 "value_line": 100.0, "candidate_score": 20, "mktcap": 150,
+                "quality_score": 95, "earnings_yoy": 0.30, "price_to_value": 1.0,
             },
             {
                 "code": "B", "candidate_source": "value_model",
                 "value_line": 100.0, "candidate_score": 10, "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
             },
         ]},
         {date: {"phase": "waiting", "window_up_streak": 0}},
@@ -1124,10 +1426,12 @@ def test_waiting_market_does_not_seed_multiple_left_symbols():
             {
                 "code": "A", "candidate_source": "value_model",
                 "value_line": 100.0, "candidate_score": 20, "mktcap": 150,
+                "quality_score": 95, "earnings_yoy": 0.30, "price_to_value": 1.0,
             },
             {
                 "code": "B", "candidate_source": "value_model",
                 "value_line": 100.0, "candidate_score": 10, "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
             },
         ]},
         {
@@ -1170,6 +1474,7 @@ def test_left_core_still_blocks_a_second_left_symbol():
                     "code": code, "candidate_source": "value_model",
                     "value_line": 100.0, "candidate_score": 100 - index,
                     "industry": f"industry-{code}", "mktcap": 150,
+                    "quality_score": 100 - index, "earnings_yoy": 0.30, "price_to_value": 1.0,
                 }
                 for index, code in enumerate(initial_codes)
             ],
@@ -1178,6 +1483,7 @@ def test_left_core_still_blocks_a_second_left_symbol():
                 "code": "F", "candidate_source": "value_model",
                 "value_line": 100.0, "candidate_score": 200,
                 "industry": "industry-F", "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
             }],
         },
         {}, requested_start=first, end_date=try_sixth,
@@ -1204,7 +1510,7 @@ def test_unified_candidate_interface_honors_signal_eligible():
     assert result["final_positions"] == []
 
 
-def test_daily_top10_quota_diagnostic_needs_mainline_growth_overlap_for_right_signal():
+def test_daily_top10_quota_diagnostic_allows_exceptional_growth_right_profile():
     bars = breakout_bars()
     date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
 
@@ -1216,6 +1522,7 @@ def test_daily_top10_quota_diagnostic_needs_mainline_growth_overlap_for_right_si
             "candidate_source": "growth_leadership",
             "selected_for_trading": False,
             "signal_eligible": False,
+            "allow_right": True,
             "candidate_failure_reason": (
                 "not_selected_for_trading: daily_top10_quota_or_core_reservation"
             ),
@@ -1223,37 +1530,47 @@ def test_daily_top10_quota_diagnostic_needs_mainline_growth_overlap_for_right_si
             "earnings_yoy": 0.30,
             "mktcap": 300,
             "trade_basis_score": 9,
-            "leadership_score": 20,
+            "leadership_score": 23,
+            "return_20d": 0.08,
+            "return_60d": 0.35,
+            "drawdown_60": -0.08,
+            "avg_amount_20": 5_000_000_000,
         }]},
         {date: {"phase": "active", "window_up_streak": 5}},
         requested_start=date,
         end_date=date,
     )
-    overlap = run_portfolio_backtest(
+    weak_growth = run_portfolio_backtest(
         {"A": bars},
         {date: [{
             "code": "A",
             "name": "A",
-            "candidate_source": "growth_leadership+standard_mainline",
+            "candidate_source": "growth_leadership",
             "selected_for_trading": False,
             "signal_eligible": False,
+            "allow_right": True,
             "candidate_failure_reason": (
                 "not_selected_for_trading: daily_top10_quota_or_core_reservation"
             ),
             "quality_score": 90,
             "earnings_yoy": 0.30,
             "mktcap": 300,
-            "trade_basis_score": 9,
+            "trade_basis_score": 6,
             "leadership_score": 20,
+            "return_20d": 0.08,
+            "return_60d": 0.20,
+            "drawdown_60": -0.20,
+            "avg_amount_20": 5_000_000_000,
         }]},
         {date: {"phase": "active", "window_up_streak": 5}},
         requested_start=date,
         end_date=date,
     )
 
-    assert pure_growth["events"] == []
-    assert [event["action"] for event in overlap["events"]] == ["右侧买入"]
-    assert overlap["events"][0]["code"] == "A"
+    assert pure_growth["events"]
+    assert [event["action"] for event in pure_growth["events"]] == ["右侧买入"]
+    assert pure_growth["events"][0]["code"] == "A"
+    assert weak_growth["events"] == []
 
 
 def test_after_close_snapshot_becomes_effective_on_next_trading_day():
@@ -1293,7 +1610,7 @@ def test_consolidation_breakout_requires_final_daily_volume_confirmation():
     assert result["events"] == []
 
 
-def test_entry_evidence_floor_rejects_single_unconfirmed_structure():
+def test_entry_evidence_score_is_explanation_not_entry_gate():
     bars = breakout_bars()
     date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
 
@@ -1304,8 +1621,186 @@ def test_entry_evidence_floor_rejects_single_unconfirmed_structure():
         min_entry_evidence_score=8,
     )
 
-    assert result["events"] == []
+    assert result["events"]
     assert result["min_entry_evidence_score"] == pytest.approx(8.0)
+    assert result["entry_gate_model"] == "semantic_high_reward_risk"
+    assert result["entry_evidence_score_role"] == "legacy_explanation_only"
+
+
+def test_high_reward_risk_right_entry_can_use_half_position():
+    bars = breakout_bars()
+    date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
+
+    result = run_portfolio_backtest(
+        {"A": bars},
+        {date: [{
+            "code": "A",
+            "name": "A",
+            "candidate_source": "growth_leadership",
+            "quality_score": 90,
+            "earnings_yoy": 0.30,
+            "mktcap": 300,
+            "trade_basis_score": 8,
+            "leadership_score": 25,
+            "return_20d": 0.10,
+            "return_60d": 0.30,
+            "avg_amount_20": 2_000_000_000,
+        }]},
+        {date: {"phase": "active", "window_up_streak": 5}},
+        requested_start=date,
+        end_date=date,
+        initial_capital=1_000_000,
+    )
+
+    assert result["events"][0]["requested_position_pct"] == pytest.approx(50.0)
+
+
+def test_semantic_entry_gate_rejects_high_score_with_wide_stop():
+    bars = _prepare_frame(breakout_bars())
+    index = len(bars) - 1
+    candidate = {
+        "candidate_source": "growth_leadership",
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+        "mktcap": 300,
+        "trade_basis_score": 10,
+        "leadership_score": 30,
+        "return_20d": 0.20,
+        "return_60d": 0.45,
+        "avg_amount_20": 3_000_000_000,
+    }
+    signal = {
+        "rank": 15,
+        "entry_evidence_score": 15,
+        "order_type": "close",
+        "trigger": 10.4,
+        "stop": 8.8,
+        "target_price": 16.0,
+        "known_volume_ratio": 2.0,
+        "signal_type": "consolidation_breakout",
+    }
+
+    ok, enriched, reason = _semantic_right_entry_gate(
+        bars, index, candidate, signal,
+    )
+
+    assert not ok
+    assert reason == "risk_pct_too_wide"
+    assert enriched["entry_risk_pct"] > 10
+
+
+def test_semantic_entry_gate_accepts_lower_score_with_tight_high_rr_setup():
+    bars = _prepare_frame(breakout_bars())
+    index = len(bars) - 1
+    candidate = {
+        "candidate_source": "growth_leadership",
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+        "mktcap": 300,
+        "trade_basis_score": 8,
+        "leadership_score": 22,
+        "return_20d": 0.12,
+        "return_60d": 0.32,
+        "avg_amount_20": 2_000_000_000,
+    }
+    signal = {
+        "rank": 3,
+        "entry_evidence_score": 3,
+        "order_type": "close",
+        "trigger": 10.4,
+        "stop": 10.0,
+        "target_price": 11.5,
+        "known_volume_ratio": 1.2,
+        "signal_type": "consolidation_breakout",
+    }
+
+    ok, enriched, reason = _semantic_right_entry_gate(
+        bars, index, candidate, signal,
+    )
+
+    assert ok
+    assert reason == "ok"
+    assert enriched["semantic_entry_setup"] == "high_rr_right_entry"
+    assert enriched["entry_reward_risk"] >= 2.5
+
+
+def test_semantic_entry_gate_keeps_standard_liquidity_floor():
+    bars = _prepare_frame(breakout_bars())
+    index = len(bars) - 1
+    candidate = {
+        "candidate_source": "growth_leadership",
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+        "mktcap": 300,
+        "trade_basis_score": 8,
+        "leadership_score": 22,
+        "right_quant_score": 89,
+        "return_20d": 0.12,
+        "return_60d": 0.32,
+        "avg_amount_20": 490_000_000,
+    }
+    signal = {
+        "rank": 3,
+        "entry_evidence_score": 3,
+        "order_type": "close",
+        "trigger": 10.4,
+        "stop": 10.0,
+        "target_price": 11.5,
+        "known_volume_ratio": 1.2,
+        "signal_type": "leader_pivot_breakout",
+    }
+
+    ok, enriched, reason = _semantic_right_entry_gate(
+        bars, index, candidate, signal,
+    )
+
+    assert not ok
+    assert reason == "liquidity_too_thin"
+    assert enriched["entry_liquidity_floor"] == pytest.approx(500_000_000)
+    assert enriched["entry_liquidity_profile"] == "standard_500m"
+
+
+def test_compact_attack_core_uses_setup_specific_liquidity_floor():
+    bars = _prepare_frame(breakout_bars())
+    index = len(bars) - 1
+    candidate = {
+        "candidate_source": "quant_right",
+        "right_quant_setup": "compact_attack_core",
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+        "mktcap": 300,
+        "trade_basis_score": 8,
+        "leadership_score": 16,
+        "right_quant_score": 89,
+        "quant_structure_rank": 85,
+        "quant_low_risk_rank": 70,
+        "quant_volume_confirm_rank": 65,
+        "return_20d": 0.12,
+        "return_60d": 0.32,
+        "drawdown_60": -0.02,
+        "avg_amount_20": 460_000_000,
+    }
+    signal = {
+        "rank": 3,
+        "entry_evidence_score": 3,
+        "order_type": "close",
+        "trigger": 10.4,
+        "stop": 10.0,
+        "target_price": 11.5,
+        "known_volume_ratio": 1.2,
+        "signal_type": "leader_pivot_breakout",
+    }
+
+    ok, enriched, reason = _semantic_right_entry_gate(
+        bars, index, candidate, signal,
+    )
+
+    assert ok
+    assert reason == "ok"
+    assert enriched["entry_liquidity_floor"] == pytest.approx(450_000_000)
+    assert enriched["entry_liquidity_profile"] == "compact_attack_core_450m"
+    assert enriched["entry_target_basis"] == "compact_attack_core_3_5r_pivot_continuation"
+    assert enriched["entry_reward_risk"] >= 2.5
 
 
 def test_generic_high_is_replaced_by_close_confirmed_consolidation_breakout():
@@ -1317,6 +1812,105 @@ def test_generic_high_is_replaced_by_close_confirmed_consolidation_breakout():
     assert signal["order_type"] == "close"
     assert signal["trigger"] == pytest.approx(10.0)
     assert signal["stop"] == pytest.approx(10.0)
+
+
+def test_leader_pivot_breakout_requires_rising_base():
+    dates = pd.bdate_range("2026-01-01", periods=80)
+    trend = [20 + index * 0.75 for index in range(58)]
+    base = [63.0, 64.0, 65.0, 64.5, 66.0, 65.5, 67.0, 66.5, 68.0, 67.5,
+            69.0, 68.5, 70.0, 69.5, 71.0, 70.5, 72.0, 71.5, 73.0, 72.5, 73.5]
+    closes = trend + base + [77.0]
+    bars = _prepare_frame(pd.DataFrame({
+        "date": dates,
+        "open": closes,
+        "high": [value + 0.8 for value in closes[:-1]] + [77.5],
+        "low": [value - 1.0 for value in closes[:-1]] + [75.0],
+        "close": closes,
+        "volume": [1000.0] * 79 + [1800.0],
+    }))
+
+    signal = infer_technical_entry(bars, len(bars) - 1)
+
+    assert signal["signal_type"] == "leader_pivot_breakout"
+    assert signal["stop"] == pytest.approx(signal["trigger"] * 0.95)
+    assert signal["target_price"] > signal["trigger"]
+
+
+def test_leader_trend_add_signal_requires_new_high_in_rising_trend():
+    dates = pd.bdate_range("2026-01-01", periods=90)
+    closes = [20 + index * 0.35 for index in range(89)] + [53.0]
+    bars = _prepare_frame(pd.DataFrame({
+        "date": dates,
+        "open": closes,
+        "high": [value + 0.5 for value in closes],
+        "low": [value - 0.5 for value in closes],
+        "close": closes,
+        "volume": [1000.0] * 89 + [1200.0],
+    }))
+
+    signal = _leader_trend_add_signal(bars, len(bars) - 1)
+
+    assert signal["signal_type"] == "leader_trend_add"
+    assert signal["stop"] < signal["trigger"]
+    assert signal["target_price"] > signal["trigger"]
+
+
+def test_auto_w_bottom_is_not_a_production_entry():
+    dates = pd.bdate_range("2026-01-01", periods=90)
+    closes = [100.0] * 90
+    lows = [98.0] * 90
+    highs = [102.0] * 90
+    volumes = [1000.0] * 90
+    lows[45] = 80.0
+    closes[45] = 82.0
+    highs[55] = 96.0
+    lows[65] = 82.0
+    closes[65] = 83.0
+    closes[-2] = 94.0
+    highs[-2] = 95.0
+    closes[-1] = 96.0
+    highs[-1] = 97.0
+    lows[-1] = 93.0
+    volumes[-1] = 2000.0
+    data = _prepare_frame(pd.DataFrame({
+        "date": dates,
+        "open": closes,
+        "high": highs,
+        "low": lows,
+        "close": closes,
+        "volume": volumes,
+    }))
+
+    signal = infer_technical_entry(data, len(data) - 1)
+
+    assert signal is None or signal["signal_type"] != "w_bottom_neckline"
+
+
+def test_support_pullback_requires_close_inside_support_zone():
+    dates = pd.bdate_range("2026-01-01", periods=61)
+    closes = [80.0] * 60 + [82.0]
+    data = _prepare_frame(pd.DataFrame({
+        "date": dates,
+        "open": [80.0] * 61,
+        "high": [83.0] * 61,
+        "low": [80.0] * 60 + [77.0],
+        "close": closes,
+        "volume": [1000.0] * 61,
+    }))
+    plan = {"price_structures": [{
+        "kind": "uptrend_support",
+        "uptrend_low": 10.0,
+        "uptrend_high": 100.0,
+        "ratio": 0.75,
+        "confluence": ["MA20"],
+    }]}
+
+    signal = _price_structure_signal(
+        data, len(data) - 1, plan, auto_structure=False,
+        allow_pullback=True,
+    )
+
+    assert signal is None
 
 
 def test_21_day_close_high_breakout_is_not_standalone_entry():
@@ -1422,13 +2016,13 @@ def test_configured_price_structure_ratio_is_a_pre_known_condition_order():
     bars.loc[bars.index[-1], ["open", "high", "low", "close", "volume"]] = [9.8, 10.2, 9.7, 10.1, 1]
     date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
     plan = {"price_structures": [{
-        "kind": "uptrend_support", "uptrend_low": 8.0,
-        "uptrend_high": 12.0, "ratio": 0.50,
+        "kind": "uptrend_support", "uptrend_low": 2.0,
+        "uptrend_high": 18.0, "ratio": 0.50,
         "confluence": ["MA20"],
     }]}
     plans = {"plans": {"A": {"price_structures": [{
-        "kind": "uptrend_support", "uptrend_low": 8.0,
-        "uptrend_high": 12.0, "ratio": 0.50,
+        "kind": "uptrend_support", "uptrend_low": 2.0,
+        "uptrend_high": 18.0, "ratio": 0.50,
         "confluence": ["MA20"],
     }]}}}
 
@@ -1440,6 +2034,67 @@ def test_configured_price_structure_ratio_is_a_pre_known_condition_order():
 
     assert signal["signal_type"] == "uptrend_support_pullback"
     assert result["events"] == []
+
+
+def test_configured_uptrend_support_requires_trend_level_amplitude():
+    bars = breakout_bars()
+    bars.loc[bars.index[-2], "close"] = 10.1
+    bars.loc[bars.index[-1], ["open", "high", "low", "close", "volume"]] = [9.8, 10.2, 9.7, 10.1, 1]
+    plan = {"price_structures": [{
+        "kind": "uptrend_support", "uptrend_low": 8.0,
+        "uptrend_high": 12.0, "ratio": 0.50,
+        "confluence": ["MA20"],
+    }]}
+
+    signal = _price_structure_signal(bars, len(bars) - 1, plan, auto_structure=False)
+
+    assert signal is None
+
+
+def test_auto_big_wave_support_can_still_trigger_pullback():
+    dates = pd.bdate_range("2025-01-01", periods=91)
+    closes = (
+        [10.0, 9.6, 9.2, 9.0, 9.3, 9.8, 10.5, 11.2, 12.0, 13.0]
+        + list(pd.Series(range(45)).map(lambda value: 14.0 + value * 26.0 / 44))
+        + [40.5, 39.5, 38.4, 37.4, 36.2, 35.0, 33.8, 32.8, 31.8, 30.8]
+        + [29.8] * 25
+        + [29.6]
+    )
+    frame = pd.DataFrame({
+        "date": dates,
+        "open": closes,
+        "high": [value + 0.4 for value in closes],
+        "low": [value - 0.4 for value in closes],
+        "close": closes,
+        "volume": [1000.0] * len(closes),
+    })
+    # Create a volume launch and an MA20 confluence at the 50% level.
+    frame.loc[10, "volume"] = 2500.0
+    frame.loc[10, "close"] = 14.0
+    frame.loc[10, "high"] = 14.4
+    frame.loc[10, "low"] = 13.6
+    data = _prepare_frame(frame)
+    decision_index = len(data) - 1
+    support = structure_price(8.6, 40.9, 0.50)
+    data.loc[decision_index - 1, "ma20"] = support
+    data.loc[decision_index, ["open", "high", "low", "close", "volume"]] = [
+        support * 1.02,
+        support * 1.04,
+        support * 0.99,
+        support * 1.03,
+        1000.0,
+    ]
+
+    signal = _price_structure_signal(
+        data, decision_index, plan=None, auto_structure=True,
+        allow_pullback=True,
+    )
+
+    assert signal is not None
+    assert signal["signal_type"] == "uptrend_support_pullback"
+    assert signal["anchor_low"] == pytest.approx(8.6)
+    assert signal["anchor_high"] == pytest.approx(40.9)
+    assert signal["structure_ratio"] == pytest.approx(0.50)
 
 
 def test_leading_pullback_pilot_is_explicit_sensitivity_mode():
@@ -1455,8 +2110,8 @@ def test_leading_pullback_pilot_is_explicit_sensitivity_mode():
     })
     date = dates[-1].strftime("%Y-%m-%d")
     plans = {"plans": {"A": {"price_structures": [{
-        "kind": "uptrend_support", "uptrend_low": 5.0,
-        "uptrend_high": 15.0, "ratio": 0.50,
+        "kind": "uptrend_support", "uptrend_low": 2.0,
+        "uptrend_high": 18.0, "ratio": 0.50,
         "confluence": ["MA20"],
     }]}}}
     snapshots = {date: [{
@@ -1467,7 +2122,11 @@ def test_leading_pullback_pilot_is_explicit_sensitivity_mode():
         "earnings_yoy": 0.30,
         "mktcap": 300,
         "trade_basis_score": 8,
-        "leadership_score": 25,
+        "leadership_score": 28,
+        "return_20d": 0.12,
+        "return_60d": 0.35,
+        "drawdown_60": -0.10,
+        "avg_amount_20": 3_000_000_000,
     }]}
     phases = {date: {"phase": "active", "window_up_streak": 3, "window_down_streak": 0}}
 
@@ -1489,6 +2148,49 @@ def test_leading_pullback_pilot_is_explicit_sensitivity_mode():
     assert pilot_result["events"][0]["requested_position_pct"] == pytest.approx(15)
 
 
+def test_leading_pullback_pilot_still_blocks_ordinary_pullback_profiles():
+    dates = pd.bdate_range("2026-01-01", periods=80)
+    closes = list(pd.Series(range(78)).map(lambda value: 7.0 + value * 3.0 / 77)) + [10.2, 10.1]
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": closes,
+        "high": [value + 0.2 for value in closes],
+        "low": [value - 0.2 for value in closes[:-1]] + [9.8],
+        "close": closes,
+        "volume": [1000] * 79 + [2000],
+    })
+    date = dates[-1].strftime("%Y-%m-%d")
+    plans = {"plans": {"A": {"price_structures": [{
+        "kind": "uptrend_support", "uptrend_low": 2.0,
+        "uptrend_high": 18.0, "ratio": 0.50,
+        "confluence": ["MA20"],
+    }]}}}
+    snapshots = {date: [{
+        "code": "A",
+        "name": "A",
+        "candidate_source": "growth_leadership+standard_mainline",
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+        "mktcap": 300,
+        "trade_basis_score": 6,
+        "leadership_score": 25,
+        "return_20d": 0.04,
+        "return_60d": 0.18,
+        "drawdown_60": -0.24,
+        "avg_amount_20": 1_000_000_000,
+    }]}
+    phases = {date: {"phase": "active", "window_up_streak": 3, "window_down_streak": 0}}
+
+    result = run_portfolio_backtest(
+        {"A": bars}, snapshots, phases,
+        requested_start=date, end_date=date, trade_plans=plans,
+        min_entry_evidence_score=8, allow_pullback_pilot=True,
+    )
+
+    assert result["events"] == []
+    assert result["entry_blocks"][0]["reason"] == "support_pullback_not_first_entry"
+
+
 def test_symbol_cap_is_independent_from_price_structure_ratios():
     assert _capped_entry_size(0.60, 0.20) == pytest.approx(0.025)
     assert _capped_entry_size(0.30, 0.15) == pytest.approx(0.15)
@@ -1507,8 +2209,8 @@ def test_support_pullback_can_only_add_after_float_profit_buffer():
     start = dates[-3].strftime("%Y-%m-%d")
     end = dates[-1].strftime("%Y-%m-%d")
     plans = {"plans": {"A": {"price_structures": [{
-        "kind": "uptrend_support", "uptrend_low": 10.0,
-        "uptrend_high": 14.0, "ratio": 0.50,
+        "kind": "uptrend_support", "uptrend_low": 4.0,
+        "uptrend_high": 20.0, "ratio": 0.50,
         "confluence": ["MA20"],
     }]}}}
 
@@ -1536,8 +2238,8 @@ def test_close_confirmed_initial_batch_must_prove_before_addition():
     end = dates[-1].strftime("%Y-%m-%d")
     snapshots = {start: [{"code": "A"}]}
     plans = {"plans": {"A": {"price_structures": [{
-        "kind": "uptrend_support", "uptrend_low": 8.0,
-        "uptrend_high": 12.0, "ratio": 0.75,
+        "kind": "uptrend_support", "uptrend_low": 2.0,
+        "uptrend_high": 14.0, "ratio": 0.75,
         "confluence": ["volume_node"],
     }]}}}
 
@@ -1555,8 +2257,8 @@ def test_uptrend_ratio_has_no_break_back_above_order():
     bars.loc[bars.index[-2], "close"] = 9.8
     bars.loc[bars.index[-1], ["open", "high", "low", "close"]] = [9.8, 11.2, 9.7, 11.0]
     plan = {"price_structures": [{
-        "kind": "uptrend_support", "uptrend_low": 8.0,
-        "uptrend_high": 12.0, "ratio": 0.625,
+        "kind": "uptrend_support", "uptrend_low": 2.0,
+        "uptrend_high": 15.6, "ratio": 0.625,
         "confluence": ["MA20"],
     }]}
 
@@ -1678,6 +2380,15 @@ def test_tranche_profit_protection_is_independent_from_formula33():
     }, history, 5)
 
 
+def test_half_profit_pullback_does_not_clear_final_runner():
+    history = pd.DataFrame({"close": [120.0], "ma20": [100.0]})
+    assert "maximum_profit_half" not in _active_profit_trigger_ids({
+        "maximum_return_pct": 80,
+        "half_profit_triggered": True,
+        "close": 120.0,
+    }, history, 1)
+
+
 def test_valid_volume_node_break_sells_one_intermediate_profit_tranche():
     dates = pd.bdate_range("2026-01-01", periods=16)
     closes = [10.0] * 16
@@ -1707,7 +2418,7 @@ def test_valid_volume_node_break_sells_one_intermediate_profit_tranche():
     ]
 
 
-def test_maximum_profit_half_is_reserved_for_last_tranche():
+def test_maximum_profit_half_no_longer_clears_last_runner():
     history = pd.DataFrame({"close": [100.0] * 10, "ma20": [90.0] * 10})
     profit = {
         "maximum_return_pct": 100.0,
@@ -1716,7 +2427,7 @@ def test_maximum_profit_half_is_reserved_for_last_tranche():
     }
 
     assert "maximum_profit_half" not in _active_profit_trigger_ids(profit, history, 2)
-    assert "maximum_profit_half" in _active_profit_trigger_ids(profit, history, 1)
+    assert "maximum_profit_half" not in _active_profit_trigger_ids(profit, history, 1)
 
 
 def test_only_the_last_sold_down_profit_tranche_is_a_non_capacity_tail():
@@ -1928,6 +2639,7 @@ def test_default_data_end_date_waits_until_daily_bar_is_ready():
 def test_formula33_refresh_window_covers_long_backtest_range():
     window = formula33_refresh_window_args("2024-09-24", "2026-07-13")
 
+    assert window["start_date"] < "2024-09-24"
     assert window["lookback"] >= 680
     assert window["history_days"] == 420
 
@@ -1984,6 +2696,37 @@ def test_required_financial_periods_must_exist_for_candidate_history():
         })
 
 
+def test_financial_point_in_time_status_requires_visible_announce_time():
+    visible = _financial_point_in_time_status(
+        {
+            "financial_point_in_time_source": "announce_time",
+            "announcement_date": "2026-04-29",
+            "annual_announcement_date": "2026-04-20",
+            "capital_announcement_date": "2026-04-29",
+        },
+        pd.Timestamp("2026-04-30"),
+    )
+    future = _financial_point_in_time_status(
+        {
+            "financial_point_in_time_source": "announce_time",
+            "announcement_date": "2026-05-01",
+        },
+        pd.Timestamp("2026-04-30"),
+    )
+    unsafe_source = _financial_point_in_time_status(
+        {
+            "financial_point_in_time_source": "",
+            "announcement_date": "2026-04-20",
+        },
+        pd.Timestamp("2026-04-30"),
+    )
+
+    assert visible["financial_point_in_time"] is True
+    assert visible["announcement_date"] == "2026-04-29"
+    assert future["financial_point_in_time"] is False
+    assert unsafe_source["financial_point_in_time"] is False
+
+
 def test_kline_preflight_invalidates_manifest_when_cache_starts_late(tmp_path):
     universe = tmp_path / "stock_universe.csv"
     universe.write_text("code\nsh.600000\nsz.000001\n", encoding="utf-8")
@@ -2028,6 +2771,34 @@ def test_kline_coverage_summary_accepts_complete_cache(tmp_path):
     assert coverage["universe_count"] == 1
 
 
+def test_kline_coverage_summary_can_ignore_execution_start_gaps(tmp_path):
+    universe = tmp_path / "stock_universe.csv"
+    universe.write_text("code\nsh.600000\nsh.600001\n", encoding="utf-8")
+    kline_dir = tmp_path / "kline"
+    kline_dir.mkdir()
+    pd.DataFrame({"date": ["2026-01-05", "2026-07-17"]}).to_csv(
+        kline_dir / "sh_600000.csv", index=False,
+    )
+    pd.DataFrame({"date": ["2026-01-15", "2026-07-17"]}).to_csv(
+        kline_dir / "sh_600001.csv", index=False,
+    )
+
+    strict = summarize_kline_cache_coverage(
+        kline_dir, universe, "2026-01-05", "2026-07-17",
+    )
+    execution = summarize_kline_cache_coverage(
+        kline_dir,
+        universe,
+        "2026-01-05",
+        "2026-07-17",
+        require_start_coverage=False,
+    )
+
+    assert strict["complete"] is False
+    assert strict["missing_start_count"] == 1
+    assert execution["complete"] is True
+
+
 def test_kline_coverage_summary_allows_post_start_ipo(tmp_path):
     universe = tmp_path / "stock_universe.csv"
     universe.write_text("code\nsz.001220\n", encoding="utf-8")
@@ -2052,6 +2823,53 @@ def test_kline_coverage_summary_allows_post_start_ipo(tmp_path):
     assert coverage["missing_start_count"] == 0
 
 
+def test_miniqmt_execution_kline_preflight_auto_fetches_missing_codes(monkeypatch, tmp_path):
+    universe = tmp_path / "stock_universe.csv"
+    universe.write_text("code\nsh.600000\nsh.600001\n", encoding="utf-8")
+    kline_dir = tmp_path / "front"
+    kline_dir.mkdir()
+    pd.DataFrame({"date": ["2026-01-01", "2026-07-17"]}).to_csv(
+        kline_dir / "sh_600000.csv", index=False,
+    )
+    pd.DataFrame({"date": ["2026-01-01", "2026-07-14"]}).to_csv(
+        kline_dir / "sh_600001.csv", index=False,
+    )
+    calls = []
+
+    def fake_load(codes, **kwargs):
+        calls.append((list(codes), kwargs))
+        pd.DataFrame({"date": ["2026-01-01", "2026-07-17"]}).to_csv(
+            kline_dir / "sh_600001.csv", index=False,
+        )
+        return {}, {
+            "requested_count": len(codes),
+            "loaded_count": len(codes),
+            "missing_count": 0,
+            "fetch": {"errors": []},
+        }
+
+    monkeypatch.setattr(portfolio_backtest_app, "load_miniqmt_price_frames", fake_load)
+
+    coverage = ensure_miniqmt_kline_cache_for_backtest(
+        kline_directory=kline_dir,
+        universe_path=universe,
+        start_date="2026-01-01",
+        end_date="2026-07-17",
+        dividend_type="front",
+        label="test/front",
+    )
+
+    assert coverage["complete"] is True
+    assert calls == [(["sh.600001"], {
+        "start_date": "2026-01-01",
+        "end_date": "2026-07-17",
+        "period": "1d",
+        "dividend_type": "front",
+        "refresh": True,
+        "persist": True,
+    })]
+
+
 def test_financial_cache_period_helpers(tmp_path):
     (tmp_path / "600000_20240630.json").write_text("{}", encoding="utf-8")
     (tmp_path / "000001_20240630.json").write_text("{}", encoding="utf-8")
@@ -2061,6 +2879,128 @@ def test_financial_cache_period_helpers(tmp_path):
     assert report_period_visible_date("2024-09-30") == pd.Timestamp("2024-10-31")
     assert financial_cache_file_count(tmp_path, "2024-06-30") == 2
     assert financial_cache_file_count(tmp_path, "2024-09-30") == 1
+
+
+def test_financial_preflight_auto_fetches_and_requires_target(monkeypatch):
+    calls = []
+    coverages = [
+        {
+            "coverage": 0.50,
+            "complete_count": 1,
+            "requested_count": 2,
+            "missing_or_unsafe_count": 1,
+        },
+    ]
+
+    monkeypatch.setattr(
+        portfolio_backtest_app,
+        "visible_report_periods",
+        lambda start, end: ["2026-03-31"],
+    )
+    monkeypatch.setattr(
+        portfolio_backtest_app,
+        "load_financial_universe_codes",
+        lambda path: ["sh.600000", "sz.000001"],
+    )
+    monkeypatch.setattr(
+        portfolio_backtest_app,
+        "strict_financial_cache_coverage",
+        lambda codes, period, as_of: coverages.pop(0),
+    )
+    monkeypatch.setattr(
+        portfolio_backtest_app,
+        "supplement_strict_financial_cache",
+        lambda codes, period, as_of, args: {
+            "point_in_time_coverage": {
+                "coverage": 1.0,
+                "complete_count": 2,
+                "requested_count": 2,
+                "missing_or_unsafe_count": 0,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        portfolio_backtest_app,
+        "build_required_fundamental_snapshot",
+        lambda args, period, as_of: calls.append((period, as_of)),
+    )
+    args = type("Args", (), {
+        "start_date": "2026-07-01",
+        "end_date": "2026-07-14",
+        "financial_target_coverage": 0.95,
+        "financial_chunk_size": 10,
+        "financial_timeout": 60,
+    })()
+
+    ensure_financial_cache_for_backtest(args)
+
+    assert calls == [("2026-03-31", "2026-07-14")]
+
+
+def test_financial_preflight_fails_when_auto_fetch_remains_below_target(monkeypatch):
+    monkeypatch.setattr(
+        portfolio_backtest_app,
+        "visible_report_periods",
+        lambda start, end: ["2026-03-31"],
+    )
+    monkeypatch.setattr(
+        portfolio_backtest_app,
+        "load_financial_universe_codes",
+        lambda path: ["sh.600000", "sz.000001"],
+    )
+    monkeypatch.setattr(
+        portfolio_backtest_app,
+        "strict_financial_cache_coverage",
+        lambda codes, period, as_of: {
+            "coverage": 0.50,
+            "complete_count": 1,
+            "requested_count": 2,
+            "missing_or_unsafe_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        portfolio_backtest_app,
+        "supplement_strict_financial_cache",
+        lambda codes, period, as_of, args: {
+            "point_in_time_coverage": {
+                "coverage": 0.50,
+                "complete_count": 1,
+                "requested_count": 2,
+                "missing_or_unsafe_count": 1,
+            }
+        },
+    )
+    args = type("Args", (), {
+        "start_date": "2026-07-01",
+        "end_date": "2026-07-14",
+        "financial_target_coverage": 0.95,
+        "financial_chunk_size": 10,
+        "financial_timeout": 60,
+    })()
+
+    with pytest.raises(RuntimeError, match="below target after auto-fetch"):
+        ensure_financial_cache_for_backtest(args)
+
+
+def test_no_refresh_inputs_is_blocked_for_strict_backtests():
+    with pytest.raises(RuntimeError, match="no-refresh-inputs"):
+        portfolio_backtest_app.main([
+            "--start-date", "2026-07-10",
+            "--end-date", "2026-07-14",
+            "--no-refresh-inputs",
+        ])
+
+
+def test_parameter_sweep_no_refresh_inputs_is_blocked_for_strict_backtests():
+    from scripts import portfolio_parameter_experiments
+
+    with pytest.raises(RuntimeError, match="no-refresh-inputs"):
+        portfolio_parameter_experiments.main([
+            "--start-date", "2026-07-10",
+            "--end-date", "2026-07-14",
+            "--no-refresh-inputs",
+            "--limit", "1",
+        ])
 
 
 def test_candidate_manifest_empty_dates(tmp_path):
@@ -2081,6 +3021,66 @@ def test_candidate_manifest_empty_dates(tmp_path):
         "2024-09-25",
         "2024-09-26",
     ]
+
+
+def test_candidate_manifest_financial_point_in_time_is_a_default_gate(tmp_path):
+    (tmp_path / "manifest.json").write_text(
+        """
+        {
+          "financial_point_in_time": false,
+          "snapshots": [
+            {"date": "2024-09-24", "candidate_count": 10, "financial_point_in_time": false}
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    status = candidate_manifest_financial_status(tmp_path)
+
+    assert status["financial_point_in_time"] is False
+    assert status["unsafe_dates"] == ["2024-09-24"]
+    with pytest.raises(RuntimeError, match="not strict financial point-in-time"):
+        validate_candidate_manifest_financial_point_in_time(tmp_path)
+    assert validate_candidate_manifest_financial_point_in_time(
+        tmp_path, allow_unsafe_financial=True,
+    )["financial_point_in_time"] is False
+
+
+def test_missing_candidate_manifest_financial_point_in_time_fails_closed(tmp_path):
+    status = candidate_manifest_financial_status(tmp_path)
+
+    assert status["available"] is False
+    with pytest.raises(RuntimeError, match="missing or unreadable"):
+        validate_candidate_manifest_financial_point_in_time(tmp_path)
+    assert validate_candidate_manifest_financial_point_in_time(
+        tmp_path, allow_unsafe_financial=True,
+    )["available"] is False
+
+
+def test_backtest_input_coverage_rejects_non_pit_candidate_manifest(tmp_path):
+    (tmp_path / "manifest.json").write_text(
+        '{"financial_point_in_time": false, "snapshots": []}',
+        encoding="utf-8",
+    )
+    formula = pd.DataFrame({"date": ["2024-09-24"]})
+
+    with pytest.raises(RuntimeError, match="allow-unsafe-financial"):
+        validate_backtest_input_coverage(
+            {"2024-09-24": [{"code": "A"}]},
+            formula,
+            "2024-09-24",
+            "2024-09-24",
+            candidate_directory=tmp_path,
+        )
+    assert validate_backtest_input_coverage(
+        {"2024-09-24": [{"code": "A"}]},
+        formula,
+        "2024-09-24",
+        "2024-09-24",
+        candidate_directory=tmp_path,
+        allow_unsafe_financial=True,
+    ) == "2024-09-24"
 
 
 def test_empty_candidate_snapshot_file_loads_as_zero_candidates(tmp_path):

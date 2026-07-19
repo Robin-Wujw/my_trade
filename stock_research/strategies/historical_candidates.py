@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from stock_research.core.financial_period import (
     visible_report_periods,
 )
 from stock_research.strategies.candidate_interface import (
+    left_value_safety_reasons,
     normalize_candidate,
     normalize_candidate_snapshots,
 )
@@ -23,7 +25,8 @@ MAX_MAINLINE_AGE_DAYS = 31
 CANDIDATE_SNAPSHOT_COLUMNS = [
     "date", "code", "name", "close", "value_line", "quality_score",
     "earnings_yoy", "mktcap", "report_period", "snapshot_version",
-    "financial_point_in_time", "price_to_value", "mainline_snapshot_date",
+    "financial_point_in_time", "financial_point_in_time_source",
+    "announcement_date", "price_to_value", "mainline_snapshot_date",
     "mainline_snapshot_fresh", "mainline_boards", "trade_basis_score",
     "trade_basis_reason", "technical_alignment", "ma20_rising",
     "ma60_rising", "above_ma20", "near_ma20", "near_21d_close_high",
@@ -207,6 +210,42 @@ def _load_financial_cache(directory, report_period):
     return rows
 
 
+def _financial_point_in_time_status(metrics, observation_date):
+    source = str(metrics.get("financial_point_in_time_source") or "").strip()
+    announcement = pd.to_datetime(
+        metrics.get("announcement_date"), errors="coerce",
+    )
+    observation = pd.Timestamp(observation_date).normalize()
+    visible = (
+        source == "announce_time"
+        and pd.notna(announcement)
+        and announcement.normalize() <= observation
+    )
+    for key in ("annual_announcement_date", "capital_announcement_date"):
+        value = pd.to_datetime(metrics.get(key), errors="coerce")
+        if pd.notna(value) and value.normalize() > observation:
+            visible = False
+    return {
+        "financial_point_in_time": bool(visible),
+        "financial_point_in_time_source": source or None,
+        "announcement_date": (
+            None if pd.isna(announcement) else announcement.strftime("%Y-%m-%d")
+        ),
+    }
+
+
+def _latest_point_in_time_financial(financial_by_period, code, observation_date, eligible_periods):
+    """Return the newest per-company financial cache that was visible on date."""
+    for period in sorted(eligible_periods, key=pd.Timestamp, reverse=True):
+        metrics = financial_by_period.get(period, {}).get(code)
+        if not metrics:
+            continue
+        status = _financial_point_in_time_status(metrics, observation_date)
+        if status["financial_point_in_time"]:
+            return period, metrics, status
+    return None, None, None
+
+
 def _validate_required_financial_periods(financial_by_period):
     missing = [
         period for period, rows in sorted(financial_by_period.items())
@@ -248,8 +287,8 @@ def _load_raw_price_frame(raw_kline_directory, market, code, start_date, end_dat
     return frame.drop_duplicates("date", keep="last").set_index("date").sort_index()
 
 
-def _attach_akshare_asof_prices(frame, raw_frame):
-    """Add observation-day anchored prices from AkShare raw + current-qfq data.
+def _attach_akshare_asof_prices(frame, raw_frame, *, source_label="AkShare"):
+    """Add observation-day anchored prices from raw + current-qfq data.
 
     Current AkShare qfq prices are anchored to the provider's latest adjustment
     factor.  For a historical observation date, the visible qfq series can be
@@ -262,7 +301,7 @@ def _attach_akshare_asof_prices(frame, raw_frame):
     """
     result = frame.copy()
     result["_asof_price_available"] = False
-    result["_asof_adjustment_method"] = "缺少AkShare不复权价，沿用当前锚点前复权价"
+    result["_asof_adjustment_method"] = f"缺少{source_label}不复权价，沿用当前锚点前复权价"
     if raw_frame is None or raw_frame.empty:
         return result
     aligned_raw = raw_frame.reindex(result.index)
@@ -278,14 +317,21 @@ def _attach_akshare_asof_prices(frame, raw_frame):
         )
     result["_asof_rebase_scale"] = scale
     result["_asof_price_available"] = valid
-    result.loc[valid, "_asof_adjustment_method"] = (
-        "AkShare不复权价反推观察日锚定前复权价"
-    )
+    result.loc[valid, "_asof_adjustment_method"] = f"{source_label}不复权价反推观察日锚定前复权价"
     return result
 
 
-def _load_prices(kline_directory, codes, start_date, end_date, *, raw_kline_directory=None):
+def _load_prices(
+    kline_directory,
+    codes,
+    start_date,
+    end_date,
+    *,
+    raw_kline_directory=None,
+    price_source="akshare",
+):
     result = {}
+    source_label = "MiniQMT" if price_source == "miniqmt" else "AkShare"
     for code in codes:
         market = "sh" if code.startswith(("6", "9")) else "sz"
         path = Path(kline_directory) / f"{market}_{code}.csv"
@@ -299,6 +345,8 @@ def _load_prices(kline_directory, codes, start_date, end_date, *, raw_kline_dire
             )
         except (OSError, ValueError, TypeError):
             qfq_anchor_date = pd.NaT
+        if price_source == "miniqmt" and pd.isna(qfq_anchor_date):
+            qfq_anchor_date = pd.Timestamp(end_date).normalize()
         try:
             header = pd.read_csv(path, nrows=0)
             columns = [
@@ -329,7 +377,12 @@ def _load_prices(kline_directory, codes, start_date, end_date, *, raw_kline_dire
                 start_date,
                 end_date,
             )
-            result[code] = _attach_akshare_asof_prices(frame, raw_frame)
+            frame["_price_source"] = price_source
+            result[code] = _attach_akshare_asof_prices(
+                frame,
+                raw_frame,
+                source_label=source_label,
+            )
     return result
 
 
@@ -1034,24 +1087,29 @@ def _right_quant_selection_rows(rows: list[dict]) -> list[dict]:
     selected = []
     for ranked in _rank_right_side_candidates(rows):
         rank = int(ranked.get("right_quant_rank") or 999999)
-        score = float(ranked.get("right_quant_score") or 0.0)
-        return_20d = float(ranked.get("return_20d") or 0.0)
+        def ranked_number(key, default=0.0):
+            value = pd.to_numeric(ranked.get(key), errors="coerce")
+            return float(value) if pd.notna(value) else float(default)
+
+        score = ranked_number("right_quant_score")
+        return_20d = ranked_number("return_20d")
+        return_60d = ranked_number("return_60d")
         avg_amount_value = pd.to_numeric(ranked.get("avg_amount_20"), errors="coerce")
         avg_amount_20 = (
             float(avg_amount_value)
             if pd.notna(avg_amount_value)
             else 0.0
         )
-        momentum_rank = float(ranked.get("quant_momentum_rank") or 0.0)
-        low_risk_rank = float(ranked.get("quant_low_risk_rank") or 0.0)
-        trend_stability_rank = float(ranked.get("quant_trend_stability_rank") or 0.0)
-        overheat_control_rank = float(ranked.get("quant_overheat_control_rank") or 0.0)
-        alpha_rank = float(ranked.get("quant_alpha_rank") or 0.0)
-        payoff_rank = float(ranked.get("quant_payoff_rank") or 0.0)
-        trend_efficiency_rank = float(ranked.get("quant_trend_efficiency_rank") or 0.0)
-        structure_rank = float(ranked.get("quant_structure_rank") or 0.0)
-        volume_confirm_rank = float(ranked.get("quant_volume_confirm_rank") or 0.0)
-        drawdown_60 = float(ranked.get("drawdown_60") or -1.0)
+        momentum_rank = ranked_number("quant_momentum_rank")
+        low_risk_rank = ranked_number("quant_low_risk_rank")
+        trend_stability_rank = ranked_number("quant_trend_stability_rank")
+        overheat_control_rank = ranked_number("quant_overheat_control_rank")
+        alpha_rank = ranked_number("quant_alpha_rank")
+        payoff_rank = ranked_number("quant_payoff_rank")
+        trend_efficiency_rank = ranked_number("quant_trend_efficiency_rank")
+        structure_rank = ranked_number("quant_structure_rank")
+        volume_confirm_rank = ranked_number("quant_volume_confirm_rank")
+        drawdown_60 = ranked_number("drawdown_60", -1.0)
 
         qualified = (
             rank <= 90
@@ -1094,12 +1152,54 @@ def _right_quant_selection_rows(rows: list[dict]) -> list[dict]:
             and return_20d >= 0.04
             and drawdown_60 >= -0.16
         )
-        if not qualified and not strong_trend_exception and not high_payoff_setup:
+        asymmetric_pivot_watch = (
+            rank <= 100
+            and score >= 74.0
+            and avg_amount_20 >= 1_000_000_000.0
+            and alpha_rank >= 70.0
+            and structure_rank >= 55.0
+            and volume_confirm_rank >= 60.0
+            and low_risk_rank >= 40.0
+            and overheat_control_rank >= 25.0
+            and 0.08 <= return_20d <= 0.25
+            and return_60d >= 0.0
+            and drawdown_60 >= -0.12
+        )
+        compact_attack_core = (
+            rank <= 50
+            and score >= 85.0
+            and avg_amount_20 >= 450_000_000.0
+            and alpha_rank >= 70.0
+            and structure_rank >= 80.0
+            and volume_confirm_rank >= 60.0
+            and low_risk_rank >= 60.0
+            and trend_stability_rank >= 60.0
+            and overheat_control_rank >= 40.0
+            and return_20d >= 0.04
+            and return_60d >= 0.15
+            and drawdown_60 >= -0.08
+        )
+        if (
+            not qualified
+            and not strong_trend_exception
+            and not high_payoff_setup
+            and not asymmetric_pivot_watch
+            and not compact_attack_core
+        ):
             continue
         right_quant_setup = (
             "高盈亏比" if high_payoff_setup
             else "强趋势" if strong_trend_exception
             else "标准量化"
+        )
+        if asymmetric_pivot_watch:
+            right_quant_setup = "asymmetric_pivot_watch"
+        if compact_attack_core:
+            right_quant_setup = "compact_attack_core"
+        candidate_source = (
+            "quant_right"
+            if right_quant_setup in {"asymmetric_pivot_watch", "compact_attack_core"}
+            else "growth_leadership"
         )
         selected.append({
             **ranked,
@@ -1110,7 +1210,7 @@ def _right_quant_selection_rows(rows: list[dict]) -> list[dict]:
                 + min(max(float(ranked["earnings_yoy"]), 0.0), 1.0) * 20
                 + min(float(ranked.get("right_quant_score") or 0.0) * 0.35, 30.0)
             ),
-            "candidate_source": "growth_leadership",
+            "candidate_source": candidate_source,
             "signal_eligible": True,
             "selection_reason": (
                 "基本面硬条件通过；右侧使用专业量化横截面漏斗入选；"
@@ -1156,8 +1256,10 @@ def build_historical_candidate_snapshots(
     universe_path,
     mainline_directory=None,
     raw_kline_directory=None,
+    price_source="akshare",
     max_mainline_age_days=MAX_MAINLINE_AGE_DAYS,
     research_repository=None,
+    strict_financial_point_in_time=True,
 ):
     start = pd.Timestamp(start_date).normalize()
     end = pd.Timestamp(end_date).normalize()
@@ -1183,6 +1285,7 @@ def build_historical_candidate_snapshots(
         price_start,
         end,
         raw_kline_directory=raw_kline_directory,
+        price_source=price_source,
     )
     prices = {
         code: _candidate_feature_frame(frame)
@@ -1196,7 +1299,9 @@ def build_historical_candidate_snapshots(
     })
     snapshots = {}
     tracked_value_codes = set()
-    for date in calendar:
+    progress_enabled = os.environ.get("CANDIDATE_HISTORY_PROGRESS") == "1"
+    total_dates = len(calendar)
+    for date_index, date in enumerate(calendar, start=1):
         period = report_period_for(date)
         eligible_mainline_dates = [item for item in mainline_snapshots if item <= date]
         mainline_date = max(eligible_mainline_dates) if eligible_mainline_dates else None
@@ -1210,7 +1315,30 @@ def build_historical_candidate_snapshots(
         leadership_rows = []
         right_side_pool_rows = []
         diagnostic_rows = []
-        for code, metrics in financial.get(period, {}).items():
+        eligible_periods = [
+            item for item in periods
+            if pd.Timestamp(item) <= pd.Timestamp(period)
+        ]
+        if strict_financial_point_in_time:
+            financial_items = []
+            for code in sorted(codes):
+                selected_period, metrics, pit_status = _latest_point_in_time_financial(
+                    financial, code, date, eligible_periods,
+                )
+                if metrics is None:
+                    continue
+                financial_items.append((code, selected_period, metrics, pit_status))
+        else:
+            financial_items = [
+                (
+                    code,
+                    period,
+                    metrics,
+                    _financial_point_in_time_status(metrics, date),
+                )
+                for code, metrics in financial.get(period, {}).items()
+            ]
+        for code, selected_period, metrics, financial_point_in_time in financial_items:
             price_frame = prices.get(code)
             if price_frame is None or date not in price_frame.index:
                 continue
@@ -1225,7 +1353,13 @@ def build_historical_candidate_snapshots(
             value_line = pd.to_numeric(metrics.get("value_line"), errors="coerce")
             quality = pd.to_numeric(metrics.get("quality_score"), errors="coerce")
             yoy = pd.to_numeric(metrics.get("yoy"), errors="coerce")
-            market_cap = pd.to_numeric(metrics.get("mktcap"), errors="coerce")
+            total_share = pd.to_numeric(metrics.get("total_share"), errors="coerce")
+            cached_market_cap = pd.to_numeric(metrics.get("mktcap"), errors="coerce")
+            market_cap = (
+                close * float(total_share) / 1e8
+                if pd.notna(total_share) and float(total_share) > 0
+                else cached_market_cap
+            )
             if any(pd.isna(item) for item in (quality, yoy, market_cap)):
                 continue
             full_code = ("sh." if code.startswith(("6", "9")) else "sz.") + code
@@ -1267,9 +1401,9 @@ def build_historical_candidate_snapshots(
                 "quality_score": float(quality),
                 "earnings_yoy": float(yoy),
                 "mktcap": float(market_cap),
-                "report_period": period,
+                "report_period": selected_period,
                 "snapshot_version": SNAPSHOT_VERSION,
-                "financial_point_in_time": False,
+                **financial_point_in_time,
                 "price_to_value": price_to_value,
                 "historical_adjustment_check": adjustment_check,
                 "qfq_anchor_date": qfq_anchor_text,
@@ -1281,6 +1415,7 @@ def build_historical_candidate_snapshots(
                 "value_falsified": False,
                 "value_falsification_reason": "",
             }
+            value_safety_reasons = left_value_safety_reasons(base)
             trade_basis = _trade_basis_from_feature_row(market_row)
             base.update(trade_basis)
             structure_proximity = _structure_proximity_from_feature_row(market_row)
@@ -1310,9 +1445,9 @@ def build_historical_candidate_snapshots(
                 "raw_amount": None if pd.isna(market_row.get("_raw_amount")) else float(market_row.get("_raw_amount")),
                 "amount_source": str(market_row.get("_amount_source") or "missing"),
                 "price_source": (
-                    "akshare_raw_plus_qfq_asof"
+                    f"{market_row.get('_price_source')}_raw_plus_qfq_asof"
                     if bool(market_row.get("_asof_price_available", False))
-                    else "formula33_kline_akshare_current_qfq"
+                    else f"{market_row.get('_price_source')}_current_qfq"
                 ),
                 "valid_price_bar": bool(market_row.get("_valid_price_bar", False)),
                 "alpha_volume_price_corr_20": None if pd.isna(market_row.get("_alpha_volume_price_corr_20")) else float(market_row.get("_alpha_volume_price_corr_20")),
@@ -1348,10 +1483,39 @@ def build_historical_candidate_snapshots(
                     ),
                 })
             if (
+                not value_falsification_reasons
+                and value_safety_reasons
+                and price_to_value is not None
+                and pd.notna(price_to_value)
+                and 0.80 <= float(price_to_value) <= 1.08
+            ):
+                diagnostic_rows.append({
+                    **base,
+                    "strategy_part": "value_safety_rejected_diagnostic",
+                    "candidate_score": 0.0,
+                    "historical_adjustment_check": (
+                        f"{adjustment_check}；left_value_safety_rejected"
+                    ),
+                    "candidate_source": "value_model",
+                    "signal_eligible": False,
+                    "selected_for_trading": False,
+                    "candidate_failure_reason": (
+                        "value_safety_rejected: "
+                        + ";".join(value_safety_reasons)
+                    ),
+                    "value_falsified": False,
+                    "value_falsification_reason": "",
+                    "selection_reason": (
+                        "diagnostic row only; value-line entry lacks left-side "
+                        "safety margin"
+                    ),
+                })
+            if (
                 not pd.isna(value_line)
                 and value_line > 0
                 and 0.80 <= close / value_line <= 1.08
                 and passes_fundamental_gate
+                and not value_safety_reasons
             ):
                 value_rows.append({
                     **base,
@@ -1372,12 +1536,32 @@ def build_historical_candidate_snapshots(
                     ),
                 })
             if code in mainline_members and passes_fundamental_gate:
+                right_trade_basis = float(trade_basis["trade_basis_score"])
+                right_leadership = float(leadership["leadership_score"])
+                right_return_20 = base.get("return_20d")
+                right_return_60 = base.get("return_60d")
+                right_drawdown_60 = base.get("drawdown_60")
+                right_avg_amount_20 = base.get("avg_amount_20")
                 mainline_right_ready = (
-                    float(leadership["leadership_score"]) >= 15.0
-                    or (
-                        float(trade_basis["trade_basis_score"]) >= 6.0
-                        and pd.notna(base.get("return_60d"))
-                        and float(base.get("return_60d")) >= 0.0
+                    pd.notna(right_return_20)
+                    and pd.notna(right_return_60)
+                    and pd.notna(right_drawdown_60)
+                    and pd.notna(right_avg_amount_20)
+                    and float(right_avg_amount_20) >= 500_000_000.0
+                    and float(right_drawdown_60) >= -0.18
+                    and (
+                        (
+                            right_leadership >= 22.0
+                            and right_trade_basis >= 6.0
+                            and float(right_return_60) >= 0.12
+                        )
+                        or (
+                            right_leadership >= 18.0
+                            and right_trade_basis >= 8.0
+                            and float(right_return_20) >= 0.05
+                            and float(right_return_60) >= 0.20
+                            and float(right_drawdown_60) >= -0.12
+                        )
                     )
                 )
                 normal_rows.append({
@@ -1478,6 +1662,16 @@ def build_historical_candidate_snapshots(
                     selected_by_code[code]["candidate_failure_reason"] = diagnostic.get(
                         "candidate_failure_reason", "",
                     )
+                elif "value_safety_rejected" in str(diagnostic.get("candidate_failure_reason") or ""):
+                    selected_row = selected_by_code[code]
+                    selected_row["allow_left"] = False
+                    existing_reason = str(selected_row.get("candidate_failure_reason") or "")
+                    new_reason = str(diagnostic.get("candidate_failure_reason") or "")
+                    if new_reason and new_reason not in existing_reason:
+                        selected_row["candidate_failure_reason"] = (
+                            f"{existing_reason}; {new_reason}"
+                            if existing_reason else new_reason
+                        )
                 continue
             existing = diagnostics_by_code.get(code)
             if existing is None or diagnostic.get("value_falsified"):
@@ -1494,6 +1688,15 @@ def build_historical_candidate_snapshots(
             include_diagnostics=True,
         )[date.strftime("%Y-%m-%d")]
         snapshots[date.strftime("%Y-%m-%d")] = selected + diagnostics
+        if progress_enabled and (
+            date_index == 1 or date_index == total_dates or date_index % 10 == 0
+        ):
+            print(
+                "[candidate-history] "
+                f"{date_index}/{total_dates} {date:%Y-%m-%d} "
+                f"selected={len(selected)} diagnostics={len(diagnostics)}",
+                flush=True,
+            )
     return snapshots
 
 
@@ -1519,6 +1722,9 @@ def save_historical_candidate_snapshots(output_directory, snapshots, *, start_da
         eligible_count = sum(bool(row.get("signal_eligible", True)) for row in rows)
         mainline_date = next((row.get("mainline_snapshot_date") for row in rows if row.get("mainline_snapshot_date")), None)
         mainline_fresh = any(bool(row.get("mainline_snapshot_fresh")) for row in rows)
+        financial_point_in_time = all(
+            row.get("financial_point_in_time") is True for row in rows
+        )
         manifest_rows.append({
             "date": date,
             "report_period": report_period,
@@ -1526,18 +1732,42 @@ def save_historical_candidate_snapshots(output_directory, snapshots, *, start_da
             "signal_eligible_count": eligible_count,
             "mainline_snapshot_date": mainline_date,
             "mainline_snapshot_fresh": mainline_fresh,
-            "financial_point_in_time": False,
+            "financial_point_in_time": financial_point_in_time,
             "file": path.name,
         })
+    financial_point_in_time = bool(manifest_rows) and all(
+        row["financial_point_in_time"] for row in manifest_rows
+    )
+    unsafe_snapshot_dates = [
+        row["date"] for row in manifest_rows
+        if row["financial_point_in_time"] is not True
+    ]
+    point_in_time_note = (
+        "Financial metrics are selected per stock from announce_time rows with "
+        "announcement_date, annual_announcement_date, and capital_announcement_date "
+        "not later than the observation date; no future financial report is admitted."
+        if financial_point_in_time
+        else (
+            "Price history is cut at the observation date, but some candidate rows "
+            "lack strict per-company announce_time visibility; this is research-only."
+        )
+    )
     manifest = {
         "version": SNAPSHOT_VERSION,
         "requested_start": str(start_date),
         "requested_end": str(end_date),
         "snapshot_count": len(manifest_rows),
-        "financial_point_in_time": False,
+        "financial_point_in_time": financial_point_in_time,
+        "strict_financial_point_in_time": financial_point_in_time,
+        "unsafe_snapshot_count": len(unsafe_snapshot_dates),
+        "unsafe_snapshot_sample": unsafe_snapshot_dates[:10],
         "candidate_pool_formula": "every selection model emits the same candidate interface; no manual candidate injection",
         "selection_standard": {
-            "value": "0.80 <= price/value_line <= 1.08, quality >= 70, yoy >= 0.10, mktcap >= 100",
+            "value": (
+                "0.80 <= price/value_line <= 1.08, quality >= 70, yoy >= 0.10, "
+                "mktcap >= 100, excluding high-growth small-cap rows with "
+                "yoy >= 1.00, mktcap < 150, and price/value_line > 0.90"
+            ),
             "normal": "quality >= 70, yoy >= 0.10, mktcap >= 100, and member of a fresh dated mainline snapshot",
             "leadership": (
                 "quality >= 70, yoy >= 0.10, mktcap >= 100, "
@@ -1559,6 +1789,7 @@ def save_historical_candidate_snapshots(output_directory, snapshots, *, start_da
             "行情严格按观察日截断；财务报告期保守选择，但缺少逐公告修订历史，"
             "不得声明为严格财务时点回测。"
         ),
+        "point_in_time_note": point_in_time_note,
         "snapshots": manifest_rows,
     }
     manifest_path = target / "manifest.json"

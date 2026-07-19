@@ -180,6 +180,10 @@ def _prepare_frame(frame):
     data["date"] = pd.to_datetime(data.get("date"), errors="coerce")
     for column in ("open", "high", "low", "close", "volume"):
         data[column] = pd.to_numeric(data.get(column), errors="coerce")
+    if "raw_to_qfq_factor" in data:
+        data["raw_to_qfq_factor"] = pd.to_numeric(
+            data["raw_to_qfq_factor"], errors="coerce",
+        )
     data = data.dropna(subset=["date", "high", "low", "close"])
     data = data.sort_values("date").drop_duplicates("date").reset_index(drop=True)
     for period in (5, 10, 20, 60, 120):
@@ -335,10 +339,9 @@ def _active_profit_trigger_ids(profit, history, remaining_parts) -> set[str]:
     ):
         ids.add("rising_ma20_break_3pct")
 
-    # Reserve the author's most basic maximum-profit-half rule for the last
-    # tranche; it clears the campaign without waiting for a return to cost.
-    if int(remaining_parts) == 1 and profit.get("half_profit_triggered"):
-        ids.add("maximum_profit_half")
+    # The final tranche is the campaign runner.  A maximum-profit-half pullback
+    # can stop scaling out intermediate parts, but it should not liquidate the
+    # last runner while the position has not broken its structural exits.
     return ids
 
 
@@ -378,7 +381,12 @@ def _price_structure_signal(
         ):
             # Ratios of the preceding uptrend remain pullback candidates. They
             # become executable only when a pre-known moving average overlaps
-            # the level; all three ratios stay available at their useful ages.
+            # the level.  Auto-inferred supports must be trend-level waves, not
+            # short relay swings that only look good after sorting by the
+            # highest nearby level.
+            if not inferred.get("amplitude_valid"):
+                continue
+            # All three ratios stay available at their useful ages.
             maximum_days = {0.75: 8, 0.625: 21, 0.50: 34}
             age = int(inferred.get("bars_since_high") or 0)
             prior = previous.iloc[-1]
@@ -398,6 +406,7 @@ def _price_structure_signal(
                         "uptrend_high": inferred["uptrend_high"],
                         "uptrend_low_date": inferred["uptrend_low_date"],
                         "uptrend_high_date": inferred["uptrend_high_date"],
+                        "amplitude_valid": inferred.get("amplitude_valid"),
                     })
 
     # A close-confirmed breach of the uptrend U50 followed by a reclaim is a
@@ -483,6 +492,8 @@ def _price_structure_signal(
             key=lambda item: item["level"], reverse=True,
         )
         for structure in supports:
+            if not structure.get("amplitude_valid"):
+                continue
             level = float(structure["level"])
             ratio = float(structure["ratio"])
             zone_top = level * (1 + SUPPORT_ZONE_PCT)
@@ -490,6 +501,7 @@ def _price_structure_signal(
                 prior_close > level
                 and float(row["low"]) <= zone_top
                 and float(row["close"]) >= level
+                and float(row["close"]) <= zone_top
             ):
                 confluence = ",".join(map(str, structure["confluence"]))
                 return {
@@ -526,6 +538,292 @@ def _right_signal(
         key=lambda signal: signal["rank"],
         default=None,
     )
+
+
+def _leader_trend_add_signal(data, index):
+    if index < 80:
+        return None
+    row = data.iloc[index]
+    previous = data.iloc[:index]
+    prior = previous.iloc[-1]
+    close_high = float(previous["close"].tail(21).max())
+    volume_baseline = max(
+        float(previous["volume"].tail(5).mean()),
+        float(previous["volume"].tail(10).mean()),
+    )
+    volume_ratio = float(row["volume"]) / volume_baseline if volume_baseline > 0 else 0.0
+    ma20 = pd.to_numeric(prior.get("ma20"), errors="coerce")
+    ma60 = pd.to_numeric(prior.get("ma60"), errors="coerce")
+    prior_ma20 = pd.to_numeric(previous.iloc[-6].get("ma20"), errors="coerce")
+    if (
+        pd.isna(ma20)
+        or pd.isna(ma60)
+        or pd.isna(prior_ma20)
+        or close_high <= 0
+    ):
+        return None
+    if not (
+        float(prior["close"]) <= close_high < float(row["close"])
+        and float(row["close"]) <= close_high * 1.10
+        and float(prior["close"]) > float(ma20) >= float(ma60)
+        and float(ma20) > float(prior_ma20)
+        and volume_ratio >= 0.85
+    ):
+        return None
+    stop = max(close_high * 0.95, float(ma20) * 0.98)
+    target = close_high + (close_high - stop) * 3.0
+    signal = {
+        "rank": 5,
+        "trigger": close_high,
+        "stop": stop,
+        "target_price": target,
+        "order_type": "close",
+        "reason": "proven leader trend add on 21d close high; close stop",
+        "known_volume_ratio": volume_ratio,
+        "signal_type": "leader_trend_add",
+        "requires_next_day_confirmation": True,
+    }
+    return apply_entry_confluence(data, index, signal)
+
+
+def _candidate_number(candidate, key):
+    if not candidate:
+        return None
+    value = pd.to_numeric(candidate.get(key), errors="coerce")
+    return float(value) if pd.notna(value) else None
+
+
+def _candidate_first_number(candidate, *keys):
+    for key in keys:
+        value = _candidate_number(candidate, key)
+        if value is not None:
+            return value
+    return None
+
+
+def _signal_number(signal, key):
+    if not signal:
+        return None
+    value = pd.to_numeric(signal.get(key), errors="coerce")
+    return float(value) if pd.notna(value) else None
+
+
+def _candidate_text(candidate, key) -> str:
+    if not candidate:
+        return ""
+    value = candidate.get(key)
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    return str(value).strip()
+
+
+def _has_semantic_candidate_profile(candidate) -> bool:
+    if not candidate:
+        return False
+    fields = {
+        "candidate_source", "quality_score", "earnings_yoy", "mktcap",
+        "trade_basis_score", "leadership_score", "right_quant_score",
+        "return_20d", "return_60d", "avg_amount_20",
+    }
+    return any(candidate.get(field) not in (None, "") for field in fields)
+
+
+def _compact_attack_core_profile(candidate) -> bool:
+    setup = _candidate_text(candidate, "right_quant_setup")
+    right_quant = _candidate_number(candidate, "right_quant_score")
+    structure_rank = _candidate_first_number(
+        candidate, "quant_structure_rank", "right_structure_rank", "structure_rank",
+    )
+    low_risk_rank = _candidate_first_number(
+        candidate, "quant_low_risk_rank", "right_risk_rank", "low_risk_rank",
+    )
+    volume_confirm_rank = _candidate_first_number(
+        candidate,
+        "quant_volume_confirm_rank", "right_volume_node_rank", "volume_confirm_rank",
+    )
+    ret60 = _candidate_number(candidate, "return_60d")
+    drawdown_60 = _candidate_number(candidate, "drawdown_60")
+    return bool(
+        setup == "compact_attack_core"
+        and right_quant is not None and right_quant >= 85.0
+        and structure_rank is not None and structure_rank >= 80.0
+        and low_risk_rank is not None and low_risk_rank >= 60.0
+        and volume_confirm_rank is not None and volume_confirm_rank >= 60.0
+        and ret60 is not None and ret60 >= 0.15
+        and (drawdown_60 is None or drawdown_60 >= -0.08)
+    )
+
+
+def _planned_right_target(data, index, signal, entry_price, risk_amount, candidate=None):
+    candidates = []
+    explicit = _signal_number(signal, "target_price")
+    if explicit is not None:
+        candidates.append((explicit, "explicit_signal_target"))
+    signal_type = str(signal.get("signal_type") or "")
+    trigger = _signal_number(signal, "trigger")
+    stop = _signal_number(signal, "stop")
+    if (
+        signal_type == "leader_pivot_breakout"
+        and _compact_attack_core_profile(candidate)
+        and trigger is not None
+        and stop is not None
+        and trigger > stop > 0
+    ):
+        pivot_risk = trigger - stop
+        candidates.append((
+            trigger + pivot_risk * 3.5,
+            "compact_attack_core_3_5r_pivot_continuation",
+        ))
+    anchor_high = _signal_number(signal, "anchor_high")
+    if anchor_high is not None:
+        candidates.append((anchor_high, "visible_anchor_high"))
+    visible = data.iloc[:index + 1]
+    if not visible.empty:
+        recent_high = pd.to_numeric(
+            visible.tail(120)["high"], errors="coerce",
+        ).max()
+        if pd.notna(recent_high):
+            candidates.append((float(recent_high), "visible_120d_high"))
+    valid = [
+        (price, label) for price, label in candidates
+        if price is not None and price > entry_price
+    ]
+    if valid:
+        return max(valid, key=lambda item: item[0])
+    return entry_price + risk_amount * 2.8, "planned_2_8r_trend_continuation"
+
+
+def _semantic_right_entry_gate(
+    data,
+    index,
+    candidate,
+    signal,
+    *,
+    current_down_streak=0,
+):
+    """Convert a technical signal into an auditable high R/R entry decision."""
+    if not signal:
+        return False, signal, "missing_signal"
+    enriched = dict(signal)
+    if not _has_semantic_candidate_profile(candidate):
+        enriched.update({
+            "semantic_entry_ok": True,
+            "semantic_entry_setup": "legacy_minimal_candidate_profile",
+            "entry_gate_reason": "legacy_minimal_candidate_profile",
+        })
+        return True, enriched, "ok"
+
+    close = float(data.iloc[index]["close"])
+    entry_price = close if signal.get("order_type") == "close" else (
+        _signal_number(signal, "trigger") or close
+    )
+    stop = _signal_number(signal, "stop")
+    if entry_price <= 0 or stop is None or stop <= 0 or stop >= entry_price:
+        enriched["semantic_entry_ok"] = False
+        enriched["entry_gate_reason"] = "invalid_or_non_protective_stop"
+        return False, enriched, "invalid_or_non_protective_stop"
+
+    quality = _candidate_number(candidate, "quality_score")
+    growth = _candidate_number(candidate, "earnings_yoy")
+    market_cap = _candidate_number(candidate, "mktcap")
+    if quality is None or quality < 70:
+        return False, enriched, "quality_hard_gate_failed"
+    if growth is None or growth < 0.10:
+        return False, enriched, "growth_hard_gate_failed"
+    if market_cap is None or market_cap < 100:
+        return False, enriched, "market_cap_hard_gate_failed"
+
+    trade_basis = _candidate_number(candidate, "trade_basis_score")
+    leadership = _candidate_number(candidate, "leadership_score")
+    right_quant = _candidate_number(candidate, "right_quant_score")
+    ret20 = _candidate_number(candidate, "return_20d")
+    ret60 = _candidate_number(candidate, "return_60d")
+    avg_amount = _candidate_number(candidate, "avg_amount_20")
+    if trade_basis is not None and trade_basis < 6.5:
+        return False, enriched, "trade_basis_too_weak"
+    liquidity_floor = 500_000_000.0
+    liquidity_profile = "standard_500m"
+    compact_attack_liquidity_ok = _compact_attack_core_profile(candidate)
+    if compact_attack_liquidity_ok:
+        liquidity_floor = 450_000_000.0
+        liquidity_profile = "compact_attack_core_450m"
+    if avg_amount is not None and avg_amount < liquidity_floor:
+        enriched.update({
+            "semantic_entry_ok": False,
+            "entry_gate_reason": "liquidity_too_thin",
+            "entry_liquidity_floor": liquidity_floor,
+            "entry_liquidity_profile": liquidity_profile,
+        })
+        return False, enriched, "liquidity_too_thin"
+    if ret20 is not None and ret20 < -0.02:
+        return False, enriched, "weak_20d_relative_strength"
+
+    strong_profile = any((
+        leadership is not None and leadership >= 18.0,
+        right_quant is not None and right_quant >= 60.0,
+        ret60 is not None and ret60 >= 0.20,
+        trade_basis is not None and trade_basis >= 8.0,
+    ))
+    if not strong_profile:
+        return False, enriched, "weak_relative_strength"
+
+    signal_type = str(signal.get("signal_type") or "")
+    volume_ratio = float(signal.get("known_volume_ratio") or 0.0)
+    breakout_types = {
+        "uptrend_50_reclaim", "pullback_50_breakout", "gap_long_ma_breakout",
+        "consolidation_breakout", "leader_pivot_breakout",
+        "volume_price_node", "leader_trend_add",
+    }
+    if signal_type in breakout_types and volume_ratio < 1.0:
+        return False, enriched, "volume_confirmation_missing"
+    if ret20 is not None and ret20 > 0.70:
+        return False, enriched, "late_acceleration_chase"
+    if ret20 is not None and ret20 > 0.45 and volume_ratio >= 3.0:
+        return False, enriched, "late_acceleration_chase"
+
+    risk_amount = entry_price - stop
+    risk_pct = risk_amount / entry_price
+    risk_limit = 0.065 if signal_type == "uptrend_support_pullback" else 0.10
+    if int(current_down_streak or 0) >= 3:
+        risk_limit = min(risk_limit, 0.07)
+    if risk_pct > risk_limit:
+        enriched.update({
+            "semantic_entry_ok": False,
+            "entry_risk_pct": round(risk_pct * 100, 3),
+            "entry_gate_reason": "risk_pct_too_wide",
+        })
+        return False, enriched, "risk_pct_too_wide"
+
+    target, target_basis = _planned_right_target(
+        data, index, signal, entry_price, risk_amount, candidate,
+    )
+    reward_risk = (target - entry_price) / risk_amount if risk_amount > 0 else 0.0
+    required_rr = 3.0 if signal_type == "uptrend_support_pullback" else 2.5
+    if int(current_down_streak or 0) >= 3:
+        required_rr = max(required_rr, 3.0)
+    if reward_risk < required_rr:
+        enriched.update({
+            "semantic_entry_ok": False,
+            "entry_risk_pct": round(risk_pct * 100, 3),
+            "entry_reward_risk": round(reward_risk, 3),
+            "entry_target_price": round(target, 3),
+            "entry_target_basis": target_basis,
+            "entry_gate_reason": "reward_risk_too_low",
+        })
+        return False, enriched, "reward_risk_too_low"
+
+    enriched.update({
+        "semantic_entry_ok": True,
+        "semantic_entry_setup": "high_rr_right_entry",
+        "entry_gate_reason": "ok",
+        "entry_risk_pct": round(risk_pct * 100, 3),
+        "entry_reward_risk": round(reward_risk, 3),
+        "entry_target_price": round(target, 3),
+        "entry_target_basis": target_basis,
+        "entry_liquidity_floor": liquidity_floor,
+        "entry_liquidity_profile": liquidity_profile,
+    })
+    return True, enriched, "ok"
 
 
 def run_portfolio_backtest(
@@ -594,6 +892,7 @@ def run_portfolio_backtest(
     current_up_streak = 0
     next_batch_id = 1
     last_candidate_scores = {}
+    last_candidates = {}
     previous_candidate_codes = set()
     pending_candidate_exits = set()
     pending_weak_exits = set()
@@ -727,6 +1026,42 @@ def run_portfolio_backtest(
             "not_selected_for_trading: daily_top10_quota_or_core_reservation"
         )
 
+    def candidate_has_exceptional_right_profile(candidate):
+        """Keep the over-quota escape hatch only for clear right-side leaders."""
+        if not candidate:
+            return False
+        sources = set(str(candidate.get("candidate_source") or "").split("+"))
+        if not sources & {"standard_mainline", "growth_leadership", "quant_right"}:
+            return False
+        right_quant_score = pd.to_numeric(
+            candidate.get("right_quant_score"), errors="coerce",
+        )
+        if pd.notna(right_quant_score) and float(right_quant_score) >= 95.0:
+            return True
+        leadership = pd.to_numeric(candidate.get("leadership_score"), errors="coerce")
+        return_20 = pd.to_numeric(candidate.get("return_20d"), errors="coerce")
+        return_60 = pd.to_numeric(candidate.get("return_60d"), errors="coerce")
+        drawdown_60 = pd.to_numeric(candidate.get("drawdown_60"), errors="coerce")
+        avg_amount_20 = pd.to_numeric(candidate.get("avg_amount_20"), errors="coerce")
+        visible_right_strength = (
+            pd.notna(leadership)
+            and float(leadership) >= 23.0
+        ) or (
+            pd.notna(right_quant_score)
+            and float(right_quant_score) >= 75.0
+        )
+        return bool(
+            visible_right_strength
+            and pd.notna(return_20)
+            and pd.notna(return_60)
+            and pd.notna(drawdown_60)
+            and pd.notna(avg_amount_20)
+            and 0.05 <= float(return_20) <= 0.60
+            and float(return_60) >= 0.35
+            and float(drawdown_60) >= -0.12
+            and float(avg_amount_20) >= 5_000_000_000.0
+        )
+
     def candidate_passes_hard_gate(candidate):
         if not candidate:
             return False
@@ -756,7 +1091,7 @@ def run_portfolio_backtest(
         return (
             candidate_is_daily_quota_diagnostic(candidate)
             and _enabled(candidate.get("allow_right"), default=False)
-            and "standard_mainline" in str(candidate.get("candidate_source") or "").split("+")
+            and candidate_has_exceptional_right_profile(candidate)
             and candidate_passes_hard_gate(candidate)
             and not left_value_falsification_reason(candidate)
         )
@@ -847,6 +1182,11 @@ def run_portfolio_backtest(
             "entry_evidence_score": (
                 signal.get("entry_evidence_score") if signal else None
             ),
+            "semantic_entry_ok": signal.get("semantic_entry_ok") if signal else None,
+            "entry_risk_pct": signal.get("entry_risk_pct") if signal else None,
+            "entry_reward_risk": signal.get("entry_reward_risk") if signal else None,
+            "entry_target_price": signal.get("entry_target_price") if signal else None,
+            "entry_target_basis": signal.get("entry_target_basis") if signal else None,
             "candidate_score": candidate.get("candidate_score"),
             "trade_basis_score": candidate.get("trade_basis_score"),
             "leadership_score": candidate.get("leadership_score"),
@@ -917,16 +1257,86 @@ def run_portfolio_backtest(
             return False
         if not right_market_active() or current_down_streak >= 3:
             return False
+        sources = set(str(candidate.get("candidate_source") or "").split("+"))
+        if not sources & {"standard_mainline", "growth_leadership", "quant_right"}:
+            return False
         leadership = pd.to_numeric(candidate.get("leadership_score"), errors="coerce")
+        right_quant = pd.to_numeric(candidate.get("right_quant_score"), errors="coerce")
         trade_basis = pd.to_numeric(candidate.get("trade_basis_score"), errors="coerce")
+        return_20 = pd.to_numeric(candidate.get("return_20d"), errors="coerce")
+        return_60 = pd.to_numeric(candidate.get("return_60d"), errors="coerce")
+        drawdown_60 = pd.to_numeric(candidate.get("drawdown_60"), errors="coerce")
+        avg_amount_20 = pd.to_numeric(candidate.get("avg_amount_20"), errors="coerce")
+        support_distance = 1.0
+        trigger = pd.to_numeric(signal.get("trigger"), errors="coerce")
+        stop = pd.to_numeric(signal.get("stop"), errors="coerce")
+        if (
+            pd.notna(trigger)
+            and pd.notna(stop)
+            and float(trigger) > 0
+            and float(stop) > 0
+        ):
+            support_distance = max(0.0, float(trigger) / float(stop) - 1.0)
         evidence_score = float(signal.get("entry_evidence_score") or signal.get("rank") or 0.0)
-        return (
+        has_leadership = (
             pd.notna(leadership)
-            and float(leadership) >= 24.0
-            and pd.notna(trade_basis)
-            and float(trade_basis) >= 6.0
-            and evidence_score >= max(10.0, configured_min_entry_evidence_score)
+            and float(leadership) >= 28.0
+        ) or (
+            pd.notna(right_quant)
+            and float(right_quant) >= 90.0
         )
+        return (
+            has_leadership
+            and pd.notna(trade_basis)
+            and float(trade_basis) >= 8.0
+            and pd.notna(return_20)
+            and pd.notna(return_60)
+            and pd.notna(drawdown_60)
+            and pd.notna(avg_amount_20)
+            and 0.08 <= float(return_20) <= 0.45
+            and float(return_60) >= 0.30
+            and float(drawdown_60) >= -0.18
+            and float(avg_amount_20) >= 2_000_000_000.0
+            and float(signal.get("known_volume_ratio") or 0.0) >= 1.0
+            and support_distance <= 0.055
+            and evidence_score >= 0.0
+        )
+
+    def high_conviction_right_entry_size(candidate, signal):
+        if not candidate or not signal:
+            return 0.0
+        reward_risk = pd.to_numeric(signal.get("entry_reward_risk"), errors="coerce")
+        risk_pct = pd.to_numeric(signal.get("entry_risk_pct"), errors="coerce")
+        trade_basis = pd.to_numeric(candidate.get("trade_basis_score"), errors="coerce")
+        leadership = pd.to_numeric(candidate.get("leadership_score"), errors="coerce")
+        right_quant = pd.to_numeric(candidate.get("right_quant_score"), errors="coerce")
+        return_20 = pd.to_numeric(candidate.get("return_20d"), errors="coerce")
+        if pd.isna(reward_risk) or pd.isna(risk_pct):
+            return 0.0
+        strong_profile = (
+            (pd.notna(leadership) and float(leadership) >= 25.0)
+            or (pd.notna(right_quant) and float(right_quant) >= 90.0)
+            or (pd.notna(trade_basis) and float(trade_basis) >= 8.0)
+        )
+        decisive_pivot_asymmetric_setup = (
+            str(signal.get("signal_type") or "") == "leader_pivot_breakout"
+            and pd.notna(right_quant)
+            and float(right_quant) >= 60.0
+            and pd.notna(return_20)
+            and 0.08 <= float(return_20) <= 0.25
+            and float(reward_risk) >= 5.0
+            and 4.5 <= float(risk_pct) <= 6.0
+            and float(signal.get("known_volume_ratio") or 0.0) >= 1.0
+        )
+        if decisive_pivot_asymmetric_setup:
+            return 0.60
+        if (
+            strong_profile
+            and float(reward_risk) >= 2.5
+            and float(risk_pct) <= 7.0
+        ):
+            return 0.50
+        return 0.0
 
     def trade_fee_components(turnover, *, sell=False):
         turnover = abs(float(turnover))
@@ -1080,6 +1490,76 @@ def run_portfolio_backtest(
         pnl = (turnover - cost_value - fee_cash) / float(initial_capital)
         return size, pnl
 
+    def apply_corporate_action_adjustment(code, date):
+        state = states[code]
+        if not state.left and not state.right:
+            return
+        data = frames[code]
+        if "raw_to_qfq_factor" not in data:
+            return
+        indexes = data.index[data["date"].dt.normalize() == date]
+        if indexes.empty:
+            return
+        index = int(indexes[0])
+        if index <= 0:
+            return
+        previous_factor = pd.to_numeric(
+            data.iloc[index - 1].get("raw_to_qfq_factor"), errors="coerce",
+        )
+        current_factor = pd.to_numeric(
+            data.iloc[index].get("raw_to_qfq_factor"), errors="coerce",
+        )
+        if (
+            pd.isna(previous_factor)
+            or pd.isna(current_factor)
+            or float(previous_factor) <= 0
+            or float(current_factor) <= 0
+        ):
+            return
+        multiplier = float(previous_factor) / float(current_factor)
+        if 0.925 < multiplier < 1.08:
+            return
+        previous_close = pd.to_numeric(data.iloc[index - 1].get("close"), errors="coerce")
+        current_close = pd.to_numeric(data.iloc[index].get("close"), errors="coerce")
+        observed_price_ratio = None
+        if (
+            pd.notna(previous_close)
+            and pd.notna(current_close)
+            and float(previous_close) > 0
+            and float(current_close) > 0
+        ):
+            observed_price_ratio = float(current_close) / float(previous_close)
+            expected_price_ratio = 1.0 / multiplier
+            tolerance = max(0.12, abs(1.0 - expected_price_ratio) * 0.35)
+            if abs(observed_price_ratio - expected_price_ratio) > tolerance:
+                return
+        if not (0.05 <= multiplier <= 20.0):
+            return
+        for lot in state.left:
+            lot["quantity"] = float(lot["quantity"]) * multiplier
+            lot["cost"] = float(lot["cost"]) / multiplier
+            if lot.get("sell_price") is not None:
+                lot["sell_price"] = float(lot["sell_price"]) / multiplier
+        if state.left_value_line is not None:
+            state.left_value_line = float(state.left_value_line) / multiplier
+        for lot in state.right:
+            lot["quantity"] = float(lot["quantity"]) * multiplier
+            lot["cost"] = float(lot["cost"]) / multiplier
+            lot["stop"] = float(lot["stop"]) / multiplier
+            if lot.get("reconfirm_level") is not None:
+                lot["reconfirm_level"] = float(lot["reconfirm_level"]) / multiplier
+        adjustment_reason = (
+            f"不复权成交价会计调整; 股数倍率={multiplier:.6f}; "
+            f"原始/前复权因子 {float(previous_factor):.6f}->{float(current_factor):.6f}"
+        )
+        if observed_price_ratio is not None:
+            adjustment_reason += f"; 价格比例={observed_price_ratio:.6f}"
+        add_event(
+            date, code, "除权持仓调整", float(data.iloc[index]["close"]), 0.0,
+            adjustment_reason,
+            account_mode="corporate_action",
+        )
+
     def consume_merged_lots(code, state, lots, requested_quantity):
         """Consume FIFO board lots without leaving fractional batch shares."""
         remaining = _board_lot_quantity(code, requested_quantity)
@@ -1105,6 +1585,131 @@ def run_portfolio_backtest(
                 state.right.remove(lot)
         sold_cost = sold_cost_value / sold_quantity if sold_quantity else 0.0
         return sold_quantity, sold_cost, sold_entry_fee
+
+    def rotate_weak_right_symbols_for_entry(
+        date,
+        incoming_code,
+        candidate,
+        signal,
+        required_size,
+        current_candidates,
+        exited_today,
+    ):
+        reward_risk = pd.to_numeric(signal.get("entry_reward_risk"), errors="coerce")
+        risk_pct = pd.to_numeric(signal.get("entry_risk_pct"), errors="coerce")
+        if (
+            pd.isna(reward_risk)
+            or pd.isna(risk_pct)
+            or float(reward_risk) < 5.0
+            or float(risk_pct) > 6.0
+            or signal.get("semantic_entry_ok") is not True
+        ):
+            return []
+        needed = gross_exposure() + float(required_size) - 1.0
+        if needed <= 1e-9:
+            return []
+        weak = []
+        for held_code in capacity_codes() - {incoming_code}:
+            if held_code in exited_today or held_code in pending_weak_exits:
+                continue
+            held_state = states[held_code]
+            if not held_state.right:
+                continue
+            visible = frames[held_code][frames[held_code]["date"] <= date]
+            if visible.empty:
+                continue
+            held_row = visible.iloc[-1]
+            held_quantity = sum(float(lot["quantity"]) for lot in held_state.right)
+            if held_quantity <= 0:
+                continue
+            held_cost = sum(
+                float(lot["quantity"]) * float(lot["cost"])
+                for lot in held_state.right
+            ) / held_quantity
+            held_return = float(held_row["close"]) / held_cost - 1.0
+            first_date = min(lot["date"] for lot in held_state.right)
+            holding_days = max(
+                len(visible[visible["date"] >= first_date]), 1,
+            )
+            ma20 = pd.to_numeric(held_row.get("ma20"), errors="coerce")
+            below_ma20 = pd.notna(ma20) and float(held_row["close"]) < float(ma20)
+            proven = any(lot.get("proven", False) for lot in held_state.right)
+            max_return = max(
+                float(lot.get("max_return") or 0.0) for lot in held_state.right
+            )
+            removed = held_code not in current_candidates
+            weak_unproven = (
+                not proven
+                and holding_days >= 20
+                and max_return < 0.20
+                and (held_return < 0.08 or below_ma20 or removed)
+            )
+            stale_low_efficiency = (
+                holding_days >= 60
+                and held_return < 0.03
+                and max_return < 0.20
+            )
+            profit_giveback = 0.0
+            if max_return > -0.99:
+                profit_giveback = (1.0 + held_return) / (1.0 + max_return) - 1.0
+            proven_stalling = (
+                proven
+                and below_ma20
+                and holding_days >= 20
+                and held_return < 0.50
+                and profit_giveback <= -0.08
+            )
+            if not (weak_unproven or stale_low_efficiency or proven_stalling):
+                continue
+            held_score = (
+                held_return * 100.0
+                + (20.0 if proven else 0.0)
+                + (-10.0 if below_ma20 else 5.0)
+                + profit_giveback * 50.0
+                + (-5.0 if removed else 0.0)
+            )
+            weak.append((held_score, held_code, held_return, holding_days, below_ma20))
+        rotated = []
+        for _, held_code, held_return, holding_days, below_ma20 in sorted(weak):
+            if needed <= 1e-9:
+                break
+            held_state = states[held_code]
+            visible = frames[held_code][frames[held_code]["date"] <= date]
+            if visible.empty:
+                continue
+            sell = float(visible.iloc[-1]["close"])
+            for lot in list(held_state.right):
+                quantity = float(lot["quantity"])
+                entry_fee_cash = float(lot.get("entry_fee_cash") or 0.0)
+                size, pnl = execute_sell(quantity, sell, lot["cost"])
+                held_state.right.remove(lot)
+                add_event(
+                    date, held_code, "汰弱让位", sell, -size,
+                    (
+                        f"{lot['batch']}; 高盈亏比新机会{incoming_code}让位; "
+                        f"持有{holding_days}日; 当前收益{held_return:.1%}; "
+                        f"{'跌破MA20' if below_ma20 else '效率不足'}; 14:55/close proxy"
+                    ),
+                    pnl,
+                    cost_basis=lot["cost"],
+                    execution_quantity=-quantity,
+                    entry_fee_cash=entry_fee_cash,
+                    account_mode="right",
+                    replacement_code=incoming_code,
+                    replacement_name=candidate.get("name") if candidate else None,
+                    replacement_reward_risk=signal.get("entry_reward_risk"),
+                    replacement_risk_pct=signal.get("entry_risk_pct"),
+                )
+                needed -= float(lot["size"])
+            held_state.pending_lot_exits.clear()
+            held_state.pending_profit_ids.clear()
+            held_state.right_sold.clear()
+            held_state.right_parts = configured_profit_tranches
+            held_state.right_plan_date = None
+            pending_weak_exits.discard(held_code)
+            exited_today.add(held_code)
+            rotated.append(held_code)
+        return rotated
 
     def left_grid_plan(value_line):
         """Ten-unit value grid: five initial units and five lower units."""
@@ -1200,10 +1805,11 @@ def run_portfolio_backtest(
         )
         if not signal:
             return None
-        if (
-            float(signal.get("entry_evidence_score") or 0.0)
-            < configured_min_entry_evidence_score
-        ):
+        ok, signal, _ = _semantic_right_entry_gate(
+            data, index, candidate, signal,
+            current_down_streak=current_down_streak,
+        )
+        if not ok:
             return None
         return signal
 
@@ -1220,6 +1826,8 @@ def run_portfolio_backtest(
     formula_dates = sorted(formula_by_date)
     for date in calendar:
         exited_today = set()
+        for code in list(states):
+            apply_corporate_action_adjustment(code, date)
         # Close-confirmed exits become market-at-open orders on the next bar.
         for code, state in states.items():
             if not state.pending_lot_exits and not state.pending_profit_ids:
@@ -1533,6 +2141,7 @@ def run_portfolio_backtest(
             current_candidates = snapshots[eligible_snapshots[-1]]
             for candidate_code, candidate in current_candidates.items():
                 last_candidate_scores[candidate_code] = float(candidate.get("candidate_score") or 0.0)
+                last_candidates[candidate_code] = dict(candidate)
         current_candidate_codes = set(current_candidates)
         if exit_tail_on_candidate_removal and previous_candidate_codes:
             for code in set(states) - current_candidate_codes:
@@ -1895,14 +2504,15 @@ def run_portfolio_backtest(
         )
         if entry_allowed:
             right_entry_codes = sorted(
-                set(current_candidates) | set(left_right_switch_signals)
+                set(current_candidates) | set(left_right_switch_signals) | capacity_codes()
             )
             for code in right_entry_codes:
                 if code not in states or code in exited_today:
                     continue
-                candidate = current_candidates.get(code, {})
+                candidate = current_candidates.get(code) or last_candidates.get(code, {})
                 if (
                     code not in left_right_switch_signals
+                    and code not in capacity_codes()
                     and not right_candidate_can_evaluate(candidate)
                 ):
                     continue
@@ -1923,13 +2533,13 @@ def run_portfolio_backtest(
                     auto_price_structure=auto_price_structure,
                     allow_structure_pullback=allow_structure_pullback,
                 )
-                if not signal:
-                    continue
                 if (
-                    float(signal.get("entry_evidence_score") or 0.0)
-                    < configured_min_entry_evidence_score
+                    not signal
+                    and states[code].right
+                    and any(lot.get("proven", False) for lot in states[code].right)
                 ):
-                    record_entry_block(date, code, candidate, signal, "entry_evidence_below_min")
+                    signal = _leader_trend_add_signal(data, index)
+                if not signal:
                     continue
                 if signal.get("signal_type") == "uptrend_support_pullback":
                     if not states[code].right:
@@ -1940,6 +2550,13 @@ def run_portfolio_backtest(
                         if states[code].right:
                             record_entry_block(date, code, candidate, signal, "add_current_profit_not_met")
                             continue
+                ok, signal, gate_reason = _semantic_right_entry_gate(
+                    data, index, candidate, signal,
+                    current_down_streak=current_down_streak,
+                )
+                if not ok:
+                    record_entry_block(date, code, candidate, signal, gate_reason)
+                    continue
                 fundamental_score = float(candidate.get("candidate_score") or 0.0)
                 entry_priority = (
                     fundamental_score
@@ -1953,7 +2570,7 @@ def run_portfolio_backtest(
             for _, fundamental_score, __, code, index, signal in sorted(candidates, reverse=True):
                 reopening_profit_tail = _is_profit_tail(states[code])
                 opening_right_symbol = code not in capacity_codes()
-                candidate = current_candidates.get(code, {})
+                candidate = current_candidates.get(code) or last_candidates.get(code, {})
                 if opening_right_symbol:
                     if total_symbol_limit_reached(code):
                         record_entry_block(date, code, candidate, signal, "total_symbol_limit")
@@ -2030,14 +2647,17 @@ def run_portfolio_backtest(
                     preferred_breakout = signal.get("signal_type") in {
                         "uptrend_50_reclaim",
                         "pullback_50_breakout",
-                        "w_bottom_neckline",
                         "gap_long_ma_breakout",
                         "consolidation_breakout",
+                        "leader_pivot_breakout",
+                        "leader_trend_add",
                         "volume_price_node",
                         "bull_run_half_pullback",
                     }
                     inferred_entry = signal.get("signal_type") in {
                         "consolidation_breakout",
+                        "leader_pivot_breakout",
+                        "leader_trend_add",
                         "volume_price_node",
                         "bull_run_half_pullback",
                     }
@@ -2045,9 +2665,11 @@ def run_portfolio_backtest(
                         candidate, signal,
                     )
                     direct_breakout = signal["order_type"] == "stop"
+                    high_conviction_size = high_conviction_right_entry_size(candidate, signal)
                     size = (
                         0.20 if current_down_streak >= 3
                         else 0.15 if pullback_pilot
+                        else high_conviction_size if high_conviction_size > 0
                         else 0.30 if preferred_breakout
                         else 0.20
                     )
@@ -2084,8 +2706,33 @@ def run_portfolio_backtest(
                     record_entry_block(date, code, candidate, signal, "symbol_exposure_cap")
                     continue
                 if gross_exposure() + size > 1.0 + 1e-9:
-                    record_entry_block(date, code, candidate, signal, "gross_exposure_cap")
-                    continue
+                    rotated = rotate_weak_right_symbols_for_entry(
+                        date,
+                        code,
+                        candidate,
+                        signal,
+                        size,
+                        current_candidates,
+                        exited_today,
+                    )
+                    if rotated:
+                        record_entry_block(
+                            date,
+                            code,
+                            candidate,
+                            signal,
+                            "weak_replacement_executed:" + ",".join(rotated),
+                        )
+                if gross_exposure() + size > 1.0 + 1e-9:
+                    available_size = max(0.0, 1.0 - gross_exposure())
+                    minimum_trimmed_size = 0.20 if starting_new_right_campaign else 0.10
+                    if available_size + 1e-9 < minimum_trimmed_size:
+                        record_entry_block(date, code, candidate, signal, "gross_exposure_cap")
+                        continue
+                    signal = dict(signal)
+                    signal["gross_exposure_trimmed_from_pct"] = round(size * 100, 3)
+                    signal["gross_exposure_available_pct"] = round(available_size * 100, 3)
+                    size = min(size, available_size)
                 requested_size = size
                 size, quantity, pnl, entry_fee_cash, cash_limited = execute_buy(
                     code, requested_size, float(fill["price"]),
@@ -2162,6 +2809,10 @@ def run_portfolio_backtest(
                         "anchor_high_date", "anchor_pullback_low_date",
                         "signal_type", "gap_up",
                         "entry_evidence_score", "entry_evidence",
+                        "semantic_entry_ok", "semantic_entry_setup",
+                        "entry_gate_reason", "entry_risk_pct",
+                        "entry_reward_risk", "entry_target_price",
+                        "entry_target_basis",
                         "volume_node_date", "volume_node_confirmed_on",
                         "valid_volume_node_count",
                     )
@@ -2357,6 +3008,56 @@ def run_portfolio_backtest(
             len(profitable_sells) / len(sell_trades) * 100, 3,
         ) if sell_trades else 0.0,
     }
+    def trade_bucket(event):
+        account_mode = str(event.get("account_mode") or "").strip()
+        if account_mode:
+            return account_mode
+        action = str(event.get("action") or "")
+        if action.startswith("左侧"):
+            return "left"
+        if action.startswith("右侧"):
+            return "right"
+        return "right"
+
+    trade_count_by_account = Counter(trade_bucket(event) for event in trade_ledger)
+    buy_count_by_account = Counter(trade_bucket(event) for event in buy_trades)
+    sell_count_by_account = Counter(trade_bucket(event) for event in sell_trades)
+    trade_amount_by_account = Counter()
+    pnl_by_account = Counter()
+    traded_symbols_by_account = {}
+    grid_trades_by_symbol = Counter()
+    for event in trade_ledger:
+        bucket = trade_bucket(event)
+        trade_amount_by_account[bucket] += float(event.get("trade_amount") or 0.0)
+        pnl_by_account[bucket] += float(event.get("profit_loss_amount") or 0.0)
+        traded_symbols_by_account.setdefault(bucket, set()).add(str(event.get("code") or ""))
+        if bucket == "left" and event.get("grid_slot") is not None:
+            grid_trades_by_symbol[
+                f"{event.get('code')} {event.get('name')}"
+            ] += 1
+    trade_mix_summary = {
+        "trade_count_by_account": dict(trade_count_by_account),
+        "buy_count_by_account": dict(buy_count_by_account),
+        "sell_count_by_account": dict(sell_count_by_account),
+        "trade_amount_by_account": {
+            key: round(value, 2) for key, value in trade_amount_by_account.items()
+        },
+        "net_pnl_by_account": {
+            key: round(value, 2) for key, value in pnl_by_account.items()
+        },
+        "traded_symbol_count_by_account": {
+            key: len({code for code in value if code})
+            for key, value in traded_symbols_by_account.items()
+        },
+        "left_grid_trade_count_by_symbol_top": [
+            {"symbol": symbol, "trade_count": count}
+            for symbol, count in grid_trades_by_symbol.most_common(10)
+        ],
+        "note": (
+            "max_total_held_symbols limits simultaneous symbols; grid batches "
+            "can create many trades inside one left-side symbol."
+        ),
+    }
     right_buys = [event for event in events if event["action"] == "右侧买入"]
     right_buy_signal_type_counts = Counter(
         str(event.get("signal_type") or "unknown")
@@ -2383,6 +3084,7 @@ def run_portfolio_backtest(
         "events": events,
         "trade_ledger": trade_ledger,
         "trade_summary": trade_summary,
+        "trade_mix_summary": trade_mix_summary,
         "equity_curve": equity_curve,
         "event_count": len(events),
         "cash_limited_order_count": sum(
@@ -2423,6 +3125,8 @@ def run_portfolio_backtest(
         "max_same_industry": configured_same_industry,
         "same_theme_correlation": configured_theme_correlation,
         "min_entry_evidence_score": configured_min_entry_evidence_score,
+        "entry_gate_model": "semantic_high_reward_risk",
+        "entry_evidence_score_role": "legacy_explanation_only",
         "allow_pullback_pilot": configured_allow_pullback_pilot,
         "concentration_block_count": len(concentration_blocks),
         "concentration_blocks": concentration_blocks,

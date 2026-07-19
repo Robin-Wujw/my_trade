@@ -834,5 +834,5 @@ def test_formula_input_snapshots_reuse_same_observation_and_rotate_next_date(
     formula33.load_stock_basic_snapshot("2026-07-13", universe)
     formula33.load_market_cap_snapshot("auto", "2026-07-13", universe)
     assert universe_calls == [1, 1]
-    assert basic_calls == [1, 1]
+    assert basic_calls == [1]
     assert cap_calls == [1, 1]

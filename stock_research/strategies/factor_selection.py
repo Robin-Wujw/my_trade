@@ -20,6 +20,137 @@ CORE_BUCKET = "低估且高质量"
 WATCH_BUCKET = "观察池"
 
 
+def _number(value, default=None):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return default if pd.isna(number) else number
+
+
+def _bounded_score(value, default=50.0):
+    number = _number(value, default)
+    return max(0.0, min(100.0, number))
+
+
+def _linear_score(value, worst, best, default=50.0):
+    number = _number(value)
+    if number is None or best == worst:
+        return default
+    return max(0.0, min(100.0, (number - worst) / (best - worst) * 100.0))
+
+
+def _risk_control_score(row):
+    ret20 = _number(row.get("ret20"), 0.0)
+    ret60 = _number(row.get("ret60"), 0.0)
+    liquidity = _bounded_score(row.get("liquidity_score"), 50.0)
+    penalty = 0.0
+    if ret20 > 0.35:
+        penalty += min(25.0, (ret20 - 0.35) * 100.0)
+    if ret60 > 0.80:
+        penalty += min(20.0, (ret60 - 0.80) * 60.0)
+    if ret20 < -0.15:
+        penalty += min(15.0, (-0.15 - ret20) * 80.0)
+    if ret60 < -0.25:
+        penalty += min(10.0, (-0.25 - ret60) * 50.0)
+    penalty += min(16.0, int(row.get("long_ma_overhead_count") or 0) * 8.0)
+    penalty += min(12.0, int(row.get("short_ma_down_drag_count") or 0) * 4.0)
+    if liquidity < 35.0:
+        penalty += 10.0
+    return max(0.0, min(100.0, 100.0 - penalty))
+
+
+def calc_multi_factor_score(row):
+    """Score visible row factors only; no data is fetched inside this function."""
+    value = _bounded_score(row.get("valuation_score"), 50.0)
+    quality = _bounded_score(row.get("quality_score"), 50.0)
+    trend = _bounded_score(row.get("trend_score"), 50.0)
+    liquidity = _bounded_score(row.get("liquidity_score"), 50.0)
+    ret20 = _number(row.get("relative_ret20"))
+    ret60 = _number(row.get("relative_ret60"))
+    ret20 = _number(row.get("ret20"), 0.0) if ret20 is None else ret20
+    ret60 = _number(row.get("ret60"), 0.0) if ret60 is None else ret60
+    momentum = (
+        trend * 0.55
+        + _linear_score(ret20, -0.08, 0.12) * 0.25
+        + _linear_score(ret60, -0.12, 0.20) * 0.20
+    )
+    risk = _risk_control_score(row)
+    score = (
+        value * 0.20
+        + quality * 0.25
+        + momentum * 0.25
+        + liquidity * 0.15
+        + risk * 0.15
+    )
+    if risk < 55.0:
+        label = "overheated_penalty"
+    elif quality >= 75.0 and momentum >= 70.0 and liquidity >= 55.0:
+        label = "quality_momentum"
+    elif value >= 75.0 and quality >= 65.0:
+        label = "value_repair"
+    elif liquidity >= 70.0 and trend >= 65.0:
+        label = "liquidity_confirmed"
+    else:
+        label = "balanced_factor"
+    components = {
+        "value": round(value, 1),
+        "quality": round(quality, 1),
+        "momentum": round(momentum, 1),
+        "liquidity": round(liquidity, 1),
+        "risk": round(risk, 1),
+    }
+    return {
+        "multi_factor_score": round(max(0.0, min(100.0, score)), 1),
+        "multi_factor_label": label,
+        "multi_factor_components": ";".join(
+            f"{key}={value:.1f}" for key, value in components.items()
+        ),
+    }
+
+
+def passes_multi_factor_right_gate(row, min_score=78.0):
+    """Allow only already-qualified rows to receive a small quant-right boost."""
+    score = _number(row.get("multi_factor_score"))
+    if score is None or score < min_score:
+        return False
+    if row.get("selection_bucket") not in {CORE_BUCKET, HIGH_QUALITY_BUCKET}:
+        return False
+    quality = _number(row.get("quality_score"))
+    growth = _number(row.get("earnings_yoy"))
+    if growth is None:
+        growth = _number(row.get("yoy"))
+    market_cap = _number(row.get("mktcap"))
+    trend = _number(row.get("trend_score"))
+    liquidity = _number(row.get("liquidity_score"))
+    if (
+        quality is None
+        or growth is None
+        or market_cap is None
+        or trend is None
+        or liquidity is None
+    ):
+        return False
+    if quality < 70.0 or growth < 0.10 or market_cap < 100.0:
+        return False
+    if trend < 70.0 or liquidity < 55.0:
+        return False
+    if _number(row.get("ret20"), 0.0) < 0.0:
+        return False
+    if _number(row.get("ret60"), 0.0) < -0.05:
+        return False
+    if _risk_control_score(row) < 60.0:
+        return False
+    return True
+
+
+def calc_multi_factor_bonus(row, max_bonus=3.0):
+    if not passes_multi_factor_right_gate(row):
+        return 0.0
+    score = _number(row.get("multi_factor_score"), 0.0)
+    return round(min(max_bonus, max(0.0, (score - 75.0) / 5.0)), 1)
+
+
 def apply_deduction_to_trend(base_score, deduction):
     """Let medium/long structure lead while short drag only times entry."""
     raw = float((deduction or {}).get("ma_deduction_score") or 0)
