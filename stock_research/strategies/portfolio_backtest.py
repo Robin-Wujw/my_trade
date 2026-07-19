@@ -245,7 +245,7 @@ def _clean_trade_basis_text(value):
     )
 
 
-def _capped_entry_size(current_exposure, planned_size, max_symbol_exposure=0.625):
+def _capped_entry_size(current_exposure, planned_size, max_symbol_exposure=0.70):
     """Cap one symbol's combined left/right exposure without changing ratios."""
     available = max(0.0, float(max_symbol_exposure) - float(current_exposure))
     return max(0.0, min(float(planned_size), available))
@@ -844,12 +844,12 @@ def run_portfolio_backtest(
     left_grid_unit=0.02,
     left_grid_step=0.05,
     left_grid_max_exposure=0.20,
-    max_symbol_exposure=0.625,
+    max_symbol_exposure=0.70,
     exit_tail_on_candidate_removal=False,
     signals_effective_next_day=False,
     auto_price_structure=True,
     allow_structure_pullback=True,
-    allow_pullback_pilot=False,
+    allow_pullback_pilot=True,
     close_confirmed_execution="next_open",
     commission_rate=0.0,
     minimum_commission=0.0,
@@ -1022,7 +1022,10 @@ def run_portfolio_backtest(
         return str(candidate.get("candidate_failure_reason") or "").strip()
 
     def candidate_is_daily_quota_diagnostic(candidate):
-        return candidate_failure_reason(candidate).startswith(
+        reason = candidate_failure_reason(candidate)
+        return reason.startswith(
+            "not_selected_for_trading: factor_rank_not_in_observation_pool"
+        ) or reason.startswith(
             "not_selected_for_trading: daily_top10_quota_or_core_reservation"
         )
 
@@ -1031,7 +1034,10 @@ def run_portfolio_backtest(
         if not candidate:
             return False
         sources = set(str(candidate.get("candidate_source") or "").split("+"))
-        if not sources & {"standard_mainline", "growth_leadership", "quant_right"}:
+        if not sources & {
+            "standard_mainline", "growth_leadership",
+            "quant_right", "factor_quant",
+        }:
             return False
         right_quant_score = pd.to_numeric(
             candidate.get("right_quant_score"), errors="coerce",
@@ -1248,18 +1254,18 @@ def run_portfolio_backtest(
             return returns[0] >= 0.20
         return returns[0] >= 0.20 and all(value >= 0.10 for value in returns[1:])
 
-    def leading_pullback_pilot_starter(candidate, signal):
+    def leading_pullback_pilot_size(candidate, signal):
         if not configured_allow_pullback_pilot:
-            return False
+            return 0.0
         if not candidate or not signal:
-            return False
+            return 0.0
         if signal.get("signal_type") != "uptrend_support_pullback":
-            return False
+            return 0.0
         if not right_market_active() or current_down_streak >= 3:
-            return False
+            return 0.0
         sources = set(str(candidate.get("candidate_source") or "").split("+"))
         if not sources & {"standard_mainline", "growth_leadership", "quant_right"}:
-            return False
+            return 0.0
         leadership = pd.to_numeric(candidate.get("leadership_score"), errors="coerce")
         right_quant = pd.to_numeric(candidate.get("right_quant_score"), errors="coerce")
         trade_basis = pd.to_numeric(candidate.get("trade_basis_score"), errors="coerce")
@@ -1285,22 +1291,40 @@ def run_portfolio_backtest(
             pd.notna(right_quant)
             and float(right_quant) >= 90.0
         )
-        return (
-            has_leadership
-            and pd.notna(trade_basis)
-            and float(trade_basis) >= 8.0
+        required_values_visible = (
+            pd.notna(trade_basis)
             and pd.notna(return_20)
             and pd.notna(return_60)
             and pd.notna(drawdown_60)
             and pd.notna(avg_amount_20)
-            and 0.08 <= float(return_20) <= 0.45
-            and float(return_60) >= 0.30
+        )
+        if not required_values_visible:
+            return 0.0
+        base_ok = (
+            has_leadership
+            and float(trade_basis) >= 7.5
+            and 0.05 <= float(return_20) <= 0.45
+            and float(return_60) >= 0.18
             and float(drawdown_60) >= -0.18
-            and float(avg_amount_20) >= 2_000_000_000.0
+            and float(avg_amount_20) >= 800_000_000.0
             and float(signal.get("known_volume_ratio") or 0.0) >= 1.0
-            and support_distance <= 0.055
+            and support_distance <= 0.065
             and evidence_score >= 0.0
         )
+        if not base_ok:
+            return 0.0
+        strong_ok = (
+            float(trade_basis) >= 8.0
+            and float(return_20) >= 0.08
+            and float(return_60) >= 0.30
+            and float(drawdown_60) >= -0.12
+            and float(avg_amount_20) >= 2_000_000_000.0
+            and support_distance <= 0.055
+        )
+        return 0.20 if strong_ok else 0.15
+
+    def leading_pullback_pilot_starter(candidate, signal):
+        return leading_pullback_pilot_size(candidate, signal) > 0.0
 
     def high_conviction_right_entry_size(candidate, signal):
         if not candidate or not signal:
@@ -1329,13 +1353,13 @@ def run_portfolio_backtest(
             and float(signal.get("known_volume_ratio") or 0.0) >= 1.0
         )
         if decisive_pivot_asymmetric_setup:
-            return 0.60
+            return 0.30
         if (
             strong_profile
             and float(reward_risk) >= 2.5
             and float(risk_pct) <= 7.0
         ):
-            return 0.50
+            return 0.30
         return 0.0
 
     def trade_fee_components(turnover, *, sell=False):
@@ -2666,9 +2690,10 @@ def run_portfolio_backtest(
                     )
                     direct_breakout = signal["order_type"] == "stop"
                     high_conviction_size = high_conviction_right_entry_size(candidate, signal)
+                    pilot_size = leading_pullback_pilot_size(candidate, signal)
                     size = (
                         0.20 if current_down_streak >= 3
-                        else 0.15 if pullback_pilot
+                        else pilot_size if pullback_pilot
                         else high_conviction_size if high_conviction_size > 0
                         else 0.30 if preferred_breakout
                         else 0.20

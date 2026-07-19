@@ -1210,7 +1210,11 @@ def main(argv=None):
     )
     parser.add_argument(
         "--allow-pullback-pilot", action="store_true",
-        help="sensitivity mode: allow leading-group support pullbacks as small first-entry pilots",
+        help="兼容旧参数；支撑拉回小仓首仓现在默认允许",
+    )
+    parser.add_argument(
+        "--disable-pullback-pilot", action="store_true",
+        help="关闭领先族群支撑拉回小仓首仓，用于敏感性对照",
     )
     parser.add_argument(
         "--allow-unsafe-financial", action="store_true",
@@ -1358,7 +1362,7 @@ def main(argv=None):
         signals_effective_next_day=True,
         auto_price_structure=not args.no_auto_price_structure,
         allow_structure_pullback=not args.no_structure_pullback,
-        allow_pullback_pilot=args.allow_pullback_pilot,
+        allow_pullback_pilot=not args.disable_pullback_pilot,
         close_confirmed_execution=args.close_confirmed_execution,
         commission_rate=args.commission_rate,
         minimum_commission=args.minimum_commission,

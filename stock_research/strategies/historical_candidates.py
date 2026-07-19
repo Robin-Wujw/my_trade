@@ -1015,9 +1015,6 @@ def _rank_right_side_candidates(rows: list[dict]) -> list[dict]:
         mainline_boards = frame["mainline_boards"].fillna("").astype(str).str.strip()
     else:
         mainline_boards = pd.Series("", index=frame.index)
-    mainline_bonus = (mainline_fresh & mainline_boards.ne("")).astype(float) * 8.0
-    quant_score = quant_score + mainline_bonus
-
     ranked = []
     for index, item in enumerate(rows):
         row = dict(item)
@@ -1196,26 +1193,17 @@ def _right_quant_selection_rows(rows: list[dict]) -> list[dict]:
             right_quant_setup = "asymmetric_pivot_watch"
         if compact_attack_core:
             right_quant_setup = "compact_attack_core"
-        candidate_source = (
-            "quant_right"
-            if right_quant_setup in {"asymmetric_pivot_watch", "compact_attack_core"}
-            else "growth_leadership"
-        )
         selected.append({
             **ranked,
-            "strategy_part": "3.右侧专业量化多因子候选",
+            "strategy_part": "3.多因子量化选股候选",
             "right_quant_setup": right_quant_setup,
-            "candidate_score": (
-                float(ranked["quality_score"])
-                + min(max(float(ranked["earnings_yoy"]), 0.0), 1.0) * 20
-                + min(float(ranked.get("right_quant_score") or 0.0) * 0.35, 30.0)
-            ),
-            "candidate_source": candidate_source,
+            "candidate_score": float(ranked.get("right_quant_score") or 0.0),
+            "candidate_source": "factor_quant",
             "signal_eligible": True,
             "selection_reason": (
-                "基本面硬条件通过；右侧使用专业量化横截面漏斗入选；"
-                + f"综合排名第{rank}名；综合分{score:.1f}；"
-                + f"低频设置={right_quant_setup}；"
+                "财务硬门槛通过；按时点可见的多因子横截面模型入选；"
+                + f"综合排名第{rank}名；因子分{score:.1f}；"
+                + f"设置={right_quant_setup}；"
                 + f"{ranked['right_quant_reason']}"
             ),
         })
@@ -1589,8 +1577,8 @@ def build_historical_candidate_snapshots(
                 })
         leadership_rows.extend(_right_quant_selection_rows(right_side_pool_rows))
         normal_rows.sort(key=lambda item: (-item["candidate_score"], item["code"]))
-        by_code = {item["code"]: item for item in value_rows}
-        for item in normal_rows + leadership_rows:
+        by_code = {}
+        for item in leadership_rows:
             existing = by_code.get(item["code"])
             if existing:
                 sources = {
@@ -1620,10 +1608,7 @@ def build_historical_candidate_snapshots(
             {date.strftime("%Y-%m-%d"): pool_rows}
         )[date.strftime("%Y-%m-%d")]
         selected_codes = {item["code"] for item in selected}
-        for item in selected:
-            if "value_model" in str(item.get("candidate_source") or "").split("+"):
-                tracked_value_codes.add(item["code"])
-        for item in pool_rows:
+        for item in value_rows + normal_rows + pool_rows:
             normalized = normalize_candidate(item)
             if normalized["code"] in selected_codes:
                 continue
@@ -1632,7 +1617,7 @@ def build_historical_candidate_snapshots(
             diagnostic["selected_for_trading"] = False
             diagnostic["selection_rank"] = None
             diagnostic["candidate_failure_reason"] = (
-                "not_selected_for_trading: daily_top10_quota_or_core_reservation"
+                "not_selected_for_trading: factor_rank_not_in_observation_pool"
             )
             if "value_model" in str(diagnostic.get("candidate_source") or "").split("+"):
                 price_to_value = diagnostic.get("price_to_value")
@@ -1761,28 +1746,27 @@ def save_historical_candidate_snapshots(output_directory, snapshots, *, start_da
         "strict_financial_point_in_time": financial_point_in_time,
         "unsafe_snapshot_count": len(unsafe_snapshot_dates),
         "unsafe_snapshot_sample": unsafe_snapshot_dates[:10],
-        "candidate_pool_formula": "every selection model emits the same candidate interface; no manual candidate injection",
+        "candidate_pool_formula": "所有模型统一输出候选接口；人工观察清单不得注入候选",
         "selection_standard": {
             "value": (
-                "0.80 <= price/value_line <= 1.08, quality >= 70, yoy >= 0.10, "
-                "mktcap >= 100, excluding high-growth small-cap rows with "
-                "yoy >= 1.00, mktcap < 150, and price/value_line > 0.90"
+                "旧价值线模型仅作诊断：0.80 <= price/value_line <= 1.08，"
+                "quality >= 70，yoy >= 0.10，mktcap >= 100；"
+                "高增长小市值安全边际不足时不允许左侧执行"
             ),
-            "normal": "quality >= 70, yoy >= 0.10, mktcap >= 100, and member of a fresh dated mainline snapshot",
-            "leadership": (
-                "quality >= 70, yoy >= 0.10, mktcap >= 100, "
-                "ranked by fresh mainline support, 20/60/120-day momentum, "
-                "MA/price trend, volume, 60-day drawdown risk, volatility, "
-                "and short-vs-mid acceleration; requires right_quant_score >= 60, "
-                "trade_basis_score >= 6, return_20d >= 0.08, drawdown_60 >= -0.40, "
-                "and right_quant_rank <= 120"
+            "normal": "旧主线模型仅作诊断：不再享有候选保留名额，也不直接决定入选",
+            "factor_quant": (
+                "最终执行候选只来自时点可见的多因子横截面排序；"
+                "硬门槛为 quality >= 70、yoy >= 0.10、mktcap >= 100；"
+                "因子包括质量、成长、流动性、20/60/120日动量、相对强度、"
+                "趋势效率、波动回撤、短期过热控制、结构位置、量价确认和背离环境；"
+                "主线标签只作为诊断字段，不给加分和保留名额"
             ),
             "ranking": (
-                "top 10 with at least 5 value/mainline core slots ranked without leadership; "
-                "remaining slots use the combined score including leadership or right_quant bonus"
+                "按 factor_quant 的 candidate_score 统一排序；"
+                "不设置 value/mainline 核心保留名额；候选池上限只是观察宽度，不是交易数量"
             ),
-            "execution": "all signal_eligible model candidates use the same structure, position and exit engine",
-            "manual": "watch lists and trade plans cannot inject candidates",
+            "execution": "所有 signal_eligible 候选进入同一套结构、仓位和退出引擎",
+            "manual": "观察清单和交易计划不能直接注入候选",
             "mainline_max_age_days": MAX_MAINLINE_AGE_DAYS,
         },
         "point_in_time_note": (

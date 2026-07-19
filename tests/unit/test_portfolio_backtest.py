@@ -282,7 +282,7 @@ def test_profit_parts_adapt_to_actual_board_lots_instead_of_forcing_small_exit()
     assert _effective_profit_tranches("sz.300308", 1000, 3) == 3
 
 
-def test_unified_candidate_pool_applies_gates_caps_growth_and_keeps_top_ten():
+def test_unified_candidate_pool_applies_gates_caps_growth_and_keeps_factor_rank():
     rows = []
     for index in range(25):
         rows.append({
@@ -301,8 +301,8 @@ def test_unified_candidate_pool_applies_gates_caps_growth_and_keeps_top_ten():
 
     selected = normalize_candidate_snapshots({"2026-07-10": rows})["2026-07-10"]
 
-    assert len(selected) == 10
-    assert [item["selection_rank"] for item in selected] == list(range(1, 11))
+    assert len(selected) == 25
+    assert [item["selection_rank"] for item in selected] == list(range(1, 26))
     assert not {"LOWQ", "LOWG", "SMALL"} & {item["code"] for item in selected}
     # Growth above 100% is capped: adjacent rows differ by quality, not giant yoy.
     assert selected[0]["candidate_score"] - selected[1]["candidate_score"] == pytest.approx(1)
@@ -363,31 +363,31 @@ def test_unified_candidate_score_includes_bounded_leadership():
     assert selected[0]["candidate_score"] == pytest.approx(123)
 
 
-def test_unified_pool_reserves_five_core_candidates_from_leadership_crowding():
+def test_unified_pool_has_no_value_or_mainline_reserved_slots():
     core = [{
-        "code": f"CORE{index}",
+        "code": f"CORE{index:02d}",
         "quality_score": 70,
         "earnings_yoy": 0.10,
         "mktcap": 100,
         "price_to_value": 1.0,
         "candidate_source": "value_model",
-    } for index in range(5)]
+    } for index in range(12)]
     leaders = [{
-        "code": f"LEADER{index}",
+        "code": f"LEADER{index:02d}",
         "quality_score": 100,
         "earnings_yoy": 1.0,
         "mktcap": 1000,
         "trade_basis_score": 12,
         "leadership_score": 30,
         "candidate_source": "growth_leadership",
-    } for index in range(10)]
+    } for index in range(30)]
 
     selected = normalize_candidate_snapshots({"2026-07-10": core + leaders})["2026-07-10"]
 
-    assert len(selected) == 10
-    assert {item["code"] for item in selected if item["code"].startswith("CORE")} == {
-        f"CORE{index}" for index in range(5)
-    }
+    assert len(selected) == 42
+    assert [item["code"] for item in selected[:30]] == [
+        f"LEADER{index:02d}" for index in range(30)
+    ]
 
 
 def test_right_quant_ranking_prefers_visible_strength_with_lower_risk():
@@ -508,10 +508,10 @@ def test_right_quant_selection_keeps_the_fundamental_gate_unchanged():
     selected = _right_quant_selection_rows(fundamental_pool)
 
     assert [item["code"] for item in selected] == ["PASS"]
-    assert selected[0]["candidate_source"] == "growth_leadership"
+    assert selected[0]["candidate_source"] == "factor_quant"
     assert selected[0]["signal_eligible"] is True
     assert selected[0]["right_quant_setup"] in {"标准量化", "强趋势", "高盈亏比"}
-    assert "基本面硬条件通过" in selected[0]["selection_reason"]
+    assert "财务硬门槛通过" in selected[0]["selection_reason"]
 
 
 def test_right_quant_selection_rejects_missing_liquidity_data():
@@ -599,8 +599,8 @@ def test_saved_candidate_snapshots_keep_right_quant_columns(tmp_path):
     assert list(frame.columns[:len(CANDIDATE_SNAPSHOT_COLUMNS)]) == CANDIDATE_SNAPSHOT_COLUMNS
     assert "right_quant_score" in frame.columns
     assert "drawdown_60" in frame.columns
-    assert "yoy >= 1.00" in manifest["selection_standard"]["value"]
-    assert "price/value_line > 0.90" in manifest["selection_standard"]["value"]
+    assert "旧价值线模型仅作诊断" in manifest["selection_standard"]["value"]
+    assert "多因子横截面排序" in manifest["selection_standard"]["factor_quant"]
 
 
 def test_left_value_safety_rejects_zhongxinbo_style_thin_margin():
@@ -1510,7 +1510,7 @@ def test_unified_candidate_interface_honors_signal_eligible():
     assert result["final_positions"] == []
 
 
-def test_daily_top10_quota_diagnostic_allows_exceptional_growth_right_profile():
+def test_factor_pool_diagnostic_allows_exceptional_growth_right_profile():
     bars = breakout_bars()
     date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
 
@@ -1524,7 +1524,7 @@ def test_daily_top10_quota_diagnostic_allows_exceptional_growth_right_profile():
             "signal_eligible": False,
             "allow_right": True,
             "candidate_failure_reason": (
-                "not_selected_for_trading: daily_top10_quota_or_core_reservation"
+                "not_selected_for_trading: factor_rank_not_in_observation_pool"
             ),
             "quality_score": 90,
             "earnings_yoy": 0.30,
@@ -1550,7 +1550,7 @@ def test_daily_top10_quota_diagnostic_allows_exceptional_growth_right_profile():
             "signal_eligible": False,
             "allow_right": True,
             "candidate_failure_reason": (
-                "not_selected_for_trading: daily_top10_quota_or_core_reservation"
+                "not_selected_for_trading: factor_rank_not_in_observation_pool"
             ),
             "quality_score": 90,
             "earnings_yoy": 0.30,
@@ -1627,7 +1627,7 @@ def test_entry_evidence_score_is_explanation_not_entry_gate():
     assert result["entry_evidence_score_role"] == "legacy_explanation_only"
 
 
-def test_high_reward_risk_right_entry_can_use_half_position():
+def test_high_reward_risk_right_entry_uses_baida_thirty_pct_first_position():
     bars = breakout_bars()
     date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
 
@@ -1652,7 +1652,7 @@ def test_high_reward_risk_right_entry_can_use_half_position():
         initial_capital=1_000_000,
     )
 
-    assert result["events"][0]["requested_position_pct"] == pytest.approx(50.0)
+    assert result["events"][0]["requested_position_pct"] == pytest.approx(30.0)
 
 
 def test_semantic_entry_gate_rejects_high_score_with_wide_stop():
@@ -2097,7 +2097,7 @@ def test_auto_big_wave_support_can_still_trigger_pullback():
     assert signal["structure_ratio"] == pytest.approx(0.50)
 
 
-def test_leading_pullback_pilot_is_explicit_sensitivity_mode():
+def test_leading_pullback_pilot_is_enabled_by_default_and_can_be_disabled():
     dates = pd.bdate_range("2026-01-01", periods=80)
     closes = list(pd.Series(range(78)).map(lambda value: 7.0 + value * 3.0 / 77)) + [10.2, 10.1]
     bars = pd.DataFrame({
@@ -2135,17 +2135,17 @@ def test_leading_pullback_pilot_is_explicit_sensitivity_mode():
         requested_start=date, end_date=date, trade_plans=plans,
         min_entry_evidence_score=8,
     )
-    pilot_result = run_portfolio_backtest(
+    disabled_result = run_portfolio_backtest(
         {"A": bars}, snapshots, phases,
         requested_start=date, end_date=date, trade_plans=plans,
-        min_entry_evidence_score=8, allow_pullback_pilot=True,
+        min_entry_evidence_score=8, allow_pullback_pilot=False,
     )
 
-    assert default_result["events"] == []
-    assert default_result["allow_pullback_pilot"] is False
-    assert pilot_result["allow_pullback_pilot"] is True
-    assert pilot_result["events"][0]["signal_type"] == "uptrend_support_pullback"
-    assert pilot_result["events"][0]["requested_position_pct"] == pytest.approx(15)
+    assert default_result["allow_pullback_pilot"] is True
+    assert default_result["events"][0]["signal_type"] == "uptrend_support_pullback"
+    assert default_result["events"][0]["requested_position_pct"] == pytest.approx(20)
+    assert disabled_result["events"] == []
+    assert disabled_result["allow_pullback_pilot"] is False
 
 
 def test_leading_pullback_pilot_still_blocks_ordinary_pullback_profiles():
@@ -2192,7 +2192,7 @@ def test_leading_pullback_pilot_still_blocks_ordinary_pullback_profiles():
 
 
 def test_symbol_cap_is_independent_from_price_structure_ratios():
-    assert _capped_entry_size(0.60, 0.20) == pytest.approx(0.025)
+    assert _capped_entry_size(0.60, 0.20) == pytest.approx(0.10)
     assert _capped_entry_size(0.30, 0.15) == pytest.approx(0.15)
 
 

@@ -45,16 +45,17 @@ def build_parser():
     parser.add_argument("--initial-capital", type=float, default=1_000_000.0)
     parser.add_argument("--max-positions", type=int, default=3)
     parser.add_argument("--max-total-held-symbols", type=int, default=5)
-    parser.add_argument("--profit-tranches", type=int, choices=(2, 3, 4, 5), default=2)
+    parser.add_argument("--profit-tranches", type=int, choices=(2, 3, 4, 5), default=5)
     parser.add_argument(
         "--min-entry-evidence-score",
         type=float,
         default=0.0,
         help="Deprecated explanation-only score floor; semantic high R/R gate controls entries.",
     )
-    parser.add_argument("--max-symbol-exposure", type=float, default=1.0)
+    parser.add_argument("--max-symbol-exposure", type=float, default=0.70)
     parser.add_argument("--left-grid-unit", type=float, default=0.0)
     parser.add_argument("--left-grid-max-exposure", type=float, default=0.0)
+    parser.add_argument("--disable-pullback-pilot", action="store_true")
     parser.add_argument("--allow-unsafe-financial", action="store_true")
     parser.add_argument("--commission-rate", type=float, default=DEFAULT_MINIQMT_BACKTEST_PROFILE.commission_rate)
     parser.add_argument("--minimum-commission", type=float, default=DEFAULT_MINIQMT_BACKTEST_PROFILE.minimum_commission)
@@ -194,6 +195,7 @@ def main(argv=None):
         profit_tranches=args.profit_tranches,
         left_grid_unit=args.left_grid_unit,
         left_grid_max_exposure=args.left_grid_max_exposure,
+        allow_pullback_pilot=not args.disable_pullback_pilot,
         initial_capital=args.initial_capital,
     )
     output = Path(args.output_directory)

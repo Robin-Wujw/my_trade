@@ -21,7 +21,7 @@ _REASON_REPLACEMENTS = {
 _BLOCK_REASON_REPLACEMENTS = {
     "entry_evidence_below_min": "买点证据分低于执行门槛",
     "order_not_filled": "价格未触发成交",
-    "support_pullback_not_first_entry": "支撑拉回仅允许已有右仓加仓，不能作为该轮首仓/左转右触发",
+    "support_pullback_not_first_entry": "支撑拉回首仓条件不足，只能等待已有右仓加仓或更强证据",
 }
 
 _SIGNAL_TYPE_REPLACEMENTS = {

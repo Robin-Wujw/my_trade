@@ -12,13 +12,17 @@
 - [Tushare 数据清洗与差异复盘](tushare-data-cleaning-and-divergence-review-2026-07-16.md)：外部数据差异的处理记录。
 - [VectorBT 交叉验证](vectorbt-cross-validation.md)：组合回放和向量化验证边界。
 
+## 本机与运维
+
+- [本机环境与常见坑处理手册](knowledge/local-environment-runbook.md)：PowerShell、`rg` 权限、AkShare SSL/限流、MiniQMT 只读边界、`var/` 产物和提交前检查。
+- [每日流水线运维](knowledge/operations-runbook.md)：完整运行、增量续跑、结果验收、故障处理和正式推送门禁。
+- [数据源连接与容错改进](knowledge/data-source-resilience.md)：AkShare/BaoStock 的节流、退避、重连和异常处理。
+
 ## 知识库
 
 - [项目架构](knowledge/project-architecture.md)：目录、模块职责、七步调用链和运行数据边界。
 - [DuckDB 实际结构](knowledge/database-schema.md)：当前迁移真正创建的表和使用限制。
 - [观察日与时点规则](knowledge/point-in-time-data.md)：行情截止、观察日交易资格、财报和板块时点边界。
-- [每日流水线运维](knowledge/operations-runbook.md)：完整运行、增量续跑、结果验收、故障处理和正式推送门禁。
-- [数据源连接与容错改进](knowledge/data-source-resilience.md)：AkShare/BaoStock 的节流、退避、重连和异常处理。
 - [结果输出阅读指南](knowledge/output-guide.md)：Formula33、每日选股和板块结果如何阅读。
 - [多 agent 白大协作协议](knowledge/multi-agent-baida-protocol.md)：主 agent、白大 agent、量化 agent 的职责和检查清单。
 - [均线均量扣抵思想](knowledge/ma-volume-deduction.md)：扣抵方向、支撑压力、周期分工和量化映射。

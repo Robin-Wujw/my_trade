@@ -4,8 +4,9 @@ from __future__ import annotations
 import math
 
 
-MAX_DAILY_CANDIDATES = 10
-MIN_CORE_DAILY_CANDIDATES = 5
+MAX_DAILY_CANDIDATES = 60
+MIN_CORE_DAILY_CANDIDATES = 0
+FACTOR_QUANT_SOURCES = {"factor_quant", "quant_right"}
 LEFT_VALUE_EXPLOSIVE_GROWTH_YOY = 1.0
 LEFT_VALUE_SMALL_CAP_BUFFER = 150.0
 LEFT_VALUE_DEEP_DISCOUNT_RATIO = 0.90
@@ -105,7 +106,10 @@ def normalize_candidate(candidate):
     if sources:
         row["allow_left"] = "value_model" in sources
         row["allow_right"] = bool(
-            sources & {"standard_mainline", "growth_leadership", "quant_right"}
+            sources & {
+                "standard_mainline", "growth_leadership",
+                "quant_right", "factor_quant",
+            }
         )
     else:
         row["allow_left"] = bool(row.get("allow_left", False))
@@ -119,7 +123,7 @@ def normalize_candidate(candidate):
         for reason in left_permission_reasons:
             _append_failure_reason(row, reason)
     if quality is not None and growth is not None:
-        mainline_bonus = 15.0 if "standard_mainline" in source or bool(row.get("is_mainline")) else 0.0
+        mainline_bonus = 0.0
         valuation_bonus = 0.0
         price_to_value = _number(row.get("price_to_value"))
         if price_to_value is not None and 0.80 <= price_to_value <= 1.08:
@@ -142,11 +146,11 @@ def normalize_candidate(candidate):
             min(max(leadership_score, 0.0), 30.0),
             right_quant_bonus,
         )
-        if "quant_right" in sources and right_quant_score is not None:
+        if sources & FACTOR_QUANT_SOURCES and right_quant_score is not None:
             quant_score = max(float(right_quant_score), 0.0)
-            setup_bonus = 10.0 if _clean_text(row.get("right_quant_setup")) == "balanced_pullback" else 0.0
-            row["core_candidate_score"] = round(95.0 + quant_score + setup_bonus, 6)
-            original_score = max(original_score, 95.0 + quant_score + setup_bonus)
+            setup_bonus = 5.0 if _clean_text(row.get("right_quant_setup")) == "高盈亏比" else 0.0
+            row["core_candidate_score"] = round(quant_score + setup_bonus, 6)
+            original_score = max(original_score, quant_score + setup_bonus)
     row["candidate_score"] = round(original_score, 6)
     row["value_falsification_reason"] = _clean_text(
         row.get("value_falsification_reason")
@@ -173,7 +177,10 @@ def normalize_candidate(candidate):
         eligible = eligible.strip().lower() in {"1", "true", "yes", "y"}
     eligibility_reasons = []
     requires_full_fundamentals = bool(
-        sources & {"standard_mainline", "growth_leadership", "quant_right"}
+        sources & {
+            "standard_mainline", "growth_leadership",
+            "quant_right", "factor_quant",
+        }
     )
     if requires_full_fundamentals and quality is None:
         eligibility_reasons.append("quality_score_missing")
@@ -239,19 +246,8 @@ def normalize_candidate_snapshots(snapshots, *, include_diagnostics=False):
             if item["signal_eligible"] and item["selected_for_trading"]
         ]
         eligible.sort(key=lambda item: (-item["candidate_score"], item["code"]))
-        core = [
-            item for item in eligible
-            if any(
-                source in str(item.get("candidate_source") or "").split("+")
-                for source in ("value_model", "standard_mainline")
-            )
-        ]
-        core.sort(key=lambda item: (
-            -float(item.get("core_candidate_score", item["candidate_score"])),
-            item["code"],
-        ))
-        selected = core[:MIN_CORE_DAILY_CANDIDATES]
-        selected_codes = {item["code"] for item in selected}
+        selected = []
+        selected_codes = set()
         for item in eligible:
             if len(selected) >= MAX_DAILY_CANDIDATES:
                 break
