@@ -1,5 +1,0 @@
-=== 所有候选池文件的candidate_source汇总 ===
-
-standard_mainline
-value_model
-value_model+standard_mainline
