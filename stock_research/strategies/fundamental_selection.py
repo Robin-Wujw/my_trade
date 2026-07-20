@@ -3,6 +3,33 @@
 from stock_research.indicators.factors import score_direct
 
 
+# Value-line eligibility is intentionally allowlist-only.  These labels cover
+# accounting-heavy manufacturers where book value and recurring earnings are
+# meaningful inputs; an unknown or unmatched industry must not default to VALUE.
+VALUE_INDUSTRY_RULE_VERSION = "value-industry-allowlist-v1"
+VALUE_INDUSTRY_ALLOWLIST_EXACT = {
+    "汽车电子电气系统",
+    "通信网络设备及器件",
+    "半导体",
+    "半导体材料",
+    "半导体设备",
+    "分立器件",
+}
+
+
+def value_industry_allowlist_match(industry) -> str:
+    text = str(industry or "").strip()
+    if not text or text.lower() in {"nan", "none", "unknown"}:
+        return ""
+    if text in VALUE_INDUSTRY_ALLOWLIST_EXACT:
+        return text
+    return ""
+
+
+def is_value_industry_allowed(industry) -> bool:
+    return bool(value_industry_allowlist_match(industry))
+
+
 def quality_detail(eps, yoy, quality):
     eps_part = score_direct(eps, 0.10, 1.50) * 0.35
     yoy_part = score_direct(min(max(yoy, -0.5), 1.0), -0.10, 0.50) * 0.35
@@ -25,17 +52,15 @@ def quality_detail(eps, yoy, quality):
 
 def value_method_reason(industry, mktcap, eps, yoy):
     industry = str(industry or "行业待核验")
-    manufacturing = [
-        "计算机、通信", "电子设备", "专用设备", "通用设备",
-        "汽车制造", "电气机械",
-    ]
-    if any(key in industry for key in manufacturing):
-        economics = "属于制造业，净资产和持续扣非盈利能够反映经营价值"
-    else:
-        economics = "不属于金融、强周期资源或纯轻资产预期行业，可先用净资产和扣非盈利观察价值"
+    matched = value_industry_allowlist_match(industry)
+    economics = (
+        f"命中基本价值线行业白名单（{matched}），净资产和持续扣非盈利可用于初步估值"
+        if matched else
+        "未命中基本价值线行业白名单，不得使用基本价值线自动入选或建立左仓"
+    )
     return (
         f"{industry}；{economics}；总市值{mktcap:.1f}亿元（不低于100亿元）、扣非EPS{eps:.2f}元、"
-        f"扣非同比{yoy:.1%}均通过基本价值线初筛。仍需人工确认主营稳定性和公式适用性"
+        f"扣非同比{yoy:.1%}均通过财务初筛。仍需人工确认主营稳定性和公式适用性"
     )
 
 

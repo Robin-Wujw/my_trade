@@ -1,3 +1,5 @@
+import json
+
 import pandas as pd
 import pytest
 
@@ -5,9 +7,11 @@ from apps import portfolio_backtest as portfolio_backtest_app
 from apps.portfolio_backtest import (
     candidate_manifest_empty_dates,
     candidate_manifest_financial_status,
+    candidate_manifest_industry_status,
     default_data_end_date,
     ensure_financial_cache_for_backtest,
     ensure_miniqmt_kline_cache_for_backtest,
+    ensure_miniqmt_kline_cache_for_candidate_codes,
     financial_cache_file_count,
     first_candidate_dates,
     formula33_refresh_window_args,
@@ -18,6 +22,7 @@ from apps.portfolio_backtest import (
     summarize_kline_cache_coverage,
     validate_backtest_input_coverage,
     validate_candidate_manifest_financial_point_in_time,
+    validate_candidate_manifest_industry_point_in_time,
     validate_price_frame_coverage,
 )
 from stock_research.indicators.price_structure import (
@@ -29,7 +34,9 @@ from stock_research.indicators.price_structure import (
 from stock_research.strategies.historical_candidates import (
     CANDIDATE_SNAPSHOT_COLUMNS,
     _leadership_snapshot,
+    _merge_candidate_model_rows,
     _passes_fundamental_gate,
+    _potential_candidate_codes,
     _rank_right_side_candidates,
     _right_quant_selection_rows,
     _financial_point_in_time_status,
@@ -37,7 +44,9 @@ from stock_research.strategies.historical_candidates import (
     _trade_basis_snapshot,
     _validate_required_financial_periods,
     report_period_for,
+    SNAPSHOT_VERSION,
 )
+from stock_research.strategies.fundamental_selection import VALUE_INDUSTRY_RULE_VERSION
 from stock_research.indicators.technical_entries import (
     _valid_volume_price_nodes,
     apply_entry_confluence,
@@ -66,6 +75,48 @@ from stock_research.strategies.portfolio_backtest import (
     build_formula_phase_history,
     run_portfolio_backtest,
 )
+
+
+_run_portfolio_backtest = run_portfolio_backtest
+_normalize_candidate = normalize_candidate
+_normalize_candidate_snapshots = normalize_candidate_snapshots
+
+
+def _audit_synthetic_value_candidate(candidate):
+    row = dict(candidate)
+    sources = set(str(row.get("candidate_source") or "").split("+"))
+    if "value_model" in sources:
+        row.update({
+            "industry": "汽车电子电气系统",
+            "value_industry_allowed": True,
+            "value_industry_allowlist_match": "汽车电子电气系统",
+            "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
+        })
+    return row
+
+
+def normalize_candidate(candidate):
+    return _normalize_candidate(_audit_synthetic_value_candidate(candidate))
+
+
+def normalize_candidate_snapshots(snapshots, **kwargs):
+    return _normalize_candidate_snapshots({
+        date: [_audit_synthetic_value_candidate(row) for row in rows]
+        for date, rows in snapshots.items()
+    }, **kwargs)
+
+
+def run_portfolio_backtest(price_frames, candidate_snapshots, *args, **kwargs):
+    """Give synthetic value candidates the same explicit audit as production rows."""
+    audited_snapshots = {}
+    for date, rows in candidate_snapshots.items():
+        audited_rows = []
+        for candidate in rows:
+            audited_rows.append(_audit_synthetic_value_candidate(candidate))
+        audited_snapshots[date] = audited_rows
+    return _run_portfolio_backtest(
+        price_frames, audited_snapshots, *args, **kwargs,
+    )
 
 
 def test_affordable_notional_reserves_commission_and_slippage():
@@ -578,6 +629,21 @@ def test_right_quant_score_changes_final_growth_candidate_ranking():
 
 
 def test_saved_candidate_snapshots_keep_right_quant_columns(tmp_path):
+    industry_path = tmp_path / "industry.csv"
+    universe_path = tmp_path / "universe.csv"
+    pd.DataFrame([
+        {"code": "sz.000001", "industry": "汽车电子电气系统"},
+    ]).to_csv(industry_path, index=False)
+    industry_path.with_suffix(".csv.meta.json").write_text(json.dumps({
+        "kind": "industry_map",
+        "point_in_time_status": "safe",
+        "as_of_date": "2026-07-09",
+        "data_source": "test/provider",
+    }), encoding="utf-8")
+    pd.DataFrame([
+        {"code": "sz.000001"},
+        {"code": "sz.000002"},
+    ]).to_csv(universe_path, index=False)
     manifest = save_historical_candidate_snapshots(
         tmp_path,
         {"2026-07-10": [{
@@ -592,6 +658,8 @@ def test_saved_candidate_snapshots_keep_right_quant_columns(tmp_path):
         }]},
         start_date="2026-07-10",
         end_date="2026-07-10",
+        industry_map_path=industry_path,
+        universe_path=universe_path,
     )
 
     frame = pd.read_csv(tmp_path / "candidates_2026-07-10.csv")
@@ -599,8 +667,70 @@ def test_saved_candidate_snapshots_keep_right_quant_columns(tmp_path):
     assert list(frame.columns[:len(CANDIDATE_SNAPSHOT_COLUMNS)]) == CANDIDATE_SNAPSHOT_COLUMNS
     assert "right_quant_score" in frame.columns
     assert "drawdown_60" in frame.columns
-    assert "旧价值线模型仅作诊断" in manifest["selection_standard"]["value"]
+    assert "基本价值线仅允许行业白名单" in manifest["selection_standard"]["value"]
     assert "多因子横截面排序" in manifest["selection_standard"]["factor_quant"]
+    assert manifest["industry_source_path"] == str(industry_path.resolve())
+    assert len(manifest["industry_source_sha256"]) == 64
+    assert manifest["industry_mapping_count"] == 1
+    assert manifest["industry_universe_count"] == 2
+    assert manifest["industry_coverage_ratio"] == pytest.approx(0.5)
+    assert manifest["industry_as_of_date"] == "2026-07-09"
+    assert manifest["industry_data_source"] == "test/provider"
+    assert manifest["industry_point_in_time_status"] == "safe"
+    assert manifest["industry_point_in_time"] is False
+    assert manifest["value_industry_rule_version"] == VALUE_INDUSTRY_RULE_VERSION
+
+
+def test_feature_prefilter_keeps_any_code_that_passed_in_one_visible_period():
+    financial = {
+        "2024-03-31": {
+            "EVER": {"quality_score": 75, "yoy": 0.20},
+            "NEVER_QUALITY": {"quality_score": 69.9, "yoy": 0.50},
+        },
+        "2024-06-30": {
+            "EVER": {"quality_score": 60, "yoy": -0.10},
+            "NOW": {"quality_score": 90, "yoy": 0.10},
+            "NEVER_GROWTH": {"quality_score": 95, "yoy": 0.099},
+        },
+    }
+
+    assert _potential_candidate_codes(financial) == {"EVER", "NOW"}
+
+
+def test_value_and_factor_rows_merge_into_independent_left_and_right_permissions():
+    shared = {
+        "code": "sz.300502",
+        "industry": "通信网络设备及器件",
+        "value_industry_allowed": True,
+        "value_industry_allowlist_match": "通信网络设备及器件",
+        "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+        "mktcap": 200,
+        "price_to_value": 1.0,
+        "mainline_boards": "",
+    }
+    factor = {
+        **shared,
+        "candidate_source": "factor_quant",
+        "candidate_score": 100,
+        "strategy_part": "factor",
+        "selection_reason": "right",
+    }
+    value = {
+        **shared,
+        "candidate_source": "value_model",
+        "candidate_score": 80,
+        "strategy_part": "value",
+        "selection_reason": "left",
+    }
+
+    merged = _merge_candidate_model_rows([factor], [value])
+    normalized = _normalize_candidate(merged[0])
+
+    assert normalized["candidate_source"] == "factor_quant+value_model"
+    assert normalized["allow_left"] is True
+    assert normalized["allow_right"] is True
 
 
 def test_left_value_safety_rejects_zhongxinbo_style_thin_margin():
@@ -1299,6 +1429,396 @@ def test_left_to_right_stops_grid_and_uses_right_side_batches(monkeypatch):
     )
 
 
+def test_left_to_right_allows_support_pullback_signal(monkeypatch):
+    dates = pd.bdate_range("2026-01-01", periods=83)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 81 + [112.0, 113.0],
+        "high": [100.5] * 81 + [113.0, 114.0],
+        "low": [99.5] * 83,
+        "close": [100.0] * 81 + [112.0, 113.0],
+        "volume": [1000.0] * 83,
+    })
+    first = dates[80].strftime("%Y-%m-%d")
+    turn = dates[81].strftime("%Y-%m-%d")
+    last = dates[82].strftime("%Y-%m-%d")
+
+    def fake_signal(data, index, plan=None, **kwargs):
+        if data.iloc[index]["date"].strftime("%Y-%m-%d") != turn:
+            return None
+        return {
+            "rank": 10,
+            "stop": 108.0,
+            "trigger": 112.0,
+            "target_price": 126.0,
+            "order_type": "close",
+            "reason": "test support pullback left-to-right",
+            "known_volume_ratio": 1.0,
+            "signal_type": "uptrend_support_pullback",
+            "entry_evidence_score": 10,
+        }
+
+    monkeypatch.setattr(
+        "stock_research.strategies.portfolio_backtest._right_signal",
+        fake_signal,
+    )
+
+    result = run_portfolio_backtest(
+        {"A": bars},
+        {
+            first: [{
+                "code": "A", "candidate_source": "value_model",
+                "value_line": 100.0, "industry": "test", "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
+                "trade_basis_score": 8, "leadership_score": 28,
+            }],
+            turn: [{
+                "code": "A", "candidate_source": "value_model",
+                "value_line": 100.0, "industry": "test", "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
+                "trade_basis_score": 8, "leadership_score": 28,
+            }],
+            last: [{
+                "code": "A", "candidate_source": "value_model",
+                "value_line": 100.0, "industry": "test", "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
+                "trade_basis_score": 8, "leadership_score": 28,
+            }],
+        },
+        {}, requested_start=first, end_date=last,
+        max_left_positions=1,
+    )
+
+    actions = [event["action"] for event in result["events"]]
+    assert "左转右接管左仓" in actions
+    assert not [
+        item for item in result["entry_blocks"]
+        if item["code"] == "A" and item["reason"] == "support_pullback_not_first_entry"
+    ]
+    assert result["final_positions"][0]["position_mode"] == "right"
+
+
+def test_left_to_right_is_not_blocked_as_a_new_symbol(monkeypatch):
+    dates = pd.bdate_range("2026-01-01", periods=84)
+    a_bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 82 + [112.0, 113.0],
+        "high": [100.5] * 82 + [113.0, 114.0],
+        "low": [99.5] * 84,
+        "close": [100.0] * 82 + [112.0, 113.0],
+        "volume": [1000.0] * 84,
+    })
+    b_bars = pd.DataFrame({
+        "date": dates,
+        "open": [50.0] * 84,
+        "high": [50.5] * 84,
+        "low": [49.5] * 84,
+        "close": [50.0] * 84,
+        "volume": [1000.0] * 84,
+    })
+    first = dates[80].strftime("%Y-%m-%d")
+    b_entry = dates[81].strftime("%Y-%m-%d")
+    turn = dates[82].strftime("%Y-%m-%d")
+    last = dates[83].strftime("%Y-%m-%d")
+
+    def fake_signal(data, index, plan=None, **kwargs):
+        day = data.iloc[index]["date"].strftime("%Y-%m-%d")
+        close = float(data.iloc[index]["close"])
+        if day == b_entry and close == 50.0:
+            return {
+                "rank": 2, "stop": 48.0, "trigger": 50.0,
+                "target_price": 56.0, "order_type": "close",
+                "reason": "test existing right position", "known_volume_ratio": 1.0,
+                "signal_type": "uptrend_50_reclaim", "entry_evidence_score": 8,
+            }
+        if day == turn and close == 112.0:
+            return {
+                "rank": 2, "stop": 106.0, "trigger": 112.0,
+                "target_price": 130.0, "order_type": "close",
+                "reason": "test left-to-right", "known_volume_ratio": 1.0,
+                "signal_type": "uptrend_50_reclaim", "entry_evidence_score": 8,
+            }
+        return None
+
+    monkeypatch.setattr(
+        "stock_research.strategies.portfolio_backtest._right_signal",
+        fake_signal,
+    )
+    rows = [
+        {
+            "code": "A", "candidate_source": "value_model",
+            "value_line": 100.0, "industry": "test-A", "mktcap": 150,
+            "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
+            "trade_basis_score": 8, "leadership_score": 18,
+        },
+        {
+            "code": "B", "candidate_source": "factor_quant",
+            "industry": "test-B", "mktcap": 150, "quality_score": 90,
+            "earnings_yoy": 0.30, "trade_basis_score": 8,
+            "right_quant_score": 90,
+        },
+    ]
+    candidates = {
+        first: rows,
+        b_entry: rows,
+        turn: rows,
+        last: rows,
+    }
+
+    result = run_portfolio_backtest(
+        {"A": a_bars, "B": b_bars}, candidates, {},
+        requested_start=first, end_date=last,
+    )
+
+    assert "左转右接管左仓" in [event["action"] for event in result["events"]]
+    assert not [
+        item for item in result["entry_blocks"]
+        if item["code"] == "A" and item["reason"] == "new_symbol_unlock_not_met"
+    ]
+    a_position = next(item for item in result["final_positions"] if item["code"] == "A")
+    assert a_position["position_mode"] == "right"
+
+
+def test_left_to_right_promotes_existing_lots_when_add_on_is_below_board_lot(monkeypatch):
+    dates = pd.bdate_range("2026-01-01", periods=83)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 81 + [1000.0, 1001.0],
+        "high": [100.5] * 81 + [1001.0, 1002.0],
+        "low": [99.5] * 81 + [999.0, 1000.0],
+        "close": [100.0] * 81 + [1000.0, 1001.0],
+        "volume": [1000.0] * 83,
+    })
+    first = dates[80].strftime("%Y-%m-%d")
+    turn = dates[81].strftime("%Y-%m-%d")
+    last = dates[82].strftime("%Y-%m-%d")
+
+    def fake_signal(data, index, plan=None, **kwargs):
+        if data.iloc[index]["date"].strftime("%Y-%m-%d") != turn:
+            return None
+        return {
+            "rank": 2, "stop": 900.0, "trigger": 1000.0,
+            "target_price": 1300.0, "order_type": "close",
+            "reason": "test zero-add-on left-to-right", "known_volume_ratio": 1.0,
+            "signal_type": "uptrend_50_reclaim", "entry_evidence_score": 8,
+        }
+
+    monkeypatch.setattr(
+        "stock_research.strategies.portfolio_backtest._right_signal",
+        fake_signal,
+    )
+    rows = [{
+        "code": "A", "candidate_source": "value_model",
+        "value_line": 100.0, "industry": "test", "mktcap": 150,
+        "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
+        "trade_basis_score": 8, "leadership_score": 18,
+    }]
+
+    result = run_portfolio_backtest(
+        {"A": bars}, {first: rows, turn: rows, last: rows}, {},
+        requested_start=first, end_date=last,
+    )
+
+    switch = next(
+        event for event in result["events"]
+        if event["action"] == "左转右接管左仓"
+    )
+    assert switch["execution_quantity"] == 0
+    assert "未新增右侧仓" in switch["reason"]
+    assert not [
+        event for event in result["events"]
+        if event["action"] == "右侧买入" and event["code"] == "A"
+    ]
+    position = result["final_positions"][0]
+    assert position["position_mode"] == "right"
+    assert position["left_batches"] == []
+    assert all(item.get("origin_account") == "left" for item in position["batches"])
+    assert any(
+        item["reason"] == "left_to_right_add_on_cash_or_board_lot_limit"
+        for item in result["entry_blocks"]
+    )
+
+
+def test_left_origin_batches_demote_back_to_left_on_right_stop(monkeypatch):
+    dates = pd.bdate_range("2026-01-01", periods=84)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 81 + [112.0, 109.0, 103.0],
+        "high": [100.5] * 81 + [113.0, 110.0, 104.0],
+        "low": [99.5] * 81 + [111.0, 108.0, 102.0],
+        "close": [100.0] * 81 + [112.0, 109.0, 103.0],
+        "volume": [1000.0] * 84,
+    })
+    first = dates[80].strftime("%Y-%m-%d")
+    turn = dates[81].strftime("%Y-%m-%d")
+    stop_day = dates[82].strftime("%Y-%m-%d")
+    last = dates[83].strftime("%Y-%m-%d")
+
+    def fake_signal(data, index, plan=None, **kwargs):
+        if data.iloc[index]["date"].strftime("%Y-%m-%d") != turn:
+            return None
+        return {
+            "rank": 10,
+            "stop": 110.0,
+            "trigger": 112.0,
+            "target_price": 126.0,
+            "order_type": "close",
+            "reason": "test support pullback left-to-right",
+            "known_volume_ratio": 1.0,
+            "signal_type": "uptrend_support_pullback",
+            "entry_evidence_score": 10,
+        }
+
+    monkeypatch.setattr(
+        "stock_research.strategies.portfolio_backtest._right_signal",
+        fake_signal,
+    )
+
+    result = run_portfolio_backtest(
+        {"A": bars},
+        {
+            first: [{
+                "code": "A", "candidate_source": "value_model",
+                "value_line": 100.0, "industry": "test", "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
+                "trade_basis_score": 8, "leadership_score": 28,
+            }],
+            turn: [{
+                "code": "A", "candidate_source": "value_model",
+                "value_line": 100.0, "industry": "test", "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
+                "trade_basis_score": 8, "leadership_score": 28,
+            }],
+            stop_day: [{
+                "code": "A", "candidate_source": "value_model",
+                "value_line": 100.0, "industry": "test", "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.09,
+                "trade_basis_score": 8, "leadership_score": 28,
+            }],
+            last: [{
+                "code": "A", "candidate_source": "value_model",
+                "value_line": 100.0, "industry": "test", "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.1,
+                "trade_basis_score": 8, "leadership_score": 28,
+            }],
+        },
+        {}, requested_start=first, end_date=last,
+    )
+
+    actions = [event["action"] for event in result["events"]]
+    assert "左转右接管左仓" in actions
+    assert "右转左接回左仓" in actions
+    assert "收盘条件次日退出" in actions
+    position = result["final_positions"][0]
+    assert position["position_mode"] == "left"
+    assert {item["batch"] for item in position["left_batches"]} == {
+        "L1", "L2", "L3", "L4", "L5",
+    }
+    assert position["batches"] == []
+
+
+def test_demoted_left_core_survives_left_quota_conflict(monkeypatch):
+    dates = pd.bdate_range("2026-01-01", periods=85)
+    a_bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 81 + [112.0, 109.0, 108.0, 107.0],
+        "high": [100.5] * 81 + [113.0, 110.0, 109.0, 108.0],
+        "low": [99.5] * 81 + [111.0, 108.0, 107.0, 106.0],
+        "close": [100.0] * 81 + [112.0, 109.0, 108.0, 107.0],
+        "volume": [1000.0] * 85,
+    })
+    b_bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 85,
+        "high": [100.5] * 85,
+        "low": [99.5] * 85,
+        "close": [100.0] * 85,
+        "volume": [1000.0] * 85,
+    })
+    first = dates[80].strftime("%Y-%m-%d")
+    turn = dates[81].strftime("%Y-%m-%d")
+    b_entry_and_a_stop = dates[82].strftime("%Y-%m-%d")
+    quota_day = dates[83].strftime("%Y-%m-%d")
+    last = dates[84].strftime("%Y-%m-%d")
+
+    def fake_signal(data, index, plan=None, **kwargs):
+        if data.iloc[index]["date"].strftime("%Y-%m-%d") != turn:
+            return None
+        return {
+            "rank": 10,
+            "stop": 110.0,
+            "trigger": 112.0,
+            "target_price": 126.0,
+            "order_type": "close",
+            "reason": "test support pullback left-to-right",
+            "known_volume_ratio": 1.0,
+            "signal_type": "uptrend_support_pullback",
+            "entry_evidence_score": 10,
+        }
+
+    monkeypatch.setattr(
+        "stock_research.strategies.portfolio_backtest._right_signal",
+        fake_signal,
+    )
+
+    result = run_portfolio_backtest(
+        {"A": a_bars, "B": b_bars},
+        {
+            first: [{
+                "code": "A", "candidate_source": "value_model",
+                "value_line": 100.0, "industry": "test-A", "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
+                "trade_basis_score": 8, "leadership_score": 28,
+            }],
+            turn: [{
+                "code": "A", "candidate_source": "value_model",
+                "value_line": 100.0, "industry": "test-A", "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
+                "trade_basis_score": 8, "leadership_score": 28,
+            }],
+            b_entry_and_a_stop: [
+                {
+                    "code": "A", "candidate_source": "value_model",
+                    "value_line": 100.0, "industry": "test-A", "mktcap": 150,
+                    "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.09,
+                    "trade_basis_score": 8, "leadership_score": 28,
+                },
+                {
+                    "code": "B", "candidate_source": "value_model",
+                    "value_line": 100.0, "candidate_score": 200,
+                    "industry": "test-B", "mktcap": 150,
+                    "quality_score": 95, "earnings_yoy": 0.30, "price_to_value": 1.0,
+                },
+            ],
+            quota_day: [
+                {
+                    "code": "A", "candidate_source": "value_model",
+                    "value_line": 100.0, "industry": "test-A", "mktcap": 150,
+                    "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.08,
+                    "trade_basis_score": 8, "leadership_score": 28,
+                },
+                {
+                    "code": "B", "candidate_source": "value_model",
+                    "value_line": 100.0, "candidate_score": 200,
+                    "industry": "test-B", "mktcap": 150,
+                    "quality_score": 95, "earnings_yoy": 0.30, "price_to_value": 1.0,
+                },
+            ],
+            last: [],
+        },
+        {}, requested_start=first, end_date=last,
+        max_left_positions=1,
+    )
+
+    quota_exits = [
+        event for event in result["events"]
+        if event["action"] == "左侧全行情限额清仓"
+    ]
+    assert {event["code"] for event in quota_exits} == {"B"}
+    assert [item["code"] for item in result["final_positions"]] == ["A"]
+    assert result["final_positions"][0]["position_mode"] == "left"
+
+
 def test_value_grid_financial_falsification_exits_left_at_next_open():
     dates = pd.bdate_range("2026-01-01", periods=83)
     bars = pd.DataFrame({
@@ -1371,7 +1891,7 @@ def test_left_core_only_position_does_not_consume_capacity():
     assert position["capacity_counted"] is False
 
 
-def test_all_market_phases_allow_only_one_left_symbol():
+def test_configured_single_left_position_limit_is_honored():
     dates = pd.bdate_range("2026-01-01", periods=81)
     bars = pd.DataFrame({
         "date": dates,
@@ -1399,6 +1919,7 @@ def test_all_market_phases_allow_only_one_left_symbol():
         ]},
         {date: {"phase": "waiting", "window_up_streak": 0}},
         requested_start=date, end_date=date, max_positions=5,
+        max_left_positions=1,
     )
 
     assert [item["code"] for item in result["final_positions"]] == ["A"]
@@ -1406,7 +1927,7 @@ def test_all_market_phases_allow_only_one_left_symbol():
     assert result["maximum_right_market_left_side_symbols"] == 0
 
 
-def test_waiting_market_does_not_seed_multiple_left_symbols():
+def test_waiting_market_honors_configured_single_left_position_limit():
     dates = pd.bdate_range("2026-01-01", periods=83)
     bars = pd.DataFrame({
         "date": dates,
@@ -1440,6 +1961,7 @@ def test_waiting_market_does_not_seed_multiple_left_symbols():
             third_day: {"phase": "watch", "window_up_streak": 3},
         },
         requested_start=first, end_date=third_day, max_positions=5,
+        max_left_positions=1,
     )
 
     assert [item["code"] for item in result["final_positions"]] == ["A"]
@@ -1451,7 +1973,7 @@ def test_waiting_market_does_not_seed_multiple_left_symbols():
     assert result["maximum_left_side_symbols"] == 1
 
 
-def test_left_core_still_blocks_a_second_left_symbol():
+def test_single_left_position_limit_blocks_a_second_left_symbol():
     dates = pd.bdate_range("2026-01-01", periods=83)
     bars = pd.DataFrame({
         "date": dates,
@@ -1487,13 +2009,47 @@ def test_left_core_still_blocks_a_second_left_symbol():
             }],
         },
         {}, requested_start=first, end_date=try_sixth,
-        max_positions=5, max_total_held_symbols=5,
+        max_positions=5, max_total_held_symbols=5, max_left_positions=1,
     )
 
     assert [item["code"] for item in result["final_positions"]] == ["A"]
     assert result["maximum_left_side_symbols"] == 1
     assert result["maximum_total_held_symbols"] == 1
     assert all(item["capacity_counted"] is False for item in result["final_positions"])
+
+
+def test_configured_two_left_position_limit_uses_stable_candidate_ranking():
+    dates = pd.bdate_range("2026-01-01", periods=81)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 81,
+        "high": [100.5] * 81,
+        "low": [99.5] * 80 + [99.0],
+        "close": [100.0] * 81,
+        "volume": [1000.0] * 81,
+    })
+    date = dates[-1].strftime("%Y-%m-%d")
+    snapshots = {date: [{
+        "code": code,
+        "candidate_source": "value_model",
+        "value_line": 100.0,
+        "candidate_score": score,
+        "industry": f"industry-{code}",
+        "mktcap": 150,
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+        "price_to_value": 1.0,
+    } for code, score in [("A", 30), ("B", 20), ("C", 10)]]}
+
+    result = run_portfolio_backtest(
+        {code: bars for code in ("A", "B", "C")}, snapshots, {},
+        requested_start=date, end_date=date,
+        max_left_positions=2,
+    )
+
+    assert [item["code"] for item in result["final_positions"]] == ["A", "B"]
+    assert result["max_left_positions"] == 2
+    assert result["maximum_left_side_symbols"] == 2
 
 
 def test_unified_candidate_interface_honors_signal_eligible():
@@ -2148,6 +2704,108 @@ def test_leading_pullback_pilot_is_enabled_by_default_and_can_be_disabled():
     assert disabled_result["allow_pullback_pilot"] is False
 
 
+def test_factor_quant_support_pullback_can_start_right_pilot():
+    dates = pd.bdate_range("2026-01-01", periods=80)
+    closes = list(pd.Series(range(78)).map(lambda value: 7.0 + value * 3.0 / 77)) + [10.2, 10.1]
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": closes,
+        "high": [value + 0.2 for value in closes],
+        "low": [value - 0.2 for value in closes[:-1]] + [9.8],
+        "close": closes,
+        "volume": [1000] * 79 + [2000],
+    })
+    date = dates[-1].strftime("%Y-%m-%d")
+    plans = {"plans": {"A": {"price_structures": [{
+        "kind": "uptrend_support", "uptrend_low": 2.0,
+        "uptrend_high": 18.0, "ratio": 0.50,
+        "confluence": ["MA20"],
+    }]}}}
+    snapshots = {date: [{
+        "code": "A",
+        "name": "A",
+        "candidate_source": "factor_quant",
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+        "mktcap": 300,
+        "trade_basis_score": 7,
+        "right_quant_score": 60,
+        "candidate_score": 120,
+        "return_20d": 0.02,
+        "return_60d": 0.05,
+        "drawdown_60": -0.20,
+        "avg_amount_20": 600_000_000,
+    }]}
+    phases = {date: {"phase": "active", "window_up_streak": 3, "window_down_streak": 0}}
+
+    result = run_portfolio_backtest(
+        {"A": bars}, snapshots, phases,
+        requested_start=date, end_date=date, trade_plans=plans,
+    )
+
+    assert result["events"][0]["signal_type"] == "uptrend_support_pullback"
+    assert result["events"][0]["requested_position_pct"] == pytest.approx(15)
+    assert result["entry_blocks"] == []
+
+
+def test_support_pullback_pilot_ignores_legacy_evidence_score(monkeypatch):
+    dates = pd.bdate_range("2026-01-01", periods=2)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0, 100.0],
+        "high": [101.0, 101.0],
+        "low": [99.0, 99.0],
+        "close": [100.0, 100.0],
+        "volume": [1000.0, 1000.0],
+    })
+    date = dates[-1].strftime("%Y-%m-%d")
+
+    def fake_signal(data, index, plan=None, **kwargs):
+        return {
+            "rank": 1,
+            "stop": 95.0,
+            "trigger": 100.0,
+            "target_price": 116.0,
+            "order_type": "close",
+            "reason": "quantified support pullback without evidence score",
+            "known_volume_ratio": 1.0,
+            "signal_type": "uptrend_support_pullback",
+            "entry_evidence_score": 0,
+        }
+
+    monkeypatch.setattr(
+        "stock_research.strategies.portfolio_backtest._right_signal",
+        fake_signal,
+    )
+
+    snapshots = {date: [{
+        "code": "A",
+        "name": "A",
+        "candidate_source": "factor_quant",
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+        "mktcap": 300,
+        "trade_basis_score": 8,
+        "leadership_score": 28,
+        "return_20d": 0.12,
+        "return_60d": 0.35,
+        "drawdown_60": -0.10,
+        "avg_amount_20": 3_000_000_000,
+    }]}
+    phases = {date: {"phase": "active", "window_up_streak": 3, "window_down_streak": 0}}
+
+    result = run_portfolio_backtest(
+        {"A": bars}, snapshots, phases,
+        requested_start=date, end_date=date,
+        min_entry_evidence_score=99,
+    )
+
+    assert result["entry_evidence_score_role"] == "legacy_explanation_only"
+    assert result["events"][0]["signal_type"] == "uptrend_support_pullback"
+    assert result["events"][0]["requested_position_pct"] == pytest.approx(20)
+    assert result["entry_blocks"] == []
+
+
 def test_leading_pullback_pilot_still_blocks_ordinary_pullback_profiles():
     dates = pd.bdate_range("2026-01-01", periods=80)
     closes = list(pd.Series(range(78)).map(lambda value: 7.0 + value * 3.0 / 77)) + [10.2, 10.1]
@@ -2639,9 +3297,9 @@ def test_default_data_end_date_waits_until_daily_bar_is_ready():
 def test_formula33_refresh_window_covers_long_backtest_range():
     window = formula33_refresh_window_args("2024-09-24", "2026-07-13")
 
-    assert window["start_date"] < "2024-09-24"
-    assert window["lookback"] >= 680
-    assert window["history_days"] == 420
+    assert window["start_date"] == "2023-01-03"
+    assert window["lookback"] >= 1_300
+    assert window["history_days"] >= 1_400
 
 
 def test_backtest_input_coverage_must_match_between_candidates_and_formula():
@@ -2870,6 +3528,48 @@ def test_miniqmt_execution_kline_preflight_auto_fetches_missing_codes(monkeypatc
     })]
 
 
+def test_candidate_miniqmt_preflight_fetches_actual_candidate_codes(monkeypatch, tmp_path):
+    kline_dir = tmp_path / "cache" / "miniqmt_kline" / "1d" / "front"
+    kline_dir.mkdir(parents=True)
+    pd.DataFrame({"date": ["2026-01-01", "2026-07-14"]}).to_csv(
+        kline_dir / "sh_600000.csv", index=False,
+    )
+    calls = []
+
+    def fake_load(codes, **kwargs):
+        calls.append((list(codes), kwargs))
+        pd.DataFrame({"date": ["2026-01-01", "2026-07-14"]}).to_csv(
+            kline_dir / "sh_600001.csv", index=False,
+        )
+        return {}, {
+            "requested_count": len(codes),
+            "loaded_count": len(codes),
+            "missing_count": 0,
+            "fetch": {"errors": []},
+        }
+
+    monkeypatch.setattr(portfolio_backtest_app, "load_miniqmt_price_frames", fake_load)
+
+    coverage = ensure_miniqmt_kline_cache_for_candidate_codes(
+        ["sh.600000", "sh.600001"],
+        kline_directory=kline_dir,
+        start_date="2026-01-01",
+        end_date="2026-07-14",
+        code_start_dates={"sh.600001": pd.Timestamp("2026-01-01")},
+    )
+
+    assert coverage["complete"] is True
+    assert coverage["refreshed_count"] == 1
+    assert calls == [(["sh.600001"], {
+        "start_date": "2026-01-01",
+        "end_date": "2026-07-14",
+        "period": "1d",
+        "dividend_type": "front",
+        "refresh": True,
+        "persist": True,
+    })]
+
+
 def test_financial_cache_period_helpers(tmp_path):
     (tmp_path / "600000_20240630.json").write_text("{}", encoding="utf-8")
     (tmp_path / "000001_20240630.json").write_text("{}", encoding="utf-8")
@@ -3060,7 +3760,13 @@ def test_missing_candidate_manifest_financial_point_in_time_fails_closed(tmp_pat
 
 def test_backtest_input_coverage_rejects_non_pit_candidate_manifest(tmp_path):
     (tmp_path / "manifest.json").write_text(
-        '{"financial_point_in_time": false, "snapshots": []}',
+        json.dumps({
+            "version": SNAPSHOT_VERSION,
+            "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
+            "financial_point_in_time": False,
+            "industry_point_in_time": False,
+            "snapshots": [],
+        }),
         encoding="utf-8",
     )
     formula = pd.DataFrame({"date": ["2024-09-24"]})
@@ -3080,7 +3786,70 @@ def test_backtest_input_coverage_rejects_non_pit_candidate_manifest(tmp_path):
         "2024-09-24",
         candidate_directory=tmp_path,
         allow_unsafe_financial=True,
+        allow_unsafe_industry=True,
     ) == "2024-09-24"
+
+
+def test_candidate_manifest_industry_point_in_time_is_an_independent_gate(tmp_path):
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "version": SNAPSHOT_VERSION,
+        "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
+        "industry_point_in_time": False,
+        "snapshots": [{
+            "date": "2024-09-24",
+            "candidate_count": 10,
+            "industry_point_in_time": False,
+        }],
+    }), encoding="utf-8")
+
+    status = candidate_manifest_industry_status(tmp_path)
+    assert status["industry_point_in_time"] is False
+    assert status["unsafe_dates"] == ["2024-09-24"]
+    with pytest.raises(RuntimeError, match="not strict industry point-in-time"):
+        validate_candidate_manifest_industry_point_in_time(tmp_path)
+    assert validate_candidate_manifest_industry_point_in_time(
+        tmp_path, allow_unsafe_industry=True,
+    )["industry_point_in_time"] is False
+
+
+def test_candidate_manifest_cannot_self_attest_industry_pit_without_source_audit(tmp_path):
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "version": SNAPSHOT_VERSION,
+        "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
+        "industry_point_in_time": True,
+        "snapshots": [{
+            "date": "2024-09-24",
+            "candidate_count": 1,
+            "industry_point_in_time": True,
+        }],
+    }), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="metadata_errors"):
+        validate_candidate_manifest_industry_point_in_time(tmp_path)
+
+
+def test_candidate_manifest_accepts_verified_dated_industry_source(tmp_path):
+    source = tmp_path / "industry_map_20240923.csv"
+    source.write_text("code,industry\nsh.600699,汽车电子电气系统\n", encoding="utf-8")
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "version": SNAPSHOT_VERSION,
+        "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
+        "industry_point_in_time": True,
+        "industry_source_path": str(source),
+        "industry_source_sha256": portfolio_backtest_app.file_sha256(source),
+        "industry_as_of_date": "2024-09-23",
+        "industry_data_source": "test/provider",
+        "industry_point_in_time_status": "safe",
+        "industry_coverage_ratio": 1.0,
+        "snapshots": [{
+            "date": "2024-09-24",
+            "candidate_count": 1,
+            "industry_point_in_time": True,
+        }],
+    }), encoding="utf-8")
+
+    status = validate_candidate_manifest_industry_point_in_time(tmp_path)
+    assert status["metadata_errors"] == []
 
 
 def test_empty_candidate_snapshot_file_loads_as_zero_candidates(tmp_path):
@@ -3089,3 +3858,76 @@ def test_empty_candidate_snapshot_file_loads_as_zero_candidates(tmp_path):
     snapshots = load_candidate_snapshots(tmp_path, "2024-09-24", "2024-09-24")
 
     assert snapshots == {"2024-09-24": []}
+
+
+def test_candidate_snapshot_loader_rejects_files_not_listed_in_manifest(tmp_path):
+    pd.DataFrame([{"code": "GOOD"}]).to_csv(
+        tmp_path / "candidates_2024-09-24.csv", index=False,
+    )
+    pd.DataFrame([{"code": "STALE"}]).to_csv(
+        tmp_path / "candidates_2024-09-25.csv", index=False,
+    )
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "version": SNAPSHOT_VERSION,
+        "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
+        "snapshots": [{
+            "date": "2024-09-24",
+            "file": "candidates_2024-09-24.csv",
+        }],
+    }), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="outside manifest"):
+        load_candidate_snapshots(tmp_path, "2024-09-24", "2024-09-25")
+
+
+def test_candidate_snapshot_loader_rejects_manifest_row_count_mismatch(tmp_path):
+    pd.DataFrame([{"code": "ONLY"}]).to_csv(
+        tmp_path / "candidates_2024-09-24.csv", index=False,
+    )
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "version": SNAPSHOT_VERSION,
+        "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
+        "snapshots": [{
+            "date": "2024-09-24",
+            "file": "candidates_2024-09-24.csv",
+            "candidate_count": 2,
+        }],
+    }), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="row count differs"):
+        load_candidate_snapshots(tmp_path, "2024-09-24", "2024-09-24")
+
+
+def test_candidate_snapshot_loader_rejects_old_manifest_version(tmp_path):
+    pd.DataFrame([{"code": "OLD"}]).to_csv(
+        tmp_path / "candidates_2024-09-24.csv", index=False,
+    )
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "version": "unified-selection-v4",
+        "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
+        "snapshots": [{
+            "date": "2024-09-24",
+            "file": "candidates_2024-09-24.csv",
+            "candidate_count": 1,
+        }],
+    }), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="version is incompatible"):
+        load_candidate_snapshots(tmp_path, "2024-09-24", "2024-09-24")
+
+
+def test_candidate_snapshot_loader_rejects_missing_industry_rule_version(tmp_path):
+    pd.DataFrame([{"code": "STALE"}]).to_csv(
+        tmp_path / "candidates_2024-09-24.csv", index=False,
+    )
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "version": SNAPSHOT_VERSION,
+        "snapshots": [{
+            "date": "2024-09-24",
+            "file": "candidates_2024-09-24.csv",
+            "candidate_count": 1,
+        }],
+    }), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="rule version is missing or stale"):
+        load_candidate_snapshots(tmp_path, "2024-09-24", "2024-09-24")

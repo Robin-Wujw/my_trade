@@ -24,6 +24,9 @@ from stock_research.indicators.technical_quant import moving_average_deduction_s
 from stock_research.indicators.waves import infer_downtrend_recovery, level_price
 from stock_research.strategies.candidate_interface import left_value_safety_reasons
 from stock_research.strategies.factor_selection import apply_deduction_to_trend
+from stock_research.strategies.fundamental_selection import (
+    is_value_industry_allowed,
+)
 from stock_research.reporting.diff import (
     build_diff_html,
     load_last_result,
@@ -73,7 +76,7 @@ BONUS_DF_CACHE = {}
 
 PE_KEYWORDS = [
     "货币金融", "银行", "保险", "酒、饮料和精制茶", "食品制造", "批发", "零售", "医药制造", "纺织服装",
-    "住宿", "餐饮", "旅游",
+    "住宿", "餐饮", "旅游", "饰品", "医疗服务", "医疗设备",
 ]
 
 PB_KEYWORDS = [
@@ -659,14 +662,18 @@ def get_latest_quarter(date_str):
 
 
 def classify_method(industry):
-    industry = str(industry)
+    industry = str(industry or "").strip()
+    if not industry or industry.lower() in {"nan", "none", "unknown"}:
+        return "UNKNOWN"
+    if is_value_industry_allowed(industry):
+        return "VALUE"
     if any(keyword in industry for keyword in RIGHT_SIDE_KEYWORDS):
         return "RIGHT"
     if any(keyword in industry for keyword in PB_KEYWORDS):
         return "PB"
     if any(keyword in industry for keyword in PE_KEYWORDS):
         return "PE"
-    return "VALUE"
+    return "RIGHT"
 
 
 def get_trade_day_and_universe():

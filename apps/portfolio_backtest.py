@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,8 @@ from stock_research.reporting.trade_reminders import load_trade_plans
 from stock_research.storage import Database, KlineRepository, ResearchRepository
 from stock_research.market.miniqmt_data import load_miniqmt_price_frames
 from stock_research.strategies.portfolio_backtest import run_portfolio_backtest
+from stock_research.strategies.historical_candidates import SNAPSHOT_VERSION
+from stock_research.strategies.fundamental_selection import VALUE_INDUSTRY_RULE_VERSION
 
 
 MIN_FINANCIAL_CACHE_FILES = 1_500
@@ -26,11 +29,22 @@ DEFAULT_FINANCIAL_TARGET_COVERAGE = 0.95
 DEFAULT_FINANCIAL_CHUNK_SIZE = 10
 DEFAULT_FINANCIAL_TIMEOUT = 60
 DEFAULT_MINIQMT_KLINE_CHUNK_SIZE = 50
+DEFAULT_INDUSTRY_TARGET_COVERAGE = 0.95
+FORMULA33_STATE_ANCHOR_DATE = pd.Timestamp("2023-01-03")
 
 
 def log_refresh_step(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[portfolio_backtest][refresh][{timestamp}] {message}", flush=True)
+
+
+def file_sha256(path):
+    path = Path(path)
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def refresh_price_cache_directory(price_source):
@@ -140,15 +154,94 @@ def _attach_raw_adjustment_factor(frame, raw_directory, code):
 def load_candidate_snapshots(directory, start_date, end_date):
     start = pd.Timestamp(start_date).normalize()
     end = pd.Timestamp(end_date).normalize()
+    directory = Path(directory)
+    manifest_path = directory / "manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise RuntimeError(
+                f"candidate manifest cannot be read: {manifest_path}"
+            ) from exc
+        if manifest.get("version") != SNAPSHOT_VERSION:
+            raise RuntimeError(
+                "candidate manifest version is incompatible with the current strategy: "
+                f"expected={SNAPSHOT_VERSION} actual={manifest.get('version')} "
+                f"manifest={manifest_path}"
+            )
+        if manifest.get("value_industry_rule_version") != VALUE_INDUSTRY_RULE_VERSION:
+            raise RuntimeError(
+                "candidate manifest value-industry rule version is missing or stale: "
+                f"expected={VALUE_INDUSTRY_RULE_VERSION} "
+                f"actual={manifest.get('value_industry_rule_version')} "
+                f"manifest={manifest_path}"
+            )
+        rows = manifest.get("snapshots")
+        if not isinstance(rows, list):
+            raise RuntimeError(
+                f"candidate manifest snapshots must be a list: {manifest_path}"
+            )
+        dated_paths = []
+        seen_dates = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                raise RuntimeError(
+                    f"candidate manifest contains an invalid snapshot row: {manifest_path}"
+                )
+            date = pd.to_datetime(row.get("date"), errors="coerce")
+            if pd.isna(date):
+                raise RuntimeError(
+                    f"candidate manifest contains an invalid snapshot date: {manifest_path}"
+                )
+            date = date.normalize()
+            if date in seen_dates:
+                raise RuntimeError(
+                    f"candidate manifest contains duplicate date {date:%Y-%m-%d}: "
+                    f"{manifest_path}"
+                )
+            seen_dates.add(date)
+            filename = str(row.get("file") or f"candidates_{date:%Y-%m-%d}.csv")
+            if Path(filename).name != filename:
+                raise RuntimeError(
+                    f"candidate manifest snapshot file must be a basename: {filename}"
+                )
+            dated_paths.append((date, directory / filename, row.get("candidate_count")))
+        listed_paths = {path.name for _, path, _ in dated_paths}
+        unlisted = []
+        for path in sorted(directory.glob("candidates_*.csv")):
+            date = pd.to_datetime(path.stem.removeprefix("candidates_"), errors="coerce")
+            if (
+                pd.notna(date)
+                and start <= date.normalize() <= end
+                and path.name not in listed_paths
+            ):
+                unlisted.append(path.name)
+        if unlisted:
+            raise RuntimeError(
+                "candidate directory contains snapshots outside manifest in requested "
+                f"range: count={len(unlisted)} sample={unlisted[:5]}"
+            )
+    else:
+        dated_paths = []
+        for path in sorted(directory.glob("candidates_*.csv")):
+            date = pd.to_datetime(path.stem.removeprefix("candidates_"), errors="coerce")
+            if pd.notna(date):
+                dated_paths.append((date.normalize(), path, None))
     snapshots = {}
-    for path in sorted(Path(directory).glob("candidates_*.csv")):
-        date = pd.to_datetime(path.stem.removeprefix("candidates_"), errors="coerce")
-        if pd.isna(date) or not start <= date.normalize() <= end:
+    for date, path, expected_count in dated_paths:
+        if not start <= date <= end:
             continue
+        if not path.exists():
+            raise RuntimeError(f"candidate snapshot listed by manifest is missing: {path}")
         try:
             frame = pd.read_csv(path, dtype={"code": str}, low_memory=False)
         except EmptyDataError:
             frame = pd.DataFrame()
+        if expected_count is not None and len(frame) != int(expected_count):
+            raise RuntimeError(
+                f"candidate snapshot row count differs from manifest: {path} "
+                f"expected={int(expected_count)} actual={len(frame)}"
+            )
         snapshots[date.strftime("%Y-%m-%d")] = frame.to_dict("records")
     return snapshots
 
@@ -535,6 +628,129 @@ def ensure_miniqmt_kline_cache_for_backtest(
     return coverage
 
 
+def _miniqmt_period_and_dividend_type(kline_directory):
+    path = Path(kline_directory)
+    try:
+        if path.parent.parent.name != "miniqmt_kline":
+            return None
+        return path.parent.name, path.name
+    except IndexError:
+        return None
+
+
+def ensure_miniqmt_kline_cache_for_candidate_codes(
+    codes,
+    *,
+    kline_directory,
+    start_date,
+    end_date,
+    code_start_dates=None,
+    label="candidate",
+    chunk_size=DEFAULT_MINIQMT_KLINE_CHUNK_SIZE,
+):
+    """Refresh MiniQMT bars for the smaller actual candidate universe."""
+    parsed = _miniqmt_period_and_dividend_type(kline_directory)
+    if parsed is None:
+        return {"skipped": True, "reason": "not_standard_miniqmt_directory"}
+    period, dividend_type = parsed
+    if period != "1d":
+        return {"skipped": True, "reason": f"unsupported_period:{period}"}
+    start = pd.Timestamp(start_date).normalize()
+    end = pd.Timestamp(end_date).normalize()
+    directory = Path(kline_directory)
+    code_start_dates = code_start_dates or {}
+    incomplete = []
+    for code in sorted({str(item) for item in codes if str(item).strip()}):
+        required_start = pd.Timestamp(code_start_dates.get(code, start)).normalize()
+        path = directory / _code_to_kline_cache_name(code)
+        try:
+            dates = pd.to_datetime(
+                pd.read_csv(path, usecols=["date"], low_memory=False)["date"],
+                errors="coerce",
+            ).dropna()
+        except (OSError, ValueError, EmptyDataError):
+            incomplete.append(code)
+            continue
+        in_range = dates[(dates >= start) & (dates <= end)]
+        if in_range.empty:
+            incomplete.append(code)
+            continue
+        if in_range.min().normalize() > required_start or in_range.max().normalize() < end:
+            incomplete.append(code)
+    if not incomplete:
+        print(
+            "[portfolio_backtest][preflight] "
+            f"{label} MiniQMT K-line cache covers actual candidates "
+            f"codes={len(set(codes))}",
+            flush=True,
+        )
+        return {
+            "skipped": False,
+            "requested_count": len(set(codes)),
+            "refreshed_count": 0,
+            "complete": True,
+        }
+    log_refresh_step(
+        f"auto-fetch {label} MiniQMT K-lines for actual candidates "
+        f"dividend={dividend_type} codes={len(incomplete)} "
+        f"from {start:%Y-%m-%d} through {end:%Y-%m-%d} "
+        f"sample={incomplete[:10]}"
+    )
+    for index, chunk in enumerate(_chunks(incomplete, max(1, int(chunk_size))), start=1):
+        _, summary = load_miniqmt_price_frames(
+            chunk,
+            start_date=start.strftime("%Y-%m-%d"),
+            end_date=end.strftime("%Y-%m-%d"),
+            period=period,
+            dividend_type=dividend_type,
+            refresh=True,
+            persist=True,
+        )
+        log_refresh_step(
+            f"{label} MiniQMT candidate K-line batch {index} "
+            f"requested={summary.get('requested_count')} "
+            f"loaded={summary.get('loaded_count')} "
+            f"missing={summary.get('missing_count')} "
+            f"errors={summary.get('fetch', {}).get('errors', [])[:2]}"
+        )
+    remaining = []
+    for code in incomplete:
+        required_start = pd.Timestamp(code_start_dates.get(code, start)).normalize()
+        path = directory / _code_to_kline_cache_name(code)
+        try:
+            dates = pd.to_datetime(
+                pd.read_csv(path, usecols=["date"], low_memory=False)["date"],
+                errors="coerce",
+            ).dropna()
+        except (OSError, ValueError, EmptyDataError):
+            remaining.append(code)
+            continue
+        in_range = dates[(dates >= start) & (dates <= end)]
+        if (
+            in_range.empty
+            or in_range.min().normalize() > required_start
+            or in_range.max().normalize() < end
+        ):
+            remaining.append(code)
+    if remaining:
+        raise RuntimeError(
+            f"{label} MiniQMT candidate K-line cache remains incomplete "
+            f"after auto-fetch: count={len(remaining)} sample={remaining[:10]}"
+        )
+    print(
+        "[portfolio_backtest][preflight] "
+        f"{label} MiniQMT K-line cache ready for actual candidates "
+        f"refreshed={len(incomplete)} total={len(set(codes))}",
+        flush=True,
+    )
+    return {
+        "skipped": False,
+        "requested_count": len(set(codes)),
+        "refreshed_count": len(incomplete),
+        "complete": True,
+    }
+
+
 def copy_formula33_no_trade_markers(codes, *, target_directory, observation_date):
     source_directory = formula33_price_cache_directory("miniqmt")
     target_directory = Path(target_directory)
@@ -818,19 +1034,134 @@ def validate_candidate_manifest_financial_point_in_time(
     return status
 
 
-def candidate_manifest_reusable(candidate_directory, start_date, end_date, *, allow_unsafe_financial=False):
+def candidate_manifest_industry_status(candidate_directory):
+    path = Path(candidate_directory) / "manifest.json"
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {
+            "available": False,
+            "industry_point_in_time": None,
+            "value_industry_rule_version": None,
+            "unsafe_dates": [],
+            "metadata_errors": ["manifest_unavailable"],
+            "path": str(path),
+        }
+    rows = manifest.get("snapshots", [])
+    unsafe_dates = []
+    if isinstance(rows, list):
+        unsafe_dates = [
+            str(row.get("date"))
+            for row in rows
+            if row.get("industry_point_in_time") is not True
+        ]
+    metadata_errors = []
+    source_path = manifest.get("industry_source_path")
+    source_sha256 = str(manifest.get("industry_source_sha256") or "")
+    if not source_path or not Path(source_path).is_file():
+        metadata_errors.append("industry_source_missing")
+    elif not source_sha256 or file_sha256(source_path) != source_sha256:
+        metadata_errors.append("industry_source_hash_mismatch")
+    as_of_date = pd.to_datetime(manifest.get("industry_as_of_date"), errors="coerce")
+    if pd.isna(as_of_date):
+        metadata_errors.append("industry_as_of_date_missing")
+    elif isinstance(rows, list):
+        if any(
+            pd.notna(pd.to_datetime(row.get("date"), errors="coerce"))
+            and pd.Timestamp(row.get("date")).normalize() < as_of_date.normalize()
+            for row in rows
+        ):
+            metadata_errors.append("industry_source_is_future_for_snapshot")
+    if not str(manifest.get("industry_data_source") or "").strip():
+        metadata_errors.append("industry_data_source_missing")
+    if manifest.get("industry_point_in_time_status") != "safe":
+        metadata_errors.append("industry_source_not_marked_safe")
+    try:
+        coverage = float(manifest.get("industry_coverage_ratio"))
+    except (TypeError, ValueError):
+        coverage = 0.0
+    if coverage < DEFAULT_INDUSTRY_TARGET_COVERAGE:
+        metadata_errors.append("industry_coverage_below_target")
+    return {
+        "available": True,
+        "industry_point_in_time": manifest.get("industry_point_in_time"),
+        "value_industry_rule_version": manifest.get("value_industry_rule_version"),
+        "unsafe_dates": unsafe_dates,
+        "metadata_errors": metadata_errors,
+        "path": str(path),
+    }
+
+
+def validate_candidate_manifest_industry_point_in_time(
+    candidate_directory,
+    *,
+    allow_unsafe_industry=False,
+):
+    status = candidate_manifest_industry_status(candidate_directory)
+    if not status["available"]:
+        raise RuntimeError(
+            "candidate manifest is missing or unreadable; "
+            "use --allow-unsafe-industry only for research backtests. "
+            f"manifest={status['path']}"
+        )
+    if status["value_industry_rule_version"] != VALUE_INDUSTRY_RULE_VERSION:
+        raise RuntimeError(
+            "candidate manifest uses a missing or stale value-industry rule version; "
+            f"expected={VALUE_INDUSTRY_RULE_VERSION} "
+            f"actual={status['value_industry_rule_version']} manifest={status['path']}"
+        )
+    if allow_unsafe_industry:
+        return status
+    if (
+        status["industry_point_in_time"] is not True
+        or status["unsafe_dates"]
+        or status["metadata_errors"]
+    ):
+        preview = ", ".join(status["unsafe_dates"][:5])
+        raise RuntimeError(
+            "candidate manifest is not strict industry point-in-time; "
+            "use --allow-unsafe-industry only for research backtests. "
+            f"manifest={status['path']} unsafe_dates={preview} "
+            f"metadata_errors={status['metadata_errors']}"
+        )
+    return status
+
+
+def candidate_manifest_reusable(
+    candidate_directory,
+    start_date,
+    end_date,
+    *,
+    allow_unsafe_financial=False,
+    allow_unsafe_industry=False,
+):
     path = Path(candidate_directory) / "manifest.json"
     try:
         manifest = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return False
+    if manifest.get("version") != SNAPSHOT_VERSION:
+        return False
+    requested_start = pd.to_datetime(manifest.get("requested_start"), errors="coerce")
     requested_end = pd.to_datetime(manifest.get("requested_end"), errors="coerce")
-    if pd.isna(requested_end) or requested_end.normalize() < pd.Timestamp(end_date).normalize():
+    if (
+        pd.isna(requested_start)
+        or requested_start.normalize() > pd.Timestamp(start_date).normalize()
+        or pd.isna(requested_end)
+        or requested_end.normalize() < pd.Timestamp(end_date).normalize()
+    ):
         return False
     if not allow_unsafe_financial:
         status = validate_candidate_manifest_financial_point_in_time(
             candidate_directory,
             allow_unsafe_financial=False,
+        )
+        if status.get("unsafe_dates"):
+            return False
+    if not allow_unsafe_industry:
+        status = validate_candidate_manifest_industry_point_in_time(
+            candidate_directory,
+            allow_unsafe_industry=False,
         )
         if status.get("unsafe_dates"):
             return False
@@ -868,15 +1199,16 @@ def formula33_refresh_window_args(start_date, end_date):
     end = pd.Timestamp(end_date).normalize()
     if start > end:
         raise ValueError(f"invalid date range: {start_date}..{end_date}")
-    calendar_days = max(0, (end - start).days)
     warmup_start = (start - pd.offsets.BDay(45)).normalize()
+    state_start = min(warmup_start, FORMULA33_STATE_ANCHOR_DATE)
+    calendar_days = max(0, (end - state_start).days)
     # Formula33 uses lookback for output rows and history-days for both raw
     # calendar depth and per-symbol K-line depth.  Keep both large enough for
     # the requested range while leaving the model's own indicator warmup intact.
     return {
-        "start_date": warmup_start.strftime("%Y-%m-%d"),
+        "start_date": state_start.strftime("%Y-%m-%d"),
         "lookback": max(21, calendar_days + 30),
-        "history_days": 420,
+        "history_days": max(420, calendar_days + 180),
     }
 
 
@@ -973,12 +1305,14 @@ def refresh_backtest_inputs(args):
         "--price-source", candidate_price_source,
         "--kline-directory", str(candidate_kline_directory),
         "--raw-kline-directory", str(candidate_raw_kline_directory),
+        "--industry-map-path", str(PATHS.cache / "reference" / "industry_map_latest.csv"),
     ]
     if candidate_manifest_reusable(
         args.candidate_directory,
         args.start_date,
         args.end_date,
-        allow_unsafe_financial=args.allow_unsafe_financial,
+        allow_unsafe_financial=getattr(args, "allow_unsafe_financial", False),
+        allow_unsafe_industry=getattr(args, "allow_unsafe_industry", False),
     ):
         log_refresh_step("candidate history manifest reusable; skip rebuild")
         empty_candidate_dates = []
@@ -1005,7 +1339,7 @@ def refresh_backtest_inputs(args):
         )
     log_refresh_step("rebuild Formula33 phase history")
     run_logged_refresh_step("Formula33 phase history", rebuild_formula_history.main, [
-        "--start-date", args.start_date,
+        "--start-date", formula_window["start_date"],
         "--end-date", args.end_date,
         "--output", args.formula_history,
         "--kline-directory", str(formula_kline_directory),
@@ -1020,12 +1354,17 @@ def validate_backtest_input_coverage(
     *,
     candidate_directory=None,
     allow_unsafe_financial=False,
+    allow_unsafe_industry=False,
 ):
     """Fail closed when every trading day lacks a fresh non-empty selection."""
     if candidate_directory is not None:
         validate_candidate_manifest_financial_point_in_time(
             candidate_directory,
             allow_unsafe_financial=allow_unsafe_financial,
+        )
+        validate_candidate_manifest_industry_point_in_time(
+            candidate_directory,
+            allow_unsafe_industry=allow_unsafe_industry,
         )
     if not snapshots:
         raise RuntimeError("candidate snapshots are empty after input refresh")
@@ -1093,19 +1432,23 @@ def validate_backtest_input_coverage(
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="候选池、Formula33和四持仓组合回测")
+    parser = argparse.ArgumentParser(description="候选池、Formula33和五持仓组合回测")
     parser.add_argument("--start-date", default="2026-01-01")
     parser.add_argument(
         "--end-date", default="",
         help="default: latest session whose daily bar should be available",
     )
     parser.add_argument(
-        "--max-positions", type=int, default=3,
-        help="main capacity symbols; default 3, hard-capped at 5",
+        "--max-positions", type=int, default=5,
+        help="main capacity symbols; default 5, hard-capped at 5",
     )
     parser.add_argument(
         "--max-total-held-symbols", type=int, default=5,
         help="hard cap for all held symbols, including left cores and profit tails",
+    )
+    parser.add_argument(
+        "--max-left-positions", type=int, default=1,
+        help="maximum simultaneous left-side symbols; default 1, use 2 only for sensitivity research",
     )
     parser.add_argument(
         "--max-same-industry", type=int, default=2,
@@ -1116,8 +1459,8 @@ def main(argv=None):
         help="60-session return correlation used to group related exposure when tags are missing",
     )
     parser.add_argument(
-        "--min-entry-evidence-score", type=float, default=7.0,
-        help="minimum multi-signal technical evidence score for an executable entry",
+        "--min-entry-evidence-score", type=float, default=0.0,
+        help="Deprecated explanation-only score floor; semantic high R/R gate controls entries.",
     )
     parser.add_argument(
         "--profit-tail-min-return", type=float, default=0.50,
@@ -1155,7 +1498,10 @@ def main(argv=None):
     )
     parser.add_argument(
         "--candidate-directory",
-        default=str(PATHS.runtime_root / "backtests" / "candidate_snapshots" / "unified-selection-v4"),
+        default=str(
+            PATHS.runtime_root / "backtests" / "candidate_snapshots"
+            / SNAPSHOT_VERSION
+        ),
     )
     parser.add_argument(
         "--formula-history",
@@ -1180,7 +1526,10 @@ def main(argv=None):
     )
     parser.add_argument(
         "--no-refresh-inputs", action="store_true",
-        help="research only: skip automatic K-line/financial/Formula33/candidate refresh; requires --allow-unsafe-financial",
+        help=(
+            "research only: skip automatic input refresh; requires both "
+            "--allow-unsafe-financial and --allow-unsafe-industry"
+        ),
     )
     parser.add_argument(
         "--refresh-price-source",
@@ -1221,6 +1570,10 @@ def main(argv=None):
         help="research only: allow candidate manifests marked financial_point_in_time=false",
     )
     parser.add_argument(
+        "--allow-unsafe-industry", action="store_true",
+        help="research only: allow candidate manifests marked industry_point_in_time=false",
+    )
+    parser.add_argument(
         "--financial-target-coverage",
         type=float,
         default=DEFAULT_FINANCIAL_TARGET_COVERAGE,
@@ -1258,11 +1611,14 @@ def main(argv=None):
     if not args.end_date:
         args.end_date = default_data_end_date()
     requested_end_date = args.end_date
-    if args.no_refresh_inputs and not args.allow_unsafe_financial:
+    if args.no_refresh_inputs and not (
+        args.allow_unsafe_financial and args.allow_unsafe_industry
+    ):
         raise RuntimeError(
             "--no-refresh-inputs is research-only because strict backtests must "
             "auto-refresh K-line, financial, Formula33, and candidate inputs. "
-            "Use --allow-unsafe-financial only for degraded offline research."
+            "Use both --allow-unsafe-financial and --allow-unsafe-industry only "
+            "for degraded offline research."
         )
     if not args.no_refresh_inputs:
         refresh_backtest_inputs(args)
@@ -1305,6 +1661,18 @@ def main(argv=None):
     code_start_dates = first_candidate_dates(snapshots)
     trade_plans = load_trade_plans(args.trade_plans)
     price_kline_directory = Path(args.price_kline_directory)
+    if (
+        not args.no_refresh_inputs
+        and infer_price_frame_source(price_kline_directory) == "miniqmt"
+    ):
+        ensure_miniqmt_kline_cache_for_candidate_codes(
+            codes,
+            kline_directory=price_kline_directory,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            code_start_dates=code_start_dates,
+            label="execution/valuation",
+        )
     use_price_database = (
         not args.no_price_database
         and price_kline_directory.name != "akshare_raw"
@@ -1332,6 +1700,7 @@ def main(argv=None):
         args.end_date,
         candidate_directory=args.candidate_directory,
         allow_unsafe_financial=args.allow_unsafe_financial,
+        allow_unsafe_industry=args.allow_unsafe_industry,
     )
     phases = {
         str(row["date"]): {
@@ -1350,6 +1719,7 @@ def main(argv=None):
         trade_plans=trade_plans,
         max_positions=None if args.max_positions == 0 else args.max_positions,
         max_total_held_symbols=args.max_total_held_symbols,
+        max_left_positions=args.max_left_positions,
         max_same_industry=args.max_same_industry,
         same_theme_correlation=args.same_theme_correlation,
         min_entry_evidence_score=args.min_entry_evidence_score,
@@ -1428,6 +1798,17 @@ def main(argv=None):
         summary["candidate_mode"] = "explicit_codes"
         summary["explicit_codes"] = explicit_codes
     summary["candidate_snapshot_dates"] = sorted(snapshots)
+    candidate_manifest_path = Path(args.candidate_directory) / "manifest.json"
+    summary["input_fingerprints"] = {
+        "candidate_directory": str(Path(args.candidate_directory)),
+        "candidate_manifest": str(candidate_manifest_path),
+        "candidate_manifest_sha256": (
+            file_sha256(candidate_manifest_path) if candidate_manifest_path.exists() else None
+        ),
+        "formula_history": str(Path(args.formula_history)),
+        "formula_history_sha256": file_sha256(args.formula_history),
+        "price_kline_directory": str(price_kline_directory),
+    }
     summary["inputs_refreshed"] = not args.no_refresh_inputs
     summary["input_coverage_end"] = input_coverage_end
     summary["requested_end_date"] = requested_end_date

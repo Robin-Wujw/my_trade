@@ -24,6 +24,7 @@ from stock_research.strategies.miniqmt_backtest import (
     MiniQmtBacktestProfile,
     run_miniqmt_backtest,
 )
+from stock_research.strategies.historical_candidates import SNAPSHOT_VERSION
 
 
 def build_parser():
@@ -31,7 +32,7 @@ def build_parser():
     parser.add_argument("--start-date", default="2026-01-01")
     parser.add_argument("--end-date", required=True)
     parser.add_argument("--candidate-directory", default=str(
-        PATHS.runtime_root / "backtests" / "candidate_snapshots" / "unified-selection-v4"
+        PATHS.runtime_root / "backtests" / "candidate_snapshots" / SNAPSHOT_VERSION
     ))
     parser.add_argument("--formula-history", default=str(
         PATHS.runtime_root / "backtests" / "formula33_phase_research_v1.csv"
@@ -43,7 +44,7 @@ def build_parser():
     parser.add_argument("--miniqmt-dividend-type", default="front")
     parser.add_argument("--miniqmt-refresh", action="store_true")
     parser.add_argument("--initial-capital", type=float, default=1_000_000.0)
-    parser.add_argument("--max-positions", type=int, default=3)
+    parser.add_argument("--max-positions", type=int, default=5)
     parser.add_argument("--max-total-held-symbols", type=int, default=5)
     parser.add_argument("--profit-tranches", type=int, choices=(2, 3, 4, 5), default=5)
     parser.add_argument(
@@ -57,6 +58,7 @@ def build_parser():
     parser.add_argument("--left-grid-max-exposure", type=float, default=0.0)
     parser.add_argument("--disable-pullback-pilot", action="store_true")
     parser.add_argument("--allow-unsafe-financial", action="store_true")
+    parser.add_argument("--allow-unsafe-industry", action="store_true")
     parser.add_argument("--commission-rate", type=float, default=DEFAULT_MINIQMT_BACKTEST_PROFILE.commission_rate)
     parser.add_argument("--minimum-commission", type=float, default=DEFAULT_MINIQMT_BACKTEST_PROFILE.minimum_commission)
     parser.add_argument("--sell-stamp-duty-rate", type=float, default=DEFAULT_MINIQMT_BACKTEST_PROFILE.sell_stamp_duty_rate)
@@ -165,6 +167,7 @@ def main(argv=None):
         args.end_date,
         candidate_directory=args.candidate_directory,
         allow_unsafe_financial=args.allow_unsafe_financial,
+        allow_unsafe_industry=args.allow_unsafe_industry,
     )
     phases = {
         str(row["date"]): {

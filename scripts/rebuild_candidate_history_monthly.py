@@ -49,6 +49,10 @@ def main(argv=None):
     parser.add_argument("--price-source", choices=("akshare", "miniqmt"), default="miniqmt")
     parser.add_argument("--kline-directory", default="")
     parser.add_argument("--raw-kline-directory", default="")
+    parser.add_argument(
+        "--industry-map-path",
+        default=str(PATHS.cache / "reference" / "industry_map_latest.csv"),
+    )
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args(argv)
 
@@ -91,6 +95,7 @@ def main(argv=None):
             kline_directory=kline_directory,
             raw_kline_directory=raw_kline_directory,
             universe_path=PATHS.cache / "stock_universe.csv",
+            industry_map_path=args.industry_map_path,
             mainline_directory=PATHS.cache,
             research_repository=None,
             price_source=args.price_source,
@@ -101,6 +106,8 @@ def main(argv=None):
             snapshots,
             start_date=chunk_start,
             end_date=chunk_end,
+            industry_map_path=args.industry_map_path,
+            universe_path=PATHS.cache / "stock_universe.csv",
         )
         _log(
             f"DONE {index}/{len(ranges)} snapshots={manifest['snapshot_count']} "
@@ -113,6 +120,8 @@ def main(argv=None):
         all_snapshots,
         start_date=args.start_date,
         end_date=args.end_date,
+        industry_map_path=args.industry_map_path,
+        universe_path=PATHS.cache / "stock_universe.csv",
     )
     _log(
         f"MERGED snapshots={final_manifest['snapshot_count']} "

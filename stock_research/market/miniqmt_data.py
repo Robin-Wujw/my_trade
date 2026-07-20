@@ -112,8 +112,16 @@ def save_miniqmt_frame(
     *,
     period: str = "1d",
     dividend_type: str = "front",
+    merge_existing: bool = False,
 ) -> Path:
     data = normalize_miniqmt_frame(frame, code)
+    if merge_existing:
+        existing = load_cached_miniqmt_frame(code, period=period, dividend_type=dividend_type)
+        if not existing.empty:
+            data = normalize_miniqmt_frame(
+                pd.concat([existing, data], ignore_index=True),
+                code,
+            )
     path = miniqmt_cache_path(code, period, dividend_type)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + f".{random.randint(100000, 999999)}.tmp")
@@ -182,7 +190,13 @@ def fetch_miniqmt_bars_via_qmt_python(
             if not csv_path.is_file():
                 continue
             frame = pd.read_csv(csv_path, dtype={"code": str})
-            cache_path = save_miniqmt_frame(code, frame, period=period, dividend_type=dividend_type)
+            cache_path = save_miniqmt_frame(
+                code,
+                frame,
+                period=period,
+                dividend_type=dividend_type,
+                merge_existing=True,
+            )
             fetched[normalize_project_code(code)] = {
                 "rows": int(len(frame)),
                 "cache_path": str(cache_path),

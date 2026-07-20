@@ -1,14 +1,17 @@
 """Build conservative dated research candidates from locally cached data."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 from pathlib import Path
 
+import duckdb
 import pandas as pd
 
 from stock_research.indicators.technical_quant import _sma_cn
+from stock_research.core.paths import PATHS
 from stock_research.core.financial_period import (
     latest_visible_report_period,
     visible_report_periods,
@@ -18,12 +21,21 @@ from stock_research.strategies.candidate_interface import (
     normalize_candidate,
     normalize_candidate_snapshots,
 )
+from stock_research.strategies.fundamental_selection import (
+    VALUE_INDUSTRY_RULE_VERSION,
+    is_value_industry_allowed,
+    value_industry_allowlist_match,
+)
+from stock_research.storage import Database, KlineRepository
 
 
-SNAPSHOT_VERSION = "unified-selection-v4"
+SNAPSHOT_VERSION = "unified-selection-v5-value-industry-allowlist"
 MAX_MAINLINE_AGE_DAYS = 31
 CANDIDATE_SNAPSHOT_COLUMNS = [
-    "date", "code", "name", "close", "value_line", "quality_score",
+    "date", "code", "name", "industry", "value_industry_allowed",
+    "value_industry_allowlist_match", "value_industry_rule_version",
+    "industry_point_in_time",
+    "close", "value_line", "quality_score",
     "earnings_yoy", "mktcap", "report_period", "snapshot_version",
     "financial_point_in_time", "financial_point_in_time_source",
     "announcement_date", "price_to_value", "mainline_snapshot_date",
@@ -287,6 +299,109 @@ def _load_raw_price_frame(raw_kline_directory, market, code, start_date, end_dat
     return frame.drop_duplicates("date", keep="last").set_index("date").sort_index()
 
 
+def _load_raw_price_frames_bulk(
+    raw_kline_directory,
+    codes,
+    start_date,
+    end_date,
+    *,
+    batch_size=500,
+):
+    """Read MiniQMT raw CSVs in batches instead of opening every file twice."""
+    if not raw_kline_directory:
+        return {}
+    directory = Path(raw_kline_directory)
+    paths = []
+    for code in sorted(codes):
+        market = "sh" if code.startswith(("6", "9")) else "sz"
+        path = directory / f"{market}_{code}.csv"
+        if path.is_file():
+            paths.append(str(path))
+    if not paths:
+        return {}
+
+    frames = {}
+    connection = duckdb.connect()
+    try:
+        for offset in range(0, len(paths), max(1, int(batch_size))):
+            batch = paths[offset:offset + max(1, int(batch_size))]
+            try:
+                data = connection.execute(
+                    """
+                    SELECT date, code, open, high, low, close, volume, amount, tradestatus
+                    FROM read_csv(?, header=true, union_by_name=true)
+                    WHERE CAST(date AS DATE) BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
+                    """,
+                    [batch, str(start_date), str(end_date)],
+                ).fetchdf()
+            except (duckdb.Error, OSError, ValueError):
+                continue
+            if data.empty:
+                continue
+            data["date"] = pd.to_datetime(data["date"], errors="coerce")
+            for column in (
+                "open", "high", "low", "close", "volume", "amount", "tradestatus",
+            ):
+                if column in data:
+                    data[column] = pd.to_numeric(data[column], errors="coerce")
+            for full_code, group in data.dropna(subset=["date", "close"]).groupby("code"):
+                code = str(full_code).split(".")[-1].zfill(6)
+                frames[code] = (
+                    group.drop(columns=["code"])
+                    .drop_duplicates("date", keep="last")
+                    .set_index("date")
+                    .sort_index()
+                )
+    finally:
+        connection.close()
+    return frames
+
+
+def _load_miniqmt_qfq_from_database(codes, start_date, end_date):
+    if not PATHS.database.is_file():
+        return {}
+    full_codes = [
+        ("sh." if code.startswith(("6", "9")) else "sz.") + code
+        for code in sorted(codes)
+    ]
+    try:
+        data = KlineRepository(Database(PATHS.database)).load_stock_klines(
+            "miniqmt",
+            full_codes,
+            start_date=str(start_date),
+            end_date=str(end_date),
+        )
+    except (duckdb.Error, OSError, ValueError):
+        return {}
+    if data.empty:
+        return {}
+    data["date"] = pd.to_datetime(data["date"], errors="coerce")
+    frames = {}
+    for full_code, group in data.dropna(subset=["date", "close"]).groupby("code"):
+        code = str(full_code).split(".")[-1].zfill(6)
+        frame = group.drop(columns=["code"]).set_index("date").sort_index()
+        frame["_qfq_anchor_date"] = pd.Timestamp(end_date).normalize()
+        frames[code] = frame
+    return frames
+
+
+def _potential_candidate_codes(financial_by_period):
+    """Codes that could enter an execution or tracked-value path in any period."""
+    eligible = set()
+    for rows in financial_by_period.values():
+        for code, metrics in rows.items():
+            quality = pd.to_numeric(metrics.get("quality_score"), errors="coerce")
+            yoy = pd.to_numeric(metrics.get("yoy"), errors="coerce")
+            if (
+                pd.notna(quality)
+                and float(quality) >= 70.0
+                and pd.notna(yoy)
+                and float(yoy) >= 0.10
+            ):
+                eligible.add(code)
+    return eligible
+
+
 def _attach_akshare_asof_prices(frame, raw_frame, *, source_label="AkShare"):
     """Add observation-day anchored prices from raw + current-qfq data.
 
@@ -332,6 +447,14 @@ def _load_prices(
 ):
     result = {}
     source_label = "MiniQMT" if price_source == "miniqmt" else "AkShare"
+    database_frames = (
+        _load_miniqmt_qfq_from_database(codes, start_date, end_date)
+        if price_source == "miniqmt" else {}
+    )
+    bulk_raw_frames = (
+        _load_raw_price_frames_bulk(raw_kline_directory, codes, start_date, end_date)
+        if price_source == "miniqmt" else {}
+    )
     for code in codes:
         market = "sh" if code.startswith(("6", "9")) else "sz"
         path = Path(kline_directory) / f"{market}_{code}.csv"
@@ -347,36 +470,37 @@ def _load_prices(
             qfq_anchor_date = pd.NaT
         if price_source == "miniqmt" and pd.isna(qfq_anchor_date):
             qfq_anchor_date = pd.Timestamp(end_date).normalize()
-        try:
-            header = pd.read_csv(path, nrows=0)
-            columns = [
-                column for column in (
-                    "date", "open", "high", "low", "close", "volume",
-                    "amount", "turnover", "tradestatus",
-                ) if column in header.columns
-            ]
-            frame = pd.read_csv(path, usecols=columns)
-        except (OSError, ValueError):
-            continue
-        frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-        for column in ("open", "high", "low", "close", "volume", "amount", "turnover", "tradestatus"):
-            if column not in frame:
+        frame = database_frames.get(code)
+        if frame is None:
+            try:
+                frame = pd.read_csv(path)
+            except (OSError, ValueError):
                 continue
-            frame[column] = pd.to_numeric(frame[column], errors="coerce")
-        frame = frame[
-            (frame["date"] >= pd.Timestamp(start_date))
-            & (frame["date"] <= pd.Timestamp(end_date))
-        ].dropna(subset=["date", "close"])
+            frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+            for column in (
+                "open", "high", "low", "close", "volume", "amount",
+                "turnover", "tradestatus",
+            ):
+                if column in frame:
+                    frame[column] = pd.to_numeric(frame[column], errors="coerce")
+            frame = frame[
+                (frame["date"] >= pd.Timestamp(start_date))
+                & (frame["date"] <= pd.Timestamp(end_date))
+            ].dropna(subset=["date", "close"])
+        else:
+            frame = frame.reset_index(names="date")
         if not frame.empty:
             frame["_qfq_anchor_date"] = qfq_anchor_date
             frame = frame.drop_duplicates("date", keep="last").set_index("date").sort_index()
-            raw_frame = _load_raw_price_frame(
-                raw_kline_directory,
-                market,
-                code,
-                start_date,
-                end_date,
-            )
+            raw_frame = bulk_raw_frames.get(code)
+            if raw_frame is None and price_source != "miniqmt":
+                raw_frame = _load_raw_price_frame(
+                    raw_kline_directory,
+                    market,
+                    code,
+                    start_date,
+                    end_date,
+                )
             frame["_price_source"] = price_source
             result[code] = _attach_akshare_asof_prices(
                 frame,
@@ -1210,8 +1334,17 @@ def _right_quant_selection_rows(rows: list[dict]) -> list[dict]:
     return selected
 
 
-def _value_falsification_reasons(value_line, quality, yoy, market_cap) -> list[str]:
+def _value_falsification_reasons(
+    value_line,
+    quality,
+    yoy,
+    market_cap,
+    *,
+    value_industry_allowed=True,
+) -> list[str]:
     reasons = []
+    if not value_industry_allowed:
+        reasons.append("value_industry_not_allowlisted")
     if pd.isna(value_line) or float(value_line) <= 0:
         reasons.append("value_line_missing_or_nonpositive")
     if pd.isna(quality) or float(quality) < 70:
@@ -1221,6 +1354,24 @@ def _value_falsification_reasons(value_line, quality, yoy, market_cap) -> list[s
     if pd.isna(market_cap) or float(market_cap) < 100:
         reasons.append("mktcap_below_100")
     return reasons
+
+
+def _load_industry_map(universe, industry_map_path=None):
+    mapping = {}
+    if "industry" in universe:
+        for _, row in universe.iterrows():
+            code = str(row.get("code") or "").strip()
+            industry = str(row.get("industry") or "").strip()
+            if code and industry and industry.lower() not in {"nan", "none"}:
+                mapping[code] = industry
+    if industry_map_path is not None and Path(industry_map_path).is_file():
+        frame = pd.read_csv(industry_map_path, dtype={"code": str})
+        for _, row in frame.iterrows():
+            code = str(row.get("code") or "").strip()
+            industry = str(row.get("industry") or "").strip()
+            if code and industry and industry.lower() not in {"nan", "none"}:
+                mapping[code] = industry
+    return mapping
 
 
 def _value_nonselection_reasons(price_to_value, financial_reasons) -> list[str]:
@@ -1235,6 +1386,41 @@ def _value_nonselection_reasons(price_to_value, financial_reasons) -> list[str]:
     return reasons
 
 
+def _merge_candidate_model_rows(*row_groups):
+    by_code = {}
+    for item in (row for group in row_groups for row in group):
+        existing = by_code.get(item["code"])
+        if existing is None:
+            by_code[item["code"]] = dict(item)
+            continue
+        sources = {
+            source for source in (
+                str(existing.get("candidate_source") or "").split("+")
+                + str(item.get("candidate_source") or "").split("+")
+            ) if source
+        }
+        existing.update({
+            "strategy_part": " + ".join(dict.fromkeys([
+                str(existing.get("strategy_part") or ""),
+                str(item.get("strategy_part") or ""),
+            ])),
+            "candidate_source": "+".join(sorted(sources)),
+            "signal_eligible": True,
+            "mainline_boards": item.get("mainline_boards") or existing.get(
+                "mainline_boards", ""
+            ),
+            "candidate_score": max(
+                float(existing.get("candidate_score") or 0.0),
+                float(item.get("candidate_score") or 0.0),
+            ),
+            "selection_reason": (
+                f"{existing.get('selection_reason', '')}；"
+                f"{item.get('selection_reason', '')}"
+            ).strip("；"),
+        })
+    return list(by_code.values())
+
+
 def build_historical_candidate_snapshots(
     start_date,
     end_date,
@@ -1244,6 +1430,7 @@ def build_historical_candidate_snapshots(
     universe_path,
     mainline_directory=None,
     raw_kline_directory=None,
+    industry_map_path=None,
     price_source="akshare",
     max_mainline_age_days=MAX_MAINLINE_AGE_DAYS,
     research_repository=None,
@@ -1256,6 +1443,8 @@ def build_historical_candidate_snapshots(
         str(row["code"]).split(".")[-1]: str(row.get("code_name") or row["code"])
         for _, row in universe.iterrows()
     }
+    industry_map = _load_industry_map(universe, industry_map_path)
+    industry_point_in_time = False
     periods = visible_report_periods(start, end)
     financial = {
         period: _load_financial_cache(value_cache_directory, period)
@@ -1267,7 +1456,7 @@ def build_historical_candidate_snapshots(
     mainline_snapshots = _load_mainline_snapshots(mainline_directory)
     codes = set().union(*(rows.keys() for rows in financial.values()))
     price_start = start - pd.Timedelta(days=420)
-    prices = _load_prices(
+    all_prices = _load_prices(
         kline_directory,
         codes,
         price_start,
@@ -1275,16 +1464,18 @@ def build_historical_candidate_snapshots(
         raw_kline_directory=raw_kline_directory,
         price_source=price_source,
     )
-    prices = {
-        code: _candidate_feature_frame(frame)
-        for code, frame in prices.items()
-    }
     calendar = sorted({
         date.normalize()
-        for frame in prices.values()
+        for frame in all_prices.values()
         for date in frame.index
         if start <= date.normalize() <= end
     })
+    potential_codes = _potential_candidate_codes(financial)
+    prices = {
+        code: _candidate_feature_frame(frame)
+        for code, frame in all_prices.items()
+        if code in potential_codes
+    }
     snapshots = {}
     tracked_value_codes = set()
     progress_enabled = os.environ.get("CANDIDATE_HISTORY_PROGRESS") == "1"
@@ -1351,6 +1542,9 @@ def build_historical_candidate_snapshots(
             if any(pd.isna(item) for item in (quality, yoy, market_cap)):
                 continue
             full_code = ("sh." if code.startswith(("6", "9")) else "sz.") + code
+            industry = industry_map.get(full_code, "")
+            value_industry_allowed = is_value_industry_allowed(industry)
+            value_industry_match = value_industry_allowlist_match(industry)
             price_to_value = (
                 None if pd.isna(value_line) or value_line <= 0
                 else close / float(value_line)
@@ -1375,7 +1569,11 @@ def build_historical_candidate_snapshots(
                 adjustment_check = "前复权锚点不晚于观察日"
                 qfq_anchor_text = qfq_anchor_date.strftime("%Y-%m-%d")
             value_falsification_reasons = _value_falsification_reasons(
-                value_line, quality, yoy, market_cap,
+                value_line,
+                quality,
+                yoy,
+                market_cap,
+                value_industry_allowed=value_industry_allowed,
             )
             value_nonselection_reasons = _value_nonselection_reasons(
                 price_to_value, value_falsification_reasons,
@@ -1384,6 +1582,11 @@ def build_historical_candidate_snapshots(
                 "date": date.strftime("%Y-%m-%d"),
                 "code": full_code,
                 "name": names.get(code, code),
+                "industry": industry,
+                "value_industry_allowed": value_industry_allowed,
+                "value_industry_allowlist_match": value_industry_match,
+                "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
+                "industry_point_in_time": industry_point_in_time,
                 "close": close,
                 "value_line": None if pd.isna(value_line) else float(value_line),
                 "quality_score": float(quality),
@@ -1471,6 +1674,31 @@ def build_historical_candidate_snapshots(
                     ),
                 })
             if (
+                not value_industry_allowed
+                and price_to_value is not None
+                and pd.notna(price_to_value)
+                and 0.80 <= float(price_to_value) <= 1.08
+                and passes_fundamental_gate
+            ):
+                diagnostic_rows.append({
+                    **base,
+                    "strategy_part": "value_industry_rejected_diagnostic",
+                    "candidate_score": 0.0,
+                    "historical_adjustment_check": (
+                        f"{adjustment_check}；value_industry_not_allowlisted"
+                    ),
+                    "candidate_source": "value_model",
+                    "signal_eligible": False,
+                    "selected_for_trading": False,
+                    "candidate_failure_reason": "value_industry_not_allowlisted",
+                    "value_falsified": True,
+                    "value_falsification_reason": "value_industry_not_allowlisted",
+                    "selection_reason": (
+                        "diagnostic row only; value line is calculable but the "
+                        "industry is outside the explicit allowlist"
+                    ),
+                })
+            if (
                 not value_falsification_reasons
                 and value_safety_reasons
                 and price_to_value is not None
@@ -1499,10 +1727,10 @@ def build_historical_candidate_snapshots(
                     ),
                 })
             if (
-                not pd.isna(value_line)
-                and value_line > 0
-                and 0.80 <= close / value_line <= 1.08
-                and passes_fundamental_gate
+                not value_falsification_reasons
+                and price_to_value is not None
+                and pd.notna(price_to_value)
+                and 0.80 <= float(price_to_value) <= 1.08
                 and not value_safety_reasons
             ):
                 value_rows.append({
@@ -1523,6 +1751,7 @@ def build_historical_candidate_snapshots(
                         f"{trade_basis['trade_basis_reason']}"
                     ),
                 })
+                tracked_value_codes.add(full_code)
             if code in mainline_members and passes_fundamental_gate:
                 right_trade_basis = float(trade_basis["trade_basis_score"])
                 right_leadership = float(leadership["leadership_score"])
@@ -1577,33 +1806,7 @@ def build_historical_candidate_snapshots(
                 })
         leadership_rows.extend(_right_quant_selection_rows(right_side_pool_rows))
         normal_rows.sort(key=lambda item: (-item["candidate_score"], item["code"]))
-        by_code = {}
-        for item in leadership_rows:
-            existing = by_code.get(item["code"])
-            if existing:
-                sources = {
-                    source for source in (
-                        str(existing.get("candidate_source") or "").split("+")
-                        + str(item.get("candidate_source") or "").split("+")
-                    ) if source
-                }
-                existing.update({
-                    "strategy_part": " + ".join(dict.fromkeys([
-                        str(existing.get("strategy_part") or ""),
-                        str(item.get("strategy_part") or ""),
-                    ])),
-                    "candidate_source": "+".join(sorted(sources)),
-                    "signal_eligible": True,
-                    "mainline_boards": item["mainline_boards"] or existing.get("mainline_boards", ""),
-                    "candidate_score": max(existing["candidate_score"], item["candidate_score"]),
-                    "selection_reason": (
-                        f"{existing.get('selection_reason', '')}；"
-                        f"{item.get('selection_reason', '')}"
-                    ).strip("；"),
-                })
-            else:
-                by_code[item["code"]] = item
-        pool_rows = list(by_code.values())
+        pool_rows = _merge_candidate_model_rows(leadership_rows, value_rows)
         selected = normalize_candidate_snapshots(
             {date.strftime("%Y-%m-%d"): pool_rows}
         )[date.strftime("%Y-%m-%d")]
@@ -1628,6 +1831,9 @@ def build_historical_candidate_snapshots(
                         diagnostic.get("quality_score"),
                         diagnostic.get("earnings_yoy"),
                         diagnostic.get("mktcap"),
+                        value_industry_allowed=bool(
+                            diagnostic.get("value_industry_allowed")
+                        ),
                     ),
                 )
                 diagnostic["candidate_failure_reason"] += (
@@ -1639,7 +1845,10 @@ def build_historical_candidate_snapshots(
         for diagnostic in diagnostic_rows:
             code = diagnostic["code"]
             if code in selected_by_code:
-                if diagnostic.get("value_falsified"):
+                selected_sources = set(
+                    str(selected_by_code[code].get("candidate_source") or "").split("+")
+                )
+                if diagnostic.get("value_falsified") and "value_model" in selected_sources:
                     selected_by_code[code]["value_falsified"] = True
                     selected_by_code[code]["value_falsification_reason"] = diagnostic.get(
                         "value_falsification_reason", "",
@@ -1685,7 +1894,91 @@ def build_historical_candidate_snapshots(
     return snapshots
 
 
-def save_historical_candidate_snapshots(output_directory, snapshots, *, start_date, end_date):
+def _industry_manifest_metadata(industry_map_path=None, universe_path=None):
+    path = Path(industry_map_path).resolve() if industry_map_path else None
+    universe = Path(universe_path).resolve() if universe_path else None
+    metadata = {
+        "industry_source_path": str(path) if path else None,
+        "industry_source_sha256": None,
+        "industry_source_modified_at": None,
+        "industry_as_of_date": None,
+        "industry_data_source": None,
+        "industry_point_in_time_status": None,
+        "industry_mapping_count": 0,
+        "industry_universe_count": 0,
+        "industry_coverage_ratio": 0.0,
+    }
+    if path is None or not path.is_file():
+        return metadata
+
+    payload = path.read_bytes()
+    metadata["industry_source_sha256"] = hashlib.sha256(payload).hexdigest()
+    metadata["industry_source_modified_at"] = pd.Timestamp(
+        path.stat().st_mtime, unit="s", tz="UTC"
+    ).isoformat()
+    frame = pd.read_csv(path, dtype={"code": str})
+    metadata_path = path.with_suffix(path.suffix + ".meta.json")
+    if not metadata_path.is_file() and "latest" in path.stem:
+        for candidate in sorted(path.parent.glob("industry_map_*.csv"), reverse=True):
+            candidate_metadata = candidate.with_suffix(candidate.suffix + ".meta.json")
+            if candidate_metadata.is_file() and hashlib.sha256(candidate.read_bytes()).digest() == hashlib.sha256(payload).digest():
+                metadata_path = candidate_metadata
+                break
+    if metadata_path.is_file():
+        try:
+            source_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            source_metadata = {}
+        metadata["industry_as_of_date"] = source_metadata.get("as_of_date") or None
+        metadata["industry_data_source"] = source_metadata.get("data_source") or None
+        metadata["industry_point_in_time_status"] = (
+            source_metadata.get("point_in_time_status") or None
+        )
+    valid = frame.copy()
+    valid["code"] = valid.get("code", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
+    valid["industry"] = (
+        valid.get("industry", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
+    )
+    valid = valid[
+        valid["code"].ne("")
+        & valid["industry"].ne("")
+        & ~valid["industry"].str.lower().isin({"nan", "none"})
+    ]
+    mapped_codes = set(valid["code"])
+    metadata["industry_mapping_count"] = len(mapped_codes)
+
+    for column in ("as_of_date", "snapshot_date", "date"):
+        if column not in frame:
+            continue
+        dates = pd.to_datetime(frame[column], errors="coerce").dropna()
+        if not dates.empty:
+            metadata["industry_as_of_date"] = (
+                metadata["industry_as_of_date"]
+                or dates.max().strftime("%Y-%m-%d")
+            )
+            break
+
+    universe_codes = set()
+    if universe is not None and universe.is_file():
+        universe_frame = pd.read_csv(universe, dtype={"code": str}, usecols=["code"])
+        universe_codes = {
+            str(code).strip() for code in universe_frame["code"].dropna() if str(code).strip()
+        }
+    metadata["industry_universe_count"] = len(universe_codes)
+    if universe_codes:
+        metadata["industry_coverage_ratio"] = len(mapped_codes & universe_codes) / len(universe_codes)
+    return metadata
+
+
+def save_historical_candidate_snapshots(
+    output_directory,
+    snapshots,
+    *,
+    start_date,
+    end_date,
+    industry_map_path=None,
+    universe_path=None,
+):
     target = Path(output_directory)
     target.mkdir(parents=True, exist_ok=True)
     manifest_rows = []
@@ -1710,6 +2003,9 @@ def save_historical_candidate_snapshots(output_directory, snapshots, *, start_da
         financial_point_in_time = all(
             row.get("financial_point_in_time") is True for row in rows
         )
+        industry_point_in_time = bool(rows) and all(
+            row.get("industry_point_in_time") is True for row in rows
+        )
         manifest_rows.append({
             "date": date,
             "report_period": report_period,
@@ -1718,10 +2014,14 @@ def save_historical_candidate_snapshots(output_directory, snapshots, *, start_da
             "mainline_snapshot_date": mainline_date,
             "mainline_snapshot_fresh": mainline_fresh,
             "financial_point_in_time": financial_point_in_time,
+            "industry_point_in_time": industry_point_in_time,
             "file": path.name,
         })
     financial_point_in_time = bool(manifest_rows) and all(
         row["financial_point_in_time"] for row in manifest_rows
+    )
+    industry_point_in_time = bool(manifest_rows) and all(
+        row["industry_point_in_time"] for row in manifest_rows
     )
     unsafe_snapshot_dates = [
         row["date"] for row in manifest_rows
@@ -1737,6 +2037,7 @@ def save_historical_candidate_snapshots(output_directory, snapshots, *, start_da
             "lack strict per-company announce_time visibility; this is research-only."
         )
     )
+    industry_metadata = _industry_manifest_metadata(industry_map_path, universe_path)
     manifest = {
         "version": SNAPSHOT_VERSION,
         "requested_start": str(start_date),
@@ -1749,7 +2050,10 @@ def save_historical_candidate_snapshots(output_directory, snapshots, *, start_da
         "candidate_pool_formula": "所有模型统一输出候选接口；人工观察清单不得注入候选",
         "selection_standard": {
             "value": (
-                "旧价值线模型仅作诊断：0.80 <= price/value_line <= 1.08，"
+                "基本价值线仅允许行业白名单：汽车电子电气系统、"
+                "通信网络设备及器件、半导体/半导体材料/半导体设备、分立器件；"
+                "行业缺失或未命中白名单不得生成 value_model 或建立左仓；"
+                "同时要求 0.80 <= price/value_line <= 1.08，"
                 "quality >= 70，yoy >= 0.10，mktcap >= 100；"
                 "高增长小市值安全边际不足时不允许左侧执行"
             ),
@@ -1769,11 +2073,16 @@ def save_historical_candidate_snapshots(output_directory, snapshots, *, start_da
             "manual": "观察清单和交易计划不能直接注入候选",
             "mainline_max_age_days": MAX_MAINLINE_AGE_DAYS,
         },
-        "point_in_time_note": (
-            "行情严格按观察日截断；财务报告期保守选择，但缺少逐公告修订历史，"
-            "不得声明为严格财务时点回测。"
-        ),
         "point_in_time_note": point_in_time_note,
+        "industry_point_in_time": bool(industry_point_in_time),
+        "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
+        **industry_metadata,
+        "industry_point_in_time_note": (
+            "Industry membership is reconstructed from a dated point-in-time source."
+            if industry_point_in_time else
+            "Historical candidates use a non-point-in-time industry map for allowlist "
+            "routing; strict backtests must reject it unless explicitly overridden."
+        ),
         "snapshots": manifest_rows,
     }
     manifest_path = target / "manifest.json"

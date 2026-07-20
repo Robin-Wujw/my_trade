@@ -19,9 +19,9 @@ _REASON_REPLACEMENTS = {
 }
 
 _BLOCK_REASON_REPLACEMENTS = {
-    "entry_evidence_below_min": "买点证据分低于执行门槛",
+    "entry_evidence_below_min": "旧证据分低于历史参数（仅解释字段）",
     "order_not_filled": "价格未触发成交",
-    "support_pullback_not_first_entry": "支撑拉回首仓条件不足，只能等待已有右仓加仓或更强证据",
+    "support_pullback_not_first_entry": "支撑拉回首仓放宽后仍未达量化底线，需等待量能/强度/支撑距离改善",
 }
 
 _SIGNAL_TYPE_REPLACEMENTS = {
@@ -258,7 +258,7 @@ def _render_relevant_entry_blocks(result: dict, *, max_rows_per_code: int = 20) 
         "",
         "## 期末持仓相关未成交信号",
         "",
-        "| 股票 | 日期 | 信号 | 证据分 | 交易分 | 领导力 | 未成交/未左转右原因 |",
+        "| 股票 | 日期 | 信号 | 旧证据分 | 交易分 | 领导力 | 未成交/未左转右原因 |",
         "|---|---|---|---:|---:|---:|---|",
     ]
     for code in sorted(grouped):

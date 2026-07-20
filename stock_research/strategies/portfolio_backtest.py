@@ -834,8 +834,9 @@ def run_portfolio_backtest(
     requested_start,
     end_date,
     trade_plans=None,
-    max_positions=3,
+    max_positions=5,
     max_total_held_symbols=5,
+    max_left_positions=1,
     max_same_industry=2,
     same_theme_correlation=0.60,
     min_entry_evidence_score=0,
@@ -920,6 +921,25 @@ def run_portfolio_backtest(
             if state.left or state.left_grid_started
         }
 
+    def left_roundtrip_protected(state):
+        return any(bool(lot.get("right_cycle_demoted")) for lot in state.left)
+
+    def left_unrealized_return_before(code, date):
+        state = states[code]
+        quantity = sum(float(lot.get("quantity") or 0.0) for lot in state.left)
+        if quantity <= 1e-9:
+            return 0.0
+        cost = sum(
+            float(lot.get("quantity") or 0.0) * float(lot.get("cost") or 0.0)
+            for lot in state.left
+        ) / quantity
+        if cost <= 1e-9:
+            return 0.0
+        visible = frames[code][frames[code]["date"].dt.normalize() < date]
+        if visible.empty:
+            return 0.0
+        return float(visible.iloc[-1]["close"]) / cost - 1.0
+
     def left_position_counts_capacity(state):
         if not state.left:
             return False
@@ -943,10 +963,13 @@ def run_portfolio_backtest(
         return sum(float(lot["size"]) for lot in state.left + state.right)
 
     configured_positions = (
-        3 if max_positions is None or int(max_positions) <= 0
+        5 if max_positions is None or int(max_positions) <= 0
         else min(5, int(max_positions))
     )
     configured_total_held_symbols = max(1, min(5, int(max_total_held_symbols)))
+    configured_left_positions = max(
+        0, min(configured_total_held_symbols, int(max_left_positions)),
+    )
     configured_same_industry = max(1, int(max_same_industry))
     configured_theme_correlation = float(same_theme_correlation)
     configured_min_entry_evidence_score = max(
@@ -982,7 +1005,7 @@ def run_portfolio_backtest(
         left_codes = left_side_codes()
         if code is not None and code in left_codes:
             return False
-        return len(left_codes) >= 1
+        return len(left_codes) >= configured_left_positions
 
     def right_codes():
         return {code for code, state in states.items() if state.right}
@@ -1264,7 +1287,10 @@ def run_portfolio_backtest(
         if not right_market_active() or current_down_streak >= 3:
             return 0.0
         sources = set(str(candidate.get("candidate_source") or "").split("+"))
-        if not sources & {"standard_mainline", "growth_leadership", "quant_right"}:
+        if not sources & {
+            "factor_quant", "standard_mainline", "growth_leadership",
+            "quant_right",
+        }:
             return 0.0
         leadership = pd.to_numeric(candidate.get("leadership_score"), errors="coerce")
         right_quant = pd.to_numeric(candidate.get("right_quant_score"), errors="coerce")
@@ -1283,44 +1309,43 @@ def run_portfolio_backtest(
             and float(stop) > 0
         ):
             support_distance = max(0.0, float(trigger) / float(stop) - 1.0)
-        evidence_score = float(signal.get("entry_evidence_score") or signal.get("rank") or 0.0)
-        has_leadership = (
-            pd.notna(leadership)
-            and float(leadership) >= 28.0
+        known_volume_ratio = float(signal.get("known_volume_ratio") or 0.0)
+        strong_quant_profile = (
+            pd.notna(leadership) and float(leadership) >= 25.0
         ) or (
-            pd.notna(right_quant)
-            and float(right_quant) >= 90.0
+            pd.notna(right_quant) and float(right_quant) >= 85.0
+        ) or (
+            pd.notna(trade_basis) and float(trade_basis) >= 7.5
         )
-        required_values_visible = (
-            pd.notna(trade_basis)
-            and pd.notna(return_20)
-            and pd.notna(return_60)
-            and pd.notna(drawdown_60)
-            and pd.notna(avg_amount_20)
-        )
-        if not required_values_visible:
-            return 0.0
         base_ok = (
-            has_leadership
-            and float(trade_basis) >= 7.5
-            and 0.05 <= float(return_20) <= 0.45
-            and float(return_60) >= 0.18
-            and float(drawdown_60) >= -0.18
-            and float(avg_amount_20) >= 800_000_000.0
-            and float(signal.get("known_volume_ratio") or 0.0) >= 1.0
-            and support_distance <= 0.065
-            and evidence_score >= 0.0
+            known_volume_ratio >= 0.90
+            and support_distance <= 0.075
         )
+        if base_ok and pd.notna(trade_basis):
+            base_ok = float(trade_basis) >= 6.5
+        if base_ok and pd.notna(return_20):
+            base_ok = -0.05 <= float(return_20) <= 0.55
+        if base_ok and pd.notna(return_60):
+            base_ok = float(return_60) >= 0.0
+        if base_ok and pd.notna(drawdown_60):
+            base_ok = float(drawdown_60) >= -0.25
+        if base_ok and pd.notna(avg_amount_20):
+            base_ok = float(avg_amount_20) >= 500_000_000.0
         if not base_ok:
             return 0.0
         strong_ok = (
-            float(trade_basis) >= 8.0
-            and float(return_20) >= 0.08
-            and float(return_60) >= 0.30
-            and float(drawdown_60) >= -0.12
-            and float(avg_amount_20) >= 2_000_000_000.0
+            strong_quant_profile
+            and known_volume_ratio >= 1.0
             and support_distance <= 0.055
         )
+        if strong_ok and pd.notna(return_20):
+            strong_ok = 0.0 <= float(return_20) <= 0.45
+        if strong_ok and pd.notna(return_60):
+            strong_ok = float(return_60) >= 0.10
+        if strong_ok and pd.notna(drawdown_60):
+            strong_ok = float(drawdown_60) >= -0.18
+        if strong_ok and pd.notna(avg_amount_20):
+            strong_ok = float(avg_amount_20) >= 800_000_000.0
         return 0.20 if strong_ok else 0.15
 
     def leading_pullback_pilot_starter(candidate, signal):
@@ -1783,6 +1808,7 @@ def run_portfolio_backtest(
                 "max_return": 0.0,
                 "origin_account": "left",
                 "origin_batch": origin_batch,
+                "origin_left_value_line": state.left_value_line,
                 "left_grid_slot": int(lot["slot"]),
                 "reconfirm_level": float(signal["trigger"]),
                 "reconfirm_on_next_day": reconfirm_on_next_day,
@@ -1793,6 +1819,44 @@ def run_portfolio_backtest(
         state.left_value_line = None
         state.left_grid_started = False
         return promoted, next_right_batch_id
+
+    def demote_origin_left_lot(code, state, lot, date, price, reason):
+        restored_lot = dict(lot)
+        restored_lot["batch"] = str(lot.get("origin_batch") or lot["batch"]).replace("R", "L", 1)
+        restored_lot["slot"] = int(lot.get("left_grid_slot") or lot.get("slot") or 0)
+        restored_lot["date"] = lot.get("origin_date", lot.get("date"))
+        for key in (
+            "stop", "merged", "proven", "max_return", "origin_account",
+            "origin_batch", "origin_left_value_line", "left_grid_slot",
+            "reconfirm_level", "reconfirm_on_next_day", "time_limit_days",
+            "space_stop_pct",
+        ):
+            restored_lot.pop(key, None)
+        state.right.remove(lot)
+        state.pending_lot_exits.pop(lot["batch"], None)
+        restored_lot["right_cycle_demoted"] = True
+        restored_lot["right_cycle_demoted_date"] = pd.Timestamp(date).strftime("%Y-%m-%d")
+        state.left.append(restored_lot)
+        value_line = pd.to_numeric(lot.get("origin_left_value_line"), errors="coerce")
+        if pd.notna(value_line) and float(value_line) > 0:
+            state.left_value_line = float(value_line)
+        state.left_grid_started = True
+        if not state.right:
+            state.right_parts = configured_profit_tranches
+            state.right_sold.clear()
+            state.right_plan_date = None
+            state.pending_lot_exits.clear()
+            state.pending_profit_ids.clear()
+            state.pending_tail_capacity_free = False
+            state.right_tail_capacity_free = False
+        add_event(
+            date, code, "右转左接回左仓", price, 0.0,
+            (
+                f"{lot['batch']}->{restored_lot['batch']}; {reason}; "
+                "仅降级原左侧接管批次，未卖出"
+            ),
+            account_mode="left",
+        )
 
     def left_position_detached_from_value(row, state):
         if state.left_value_line is None:
@@ -1874,6 +1938,13 @@ def run_portfolio_backtest(
                 reason = state.pending_lot_exits.get(lot["batch"])
                 if not reason:
                     continue
+                if lot.get("origin_account") == "left":
+                    demote_origin_left_lot(
+                        code, state, lot, date, sell,
+                        f"{reason}; {fill['status']}",
+                    )
+                    exited_today.add(code)
+                    continue
                 quantity = float(lot["quantity"])
                 entry_fee_cash = float(lot.get("entry_fee_cash") or 0.0)
                 size, pnl = execute_sell(quantity, sell, lot["cost"])
@@ -1953,23 +2024,28 @@ def run_portfolio_backtest(
             current_down_streak = 0
             current_up_streak = 0
 
-        if len(left_side_codes()) > 1:
+        if len(left_side_codes()) > configured_left_positions:
             def left_keep_rank(code):
                 state = states[code]
                 score = float(last_candidate_scores.get(code, 0.0) or 0.0)
                 return (
+                    left_roundtrip_protected(state),
                     bool(state.right),
+                    left_unrealized_return_before(code, date),
                     score,
                     symbol_exposure(code),
                     code,
                 )
 
-            keep_code = max(left_side_codes(), key=left_keep_rank)
-            for code in left_side_codes() - {keep_code}:
+            keep_codes = set(sorted(
+                left_side_codes(), key=left_keep_rank, reverse=True,
+            )[:configured_left_positions])
+            keep_label = ",".join(sorted(keep_codes)) or "无"
+            for code in left_side_codes() - keep_codes:
                 if code in pending_left_exits or code in pending_left_quota_exits:
                     continue
                 pending_left_quota_exits[code] = (
-                    f"全行情左侧标的限额; 保留={keep_code}"
+                    f"全行情左侧标的限额; 保留={keep_label}"
                 )
 
         for code, state in states.items():
@@ -1997,6 +2073,12 @@ def run_portfolio_backtest(
                     code=code, is_st=is_st(code),
                 )
                 if not fill["filled"]:
+                    continue
+                if lot.get("origin_account") == "left":
+                    demote_origin_left_lot(
+                        code, state, lot, date, float(fill["price"]),
+                        f"开盘未站上{level:.3f}; {fill['status']}",
+                    )
                     continue
                 quantity = float(lot["quantity"])
                 entry_fee_cash = float(lot.get("entry_fee_cash") or 0.0)
@@ -2216,7 +2298,9 @@ def run_portfolio_backtest(
             for code in active_left_codes
         ] + [
             (code, value_line)
-            for _, code, value_line in sorted(new_left_candidates, reverse=True)
+            for _, code, value_line in sorted(
+                new_left_candidates, key=lambda item: (-item[0], item[1]),
+            )
         ]
 
         for code, grid_anchor in left_targets:
@@ -2397,6 +2481,13 @@ def run_portfolio_backtest(
                             continue
                         execution_price = float(fill["price"])
                         execution_reason = f"hard space stop {stop_price:.3f}; {fill['status']}"
+                        if lot.get("origin_account") == "left":
+                            demote_origin_left_lot(
+                                code, state, lot, date, execution_price,
+                                execution_reason,
+                            )
+                            exited_today.add(code)
+                            continue
                         entry_fee_cash = float(lot.get("entry_fee_cash") or 0.0)
                         size, pnl = execute_sell(quantity, execution_price, lot["cost"])
                         state.right.remove(lot)
@@ -2411,6 +2502,13 @@ def run_portfolio_backtest(
                     elif risk.get("condition_stop_triggered") or risk.get("entry_time_stop"):
                         reason = "condition stop" if risk.get("condition_stop_triggered") else "entry time condition"
                         if close_confirmed_execution == "close_proxy":
+                            if lot.get("origin_account") == "left":
+                                demote_origin_left_lot(
+                                    code, state, lot, date, float(row["close"]),
+                                    f"{reason}; 14:55/close proxy",
+                                )
+                                exited_today.add(code)
+                                continue
                             quantity = float(lot["quantity"])
                             sell = float(row["close"])
                             entry_fee_cash = float(lot.get("entry_fee_cash") or 0.0)
@@ -2566,7 +2664,8 @@ def run_portfolio_backtest(
                 if not signal:
                     continue
                 if signal.get("signal_type") == "uptrend_support_pullback":
-                    if not states[code].right:
+                    switching_left_to_right = code in left_right_switch_signals
+                    if not states[code].right and not switching_left_to_right:
                         if not leading_pullback_pilot_starter(candidate, signal):
                             record_entry_block(date, code, candidate, signal, "support_pullback_not_first_entry")
                             continue
@@ -2593,7 +2692,9 @@ def run_portfolio_backtest(
                 ))
             for _, fundamental_score, __, code, index, signal in sorted(candidates, reverse=True):
                 reopening_profit_tail = _is_profit_tail(states[code])
-                opening_right_symbol = code not in capacity_codes()
+                # A left-held symbol is already part of the portfolio. Its
+                # management transition must not be gated as a new symbol.
+                opening_right_symbol = code not in occupied_codes()
                 candidate = current_candidates.get(code) or last_candidates.get(code, {})
                 if opening_right_symbol:
                     if total_symbol_limit_reached(code):
@@ -2699,7 +2800,7 @@ def run_portfolio_backtest(
                         else 0.20
                     )
                     if pullback_pilot:
-                        entry_kind = "领先族群拉回试错首仓"
+                        entry_kind = "支撑拉回试错首仓"
                     elif preferred_breakout:
                         entry_kind = "33未三日下行首仓" if current_down_streak < 3 else "33三日下行试错首仓"
                     elif inferred_entry:
@@ -2763,6 +2864,38 @@ def run_portfolio_backtest(
                     code, requested_size, float(fill["price"]),
                 )
                 if size <= 1e-9:
+                    if left_to_right:
+                        states[code].pending_tail_capacity_free = False
+                        states[code].right_tail_capacity_free = False
+                        states[code].right_sold.clear()
+                        states[code].pending_profit_ids.clear()
+                        promoted_left_lots, next_batch_id = promote_left_grid_to_right_campaign(
+                            code, states[code], row, signal, next_batch_id,
+                        )
+                        states[code].right_parts = _effective_profit_tranches(
+                            code,
+                            sum(float(lot["quantity"]) for lot in states[code].right),
+                            configured_profit_tranches,
+                        )
+                        states[code].right_plan_date = row["date"]
+                        promoted_batch_labels = ",".join(
+                            f"{lot['batch']}(原{lot.get('origin_batch', lot['batch'])})"
+                            for lot in promoted_left_lots
+                        )
+                        add_event(
+                            date, code, "左转右接管左仓", fill["price"], 0.0,
+                            (
+                                f"接管左侧批次={promoted_batch_labels}; "
+                                f"右侧止损={float(signal['stop']):.3f}; 左侧网格暂停; "
+                                "现金或一手股数限制，仅切换管理状态，未新增右侧仓"
+                            ),
+                            account_mode="right",
+                        )
+                        record_entry_block(
+                            date, code, candidate, signal,
+                            "left_to_right_add_on_cash_or_board_lot_limit",
+                        )
+                        continue
                     record_entry_block(date, code, candidate, signal, "cash_or_board_lot_limit")
                     continue
                 if reopening_profit_tail:
@@ -3121,6 +3254,7 @@ def run_portfolio_backtest(
         "candidate_pool_limit": MAX_DAILY_CANDIDATES,
         "max_positions": configured_positions,
         "max_total_held_symbols": configured_total_held_symbols,
+        "max_left_positions": configured_left_positions,
         "profit_tranches": configured_profit_tranches,
         "profit_tails_consume_capacity": False,
         "profit_tail_minimum_current_return_pct": round(

@@ -7,9 +7,11 @@ from stock_research.pipelines import fundamental_selection as selection_pipeline
 from stock_research.pipelines.daily_report import ensure_same_observation_date
 from stock_research.strategies.fundamental_selection import (
     growth_risk,
+    is_value_industry_allowed,
     quality_detail,
     value_method_reason,
 )
+from stock_research.pipelines.factor_selection import classify_method
 
 
 def test_fundamental_explanations_keep_current_wording():
@@ -17,11 +19,32 @@ def test_fundamental_explanations_keep_current_wording():
     assert "扣非EPS为1.50元，盈利能力较强" in detail
     assert "扣非利润同比50.0%，增长较强" in detail
     assert "近年扣非盈利稳定性较高" in detail
-    reason = value_method_reason("计算机、通信", 120, 1.20, 0.20)
-    assert "属于制造业" in reason
+    reason = value_method_reason("通信网络设备及器件", 120, 1.20, 0.20)
+    assert "命中基本价值线行业白名单" in reason
     assert "总市值120.0亿元（不低于100亿元）" in reason
     assert "超过300%" in growth_risk(3.01)
     assert "同比为负" in growth_risk(-0.01)
+
+
+@pytest.mark.parametrize(
+    "industry",
+    [
+        "汽车电子电气系统", "通信网络设备及器件", "半导体",
+        "半导体材料", "半导体设备", "分立器件",
+    ],
+)
+def test_value_industry_allowlist_accepts_requested_manufacturing_groups(industry):
+    assert is_value_industry_allowed(industry)
+    assert classify_method(industry) == "VALUE"
+
+
+@pytest.mark.parametrize(
+    "industry", ["半导体软件", "电子", "通信设备", "饰品", "医疗服务", "", None],
+)
+def test_value_industry_allowlist_fails_closed(industry):
+    assert not is_value_industry_allowed(industry)
+    if industry:
+        assert classify_method(industry) != "VALUE"
 
 
 def test_report_rejects_mixed_observation_dates():

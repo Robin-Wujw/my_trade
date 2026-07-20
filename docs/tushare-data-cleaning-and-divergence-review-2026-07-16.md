@@ -164,6 +164,6 @@ var/backtests/codex_right_quant_candidates_20240924_20260714_v17_divergence
 1. 历史板块成分和主线标签是否真实时点化。
 2. 强趋势股票是否被日榜Top10和核心名额挤出。
 3. growth_leadership/standard_mainline/value_model 的合并优先级是否压制了新强股。
-4. support_pullback_not_first_entry 过多，说明首仓规则仍可能错过强趋势拉回。
+4. support_pullback_not_first_entry 过多，说明首仓规则仍可能错过强趋势拉回；当前生产口径已默认放宽支撑拉回首仓，不再使用旧证据分硬卡，改用量能、候选强度、支撑距离、风险收益和3日下行禁开约束。
 5. 右侧候选的财务硬门槛不变，但右侧排序因子还应重点研究行业相对强度、换手扩张、资金容量和新高质量。
 ```

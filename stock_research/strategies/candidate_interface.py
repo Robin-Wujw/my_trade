@@ -3,6 +3,12 @@ from __future__ import annotations
 
 import math
 
+from stock_research.strategies.fundamental_selection import (
+    VALUE_INDUSTRY_RULE_VERSION,
+    is_value_industry_allowed,
+    value_industry_allowlist_match,
+)
+
 
 MAX_DAILY_CANDIDATES = 60
 MIN_CORE_DAILY_CANDIDATES = 0
@@ -68,6 +74,24 @@ def left_value_safety_reasons(row) -> list[str]:
 def left_value_permission_reasons(row) -> list[str]:
     """Return reasons why a value-model row cannot open a left-side plan."""
     reasons = []
+    industry_allowed = is_value_industry_allowed(row.get("industry"))
+    if not industry_allowed:
+        reasons.append("value_industry_not_allowlisted")
+    if "value_industry_allowed" not in row:
+        reasons.append("value_industry_audit_missing")
+    elif _truthy(row.get("value_industry_allowed")) != industry_allowed:
+        reasons.append("value_industry_audit_conflict")
+    expected_match = value_industry_allowlist_match(row.get("industry"))
+    if "value_industry_allowlist_match" not in row:
+        reasons.append("value_industry_match_audit_missing")
+    elif _clean_text(row.get("value_industry_allowlist_match")) != expected_match:
+        reasons.append("value_industry_match_audit_conflict")
+    rule_version = _clean_text(row.get("value_industry_rule_version"))
+    if rule_version != VALUE_INDUSTRY_RULE_VERSION:
+        reasons.append(
+            "value_industry_rule_version_missing"
+            if not rule_version else "value_industry_rule_version_mismatch"
+        )
     if _number(row.get("quality_score")) is None:
         reasons.append("quality_score_missing")
     if _number(row.get("earnings_yoy", row.get("yoy"))) is None:

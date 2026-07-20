@@ -6,6 +6,7 @@ import argparse
 from stock_research.core.paths import PATHS
 from stock_research.storage import Database, ResearchRepository
 from stock_research.strategies.historical_candidates import (
+    SNAPSHOT_VERSION,
     build_historical_candidate_snapshots,
     save_historical_candidate_snapshots,
 )
@@ -17,7 +18,15 @@ def main(argv=None):
     parser.add_argument("--end-date", default="2026-07-10")
     parser.add_argument(
         "--output-directory",
-        default=str(PATHS.runtime_root / "backtests" / "candidate_snapshots" / "unified-selection-v4"),
+        default=str(
+            PATHS.runtime_root / "backtests" / "candidate_snapshots"
+            / SNAPSHOT_VERSION
+        ),
+    )
+    parser.add_argument(
+        "--industry-map-path",
+        default=str(PATHS.cache / "reference" / "industry_map_latest.csv"),
+        help="persisted industry map used for value-line allowlist routing",
     )
     parser.add_argument(
         "--raw-kline-directory",
@@ -57,6 +66,7 @@ def main(argv=None):
         kline_directory=kline_directory,
         raw_kline_directory=raw_kline_directory,
         universe_path=PATHS.cache / "stock_universe.csv",
+        industry_map_path=args.industry_map_path,
         mainline_directory=PATHS.cache,
         research_repository=research_repository,
         price_source=args.price_source,
@@ -67,6 +77,8 @@ def main(argv=None):
         snapshots,
         start_date=args.start_date,
         end_date=args.end_date,
+        industry_map_path=args.industry_map_path,
+        universe_path=PATHS.cache / "stock_universe.csv",
     )
     persisted = 0
     if not args.skip_database_persist:

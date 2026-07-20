@@ -15,8 +15,11 @@ from stock_research.indicators.waves import infer_downtrend_recovery, level_pric
 from stock_research.indicators.technical_quant import technical_snapshot
 from stock_research.pipelines.factor_selection import classify_method
 from stock_research.strategies.fundamental_selection import (
+    VALUE_INDUSTRY_RULE_VERSION,
     growth_risk,
+    is_value_industry_allowed,
     quality_detail,
+    value_industry_allowlist_match,
     value_method_reason,
 )
 from stock_research.strategies.candidate_interface import normalize_candidate_snapshots
@@ -27,11 +30,6 @@ KLINE_CACHE_DIR = str(PATHS.cache / "formula33_kline" / "akshare")
 OUTPUT_DIR = str(PATHS.selection_exports)
 UNIVERSE_PATH = str(PATHS.cache / "stock_universe.csv")
 VALUE_MIN_MARKET_CAP = 100.0
-VALUE_ROUTE_OVERRIDES = {
-    "sz.002415": ("VALUE", "海康威视：大型安防公司，产业与财务可外推，按用户验收口径纳入"),
-}
-
-
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="生成每日基本价值线和正常基本面两部分选股")
     parser.add_argument("--report-period", default="", help="财报期YYYY-MM-DD；默认使用缓存中的最新报告期")
@@ -167,18 +165,13 @@ def method_routes_from_snapshot(snapshot):
         for _, row in snapshot.drop_duplicates("code").iterrows():
             code = str(row["code"])
             industry = row.get("industry", "")
-            method = row.get("method")
-            if not method or pd.isna(method):
-                method = classify_method(industry) if industry else "UNKNOWN"
+            method = classify_method(industry) if industry else "UNKNOWN"
             routes[code] = {
                 "method": method,
                 "industry": industry,
                 "theme": row.get("theme", ""),
                 "reason": "按当日全市场截面行业规则",
             }
-    for code, (method, reason) in VALUE_ROUTE_OVERRIDES.items():
-        existing = routes.get(code, {})
-        routes[code] = {**existing, "method": method, "reason": reason}
     return routes
 
 
@@ -222,7 +215,8 @@ def value_rows(
         code = code_from_symbol(symbol)
         route = method_routes.get(code, {})
         route_method = route.get("method") or method_map.get(code)
-        if route_method != "VALUE":
+        industry = route.get("industry") or industry_map.get(code, "")
+        if route_method != "VALUE" or not is_value_industry_allowed(industry):
             continue
         try:
             with open(path, "r", encoding="utf-8") as handle:
@@ -246,7 +240,6 @@ def value_rows(
         applicable = mktcap >= VALUE_MIN_MARKET_CAP and yoy >= 0 and quality >= 50
         if not applicable or ratio > max_ratio:
             continue
-        industry = route.get("industry") or industry_map.get(code, "")
         method_reason = value_method_reason(industry, mktcap, eps, yoy)
         row = {
             "strategy_part": "1.基本价值线或附近",
@@ -256,6 +249,9 @@ def value_rows(
             "theme": route.get("theme") or theme_map.get(code, ""),
             "report_period": report_period,
             "value_applicable": True,
+            "value_industry_allowed": True,
+            "value_industry_allowlist_match": value_industry_allowlist_match(industry),
+            "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
             "value_applicable_reason": method_reason,
             "value_line": value_line,
             "price_to_value": ratio,

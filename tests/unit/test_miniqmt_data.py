@@ -53,6 +53,51 @@ def test_miniqmt_cache_roundtrip(monkeypatch, tmp_path):
     assert loaded.iloc[0]["close"] == pytest.approx(11.5)
 
 
+def test_save_miniqmt_frame_can_merge_existing_window(monkeypatch, tmp_path):
+    monkeypatch.setenv("STOCK_RESEARCH_VAR", str(tmp_path))
+    save_miniqmt_frame(
+        "sh.600000",
+        pd.DataFrame({
+            "date": ["2026-07-14"],
+            "open": [10.0],
+            "high": [10.5],
+            "low": [9.5],
+            "close": [10.2],
+            "volume": [1000],
+            "amount": [10_200],
+        }),
+        period="1d",
+        dividend_type="front",
+    )
+
+    save_miniqmt_frame(
+        "sh.600000",
+        pd.DataFrame({
+            "date": ["2023-01-03", "2026-07-14"],
+            "open": [6.0, 10.1],
+            "high": [6.5, 10.6],
+            "low": [5.5, 9.6],
+            "close": [6.2, 10.3],
+            "volume": [600, 1100],
+            "amount": [3_720, 11_330],
+        }),
+        period="1d",
+        dividend_type="front",
+        merge_existing=True,
+    )
+
+    loaded = load_cached_miniqmt_frame(
+        "sh.600000",
+        period="1d",
+        dividend_type="front",
+        start_date="2023-01-01",
+        end_date="2026-07-14",
+    )
+
+    assert loaded["date"].tolist() == ["2023-01-03", "2026-07-14"]
+    assert loaded.iloc[-1]["close"] == pytest.approx(10.3)
+
+
 def test_normalize_miniqmt_frame_requires_date():
     with pytest.raises(ValueError, match="no date column"):
         normalize_miniqmt_frame(pd.DataFrame({"close": [1.0]}), "600000")

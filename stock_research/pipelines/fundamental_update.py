@@ -30,6 +30,11 @@ from stock_research.pipelines.fundamental_selection import (
     VALUE_CACHE_DIR,
     VALUE_MIN_MARKET_CAP,
 )
+from stock_research.strategies.fundamental_selection import (
+    VALUE_INDUSTRY_RULE_VERSION,
+    is_value_industry_allowed,
+    value_industry_allowlist_match,
+)
 
 
 UNIVERSE_PATH = str(PATHS.cache / "stock_universe.csv")
@@ -305,6 +310,9 @@ def build_snapshot(universe, markets, report_period, industry_map):
             "code": code,
             "name": stock.get("code_name", code),
             "industry": industry,
+            "value_industry_allowed": is_value_industry_allowed(industry),
+            "value_industry_allowlist_match": value_industry_allowlist_match(industry),
+            "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
             "theme": infer_theme(stock.get("code_name", code), industry) if industry else "",
             "method": classify_method(industry) if industry else "UNKNOWN",
             "report_period": report_period,
