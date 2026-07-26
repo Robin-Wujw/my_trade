@@ -85,3 +85,18 @@ def test_file_rate_limiter_persists_last_call_for_other_processes(monkeypatch, t
 
     assert sleeps == pytest.approx([0.3])
     assert float(path.read_text(encoding="ascii")) == pytest.approx(100.5)
+
+
+def test_file_rate_limiter_recovers_appended_legacy_lock(monkeypatch, tmp_path):
+    clock = iter([100.3, 100.7])
+    sleeps = []
+    monkeypatch.setattr("stock_research.api.retry.time.time", lambda: next(clock))
+    monkeypatch.setattr("stock_research.api.retry.time.sleep", sleeps.append)
+    path = tmp_path / "provider.lock"
+    path.write_text("99.0\n100.2\n", encoding="ascii")
+
+    FileRateLimiter(0.5, path).wait()
+
+    assert sleeps == pytest.approx([0.4])
+    assert path.read_text(encoding="ascii").count("\n") == 1
+    assert float(path.read_text(encoding="ascii")) == pytest.approx(100.7)

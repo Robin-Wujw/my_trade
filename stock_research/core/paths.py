@@ -24,7 +24,7 @@ class ProjectPaths:
 
     @property
     def database(self) -> Path:
-        return self.runtime_root / "data" / "my_trade.duckdb"
+        return self.runtime_root / "data" / "my_trade.sqlite3"
 
     @property
     def exports(self) -> Path:

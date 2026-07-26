@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Sector volume and limit-up watch.
 
@@ -140,16 +140,16 @@ def load_board_names(
                 if logger is not None:
                     logger.event(
                         "board_names",
-                        "duckdb",
+                        "sqlite",
                         "hit",
-                        message="同花顺行业板块列表命中 DuckDB",
+                        message="同花顺行业板块列表命中 SQLite",
                         rows=len(result),
                     )
                 return result
             stale_database = repository.load_boards(source=THS_BOARD_SOURCE)
         except Exception as exc:
             if logger is not None:
-                logger.event("board_names", "duckdb", "failed", message=str(exc))
+                logger.event("board_names", "sqlite", "failed", message=str(exc))
 
     try:
         raw = call_with_backoff(
@@ -179,7 +179,7 @@ def load_board_names(
                 "board_names",
                 "ths",
                 "write",
-                message="同花顺行业板块快照写入 DuckDB",
+                message="同花顺行业板块快照写入 SQLite",
                 rows=rows,
             )
     write_cache("ths_board_names", "industry", result)
@@ -242,9 +242,9 @@ def load_board_history(
                     if logger is not None:
                         logger.event(
                             "board_history",
-                            "duckdb",
+                            "sqlite",
                             "hit",
-                            message=f"{board_name} K线命中 DuckDB",
+                            message=f"{board_name} K线命中 SQLite",
                             rows=len(stored),
                             context={"board": board_name},
                         )
@@ -257,7 +257,7 @@ def load_board_history(
             if logger is not None:
                 logger.event(
                     "board_history",
-                    "duckdb",
+                    "sqlite",
                     "failed",
                     message=str(exc),
                     context={"board": board_name},
@@ -305,9 +305,9 @@ def load_board_history(
             if logger is not None:
                 logger.event(
                     "board_history",
-                    "duckdb",
+                    "sqlite",
                     "write",
-                    message=f"{board_name} K线写入 DuckDB",
+                    message=f"{board_name} K线写入 SQLite",
                     rows=rows,
                     context={"board": board_name},
                 )
@@ -315,7 +315,7 @@ def load_board_history(
             if logger is not None:
                 logger.event(
                     "board_history",
-                    "duckdb",
+                    "sqlite",
                     "write_failed",
                     message=str(exc),
                     context={"board": board_name},

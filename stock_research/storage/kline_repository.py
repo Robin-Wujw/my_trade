@@ -1,13 +1,13 @@
-"""DuckDB persistence for stock daily K-lines."""
+"""SQLite persistence for stock daily K-lines."""
 from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
+import sqlite3
 from threading import RLock
 import time
 from typing import Optional
 
-import duckdb
 import pandas as pd
 
 from stock_research.core.paths import PATHS
@@ -50,7 +50,7 @@ def _process_lock(path: Path):
         handle.close()
 
 
-_DUCKDB_LOCK_ERROR_MARKERS = (
+_SQLITE_LOCK_ERROR_MARKERS = (
     "could not set lock",
     "conflicting lock",
     "database is locked",
@@ -61,11 +61,9 @@ _DUCKDB_LOCK_ERROR_MARKERS = (
 )
 
 
-def _is_transient_duckdb_lock_error(exc: Exception) -> bool:
-    if not isinstance(exc, duckdb.IOException):
-        return False
+def _is_transient_sqlite_lock_error(exc: Exception) -> bool:
     message = str(exc).lower()
-    return any(marker in message for marker in _DUCKDB_LOCK_ERROR_MARKERS)
+    return any(marker in message for marker in _SQLITE_LOCK_ERROR_MARKERS)
 
 
 class KlineRepository:
@@ -80,7 +78,7 @@ class KlineRepository:
         lock_retry_delay: float = 0.05,
     ):
         self.database = database
-        self.lock_path = Path(lock_path or PATHS.tmp / "duckdb_stock_kline.lock")
+        self.lock_path = Path(lock_path or PATHS.tmp / "sqlite_stock_kline.lock")
         self.lock_retry_attempts = max(1, int(lock_retry_attempts))
         self.lock_retry_delay = max(0.0, float(lock_retry_delay))
         self._thread_lock = RLock()
@@ -93,7 +91,7 @@ class KlineRepository:
                         return operation()
             except Exception as exc:
                 if (
-                    not _is_transient_duckdb_lock_error(exc)
+                    not _is_transient_sqlite_lock_error(exc)
                     or attempt >= self.lock_retry_attempts - 1
                 ):
                     raise
@@ -198,11 +196,14 @@ class KlineRepository:
                 try:
                     connection.execute(
                         """
-                        DELETE FROM raw.stock_kline_daily AS stored
-                        USING incoming_stock_kline_keys AS incoming
-                        WHERE stored.source = incoming.source
-                          AND stored.code = incoming.code
-                          AND stored.trade_date = incoming.trade_date
+                        DELETE FROM raw.stock_kline_daily
+                        WHERE EXISTS (
+                            SELECT 1
+                            FROM incoming_stock_kline_keys AS incoming
+                            WHERE raw.stock_kline_daily.source = incoming.source
+                              AND raw.stock_kline_daily.code = incoming.code
+                              AND raw.stock_kline_daily.trade_date = incoming.trade_date
+                        )
                         """
                     )
                 finally:
@@ -337,7 +338,7 @@ class KlineRepository:
         end_date: str,
         max_qfq_anchor_date: str | None = None,
     ) -> pd.DataFrame:
-        """Load a portfolio universe with one DuckDB scan and one connection."""
+        """Load a portfolio universe with one SQLite scan and one connection."""
         normalized_codes = sorted({str(code) for code in codes if str(code)})
         if not normalized_codes:
             return pd.DataFrame(columns=[
@@ -346,8 +347,6 @@ class KlineRepository:
 
         def read_rows():
             connection = self.database.connect(read_only=True)
-            code_frame = pd.DataFrame({"code": normalized_codes})
-            connection.register("requested_stock_codes", code_frame)
             try:
                 anchor_clause = ""
                 params = [str(source), start_date, end_date]
@@ -357,16 +356,18 @@ class KlineRepository:
                         " AND stored.qfq_anchor_date <= ?"
                     )
                     params.append(max_qfq_anchor_date)
+                placeholders = ", ".join("?" for _ in normalized_codes)
+                params.extend(normalized_codes)
                 return connection.execute(
-                    """
+                    f"""
                     SELECT stored.trade_date, stored.code, stored.open, stored.high,
                            stored.low, stored.close, stored.volume, stored.amount,
                            stored.tradestatus
                     FROM raw.stock_kline_daily AS stored
-                    INNER JOIN requested_stock_codes AS requested USING (code)
                     WHERE stored.source = ?
                       AND stored.trade_date >= ? AND stored.trade_date <= ?
-                    """ + anchor_clause + """
+                    """ + anchor_clause + f"""
+                      AND stored.code IN ({placeholders})
                     ORDER BY stored.code, stored.trade_date
                     """,
                     params,

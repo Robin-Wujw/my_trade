@@ -46,7 +46,7 @@ def main(argv=None):
     parser.add_argument("--end-date", required=True)
     parser.add_argument("--output-directory", required=True)
     parser.add_argument("--work-directory", default="")
-    parser.add_argument("--price-source", choices=("akshare", "miniqmt"), default="miniqmt")
+    parser.add_argument("--price-source", choices=("akshare", "miniqmt", "tushare"), default="miniqmt")
     parser.add_argument("--kline-directory", default="")
     parser.add_argument("--raw-kline-directory", default="")
     parser.add_argument(
@@ -54,22 +54,21 @@ def main(argv=None):
         default=str(PATHS.cache / "reference" / "industry_map_latest.csv"),
     )
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--no-print-manifest", action="store_true")
     args = parser.parse_args(argv)
 
     output = Path(args.output_directory)
     work = Path(args.work_directory) if args.work_directory else output.with_name(output.name + "_monthly")
     output.mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
-    kline_directory = args.kline_directory or (
-        PATHS.cache / "miniqmt_kline" / "1d" / "front"
-        if args.price_source == "miniqmt"
-        else PATHS.cache / "formula33_kline" / "akshare"
-    )
-    raw_kline_directory = args.raw_kline_directory or (
-        PATHS.cache / "miniqmt_kline" / "1d" / "none"
-        if args.price_source == "miniqmt"
-        else PATHS.cache / "formula33_kline" / "akshare_raw"
-    )
+    if args.price_source == "miniqmt":
+        default_kline_directory = PATHS.cache / "miniqmt_kline" / "1d" / "front"
+        default_raw_kline_directory = PATHS.cache / "miniqmt_kline" / "1d" / "none"
+    else:
+        default_kline_directory = PATHS.cache / "formula33_kline" / "akshare"
+        default_raw_kline_directory = PATHS.cache / "formula33_kline" / "akshare_raw"
+    kline_directory = args.kline_directory or default_kline_directory
+    raw_kline_directory = args.raw_kline_directory or default_raw_kline_directory
 
     os.environ.setdefault("CANDIDATE_HISTORY_PROGRESS", "1")
     all_snapshots: dict[str, list[dict]] = {}
@@ -83,7 +82,11 @@ def main(argv=None):
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 manifest = {}
-            if manifest.get("strict_financial_point_in_time") is True:
+            if (
+                manifest.get("strict_financial_point_in_time") is True
+                and manifest.get("industry_point_in_time") is True
+                and manifest.get("industry_point_in_time_status") == "safe"
+            ):
                 _log(f"SKIP {index}/{len(ranges)} {chunk_start}..{chunk_end}")
                 all_snapshots.update(_read_snapshots(chunk_dir))
                 continue
@@ -111,7 +114,8 @@ def main(argv=None):
         )
         _log(
             f"DONE {index}/{len(ranges)} snapshots={manifest['snapshot_count']} "
-            f"strict={manifest['strict_financial_point_in_time']}"
+            f"strict={manifest['strict_financial_point_in_time']} "
+            f"industry_pit={manifest.get('industry_point_in_time')}"
         )
         all_snapshots.update(snapshots)
 
@@ -126,9 +130,11 @@ def main(argv=None):
     _log(
         f"MERGED snapshots={final_manifest['snapshot_count']} "
         f"strict={final_manifest['strict_financial_point_in_time']} "
+        f"industry_pit={final_manifest.get('industry_point_in_time')} "
         f"unsafe={final_manifest['unsafe_snapshot_count']}"
     )
-    print(json.dumps(final_manifest, ensure_ascii=False, indent=2))
+    if not args.no_print_manifest:
+        print(json.dumps(final_manifest, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

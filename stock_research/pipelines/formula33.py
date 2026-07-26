@@ -1264,7 +1264,7 @@ def load_persisted_kline(
             )
         )
     except Exception as exc:
-        print(f"{code} DuckDB K线读取失败: {exc}")
+        print(f"{code} SQLite K线读取失败: {exc}")
         return pd.DataFrame()
 
 
@@ -1328,7 +1328,7 @@ def save_persisted_kline(
             cache_version=KLINE_QFQ_CACHE_VERSION,
         )
     except Exception as exc:
-        raise RuntimeError(f"{code} DuckDB K-line write failed: {exc}") from exc
+        raise RuntimeError(f"{code} SQLite K-line write failed: {exc}") from exc
 
 
 def load_kline_no_trade_marker(source, code):
@@ -2577,7 +2577,7 @@ FORMULA_EXCEL_VALUES = {
     "suspended_or_no_trade": "观察日停牌或无交易",
     "data_unavailable": "数据不可用",
     "complete_file_cache": "完整CSV缓存命中",
-    "database_or_network": "DuckDB或网络补齐",
+    "database_or_network": "SQLite或网络补齐",
 }
 
 
@@ -2882,7 +2882,7 @@ def main(argv=None):
             args.retry_delay,
         )
         Database().initialize()
-        print("DuckDB K线持久化已启用：每只股票查到后立即写入 raw.stock_kline_daily，并保留CSV缓存。")
+        print("SQLite K线持久化已启用：每只股票查到后立即写入 raw.stock_kline_daily，并保留CSV缓存。")
         basic = load_stock_basic() if bs_available and args.metadata_source == "baostock" else pd.DataFrame()
         if basic.empty:
             basic = load_stock_basic_snapshot(latest_date, universe)
@@ -2999,7 +2999,7 @@ def main(argv=None):
                     update_fetch_progress(progress, result)
                     if idx % 200 == 0 or idx == len(tasks):
                         print(format_fetch_progress(progress, len(tasks)))
-                        print("保存方式：每只完成后立即写 DuckDB，并原子更新 CSV；中断后可续跑。")
+                        print("保存方式：每只完成后立即写 SQLite，并原子更新 CSV；中断后可续跑。")
         else:
             for idx, task in enumerate(tasks, start=1):
                 result = fetch_one_stock(task)
@@ -3007,7 +3007,7 @@ def main(argv=None):
                 update_fetch_progress(progress, result)
                 if idx % 200 == 0 or idx == len(tasks):
                     print(format_fetch_progress(progress, len(tasks)))
-                    print("保存方式：每只完成后立即写 DuckDB，并原子更新 CSV；中断后可续跑。")
+                    print("保存方式：每只完成后立即写 SQLite，并原子更新 CSV；中断后可续跑。")
             if bs_available:
                 bs.logout()
 

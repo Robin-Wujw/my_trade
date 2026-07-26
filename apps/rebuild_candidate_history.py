@@ -33,7 +33,7 @@ def main(argv=None):
         default=str(PATHS.cache / "formula33_kline" / "akshare_raw"),
         help="AkShare不复权K线缓存目录，用于反推观察日锚定前复权价",
     )
-    parser.add_argument("--price-source", choices=("akshare", "miniqmt"), default="akshare")
+    parser.add_argument("--price-source", choices=("akshare", "miniqmt", "tushare"), default="akshare")
     parser.add_argument("--kline-directory", default="")
     parser.add_argument(
         "--allow-unsafe-financial",

@@ -140,7 +140,10 @@ class RateLimiter:
 @contextmanager
 def _locked_rate_file(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(path, "a+b")
+    try:
+        handle = open(path, "r+b")
+    except FileNotFoundError:
+        handle = open(path, "w+b")
     try:
         if handle.seek(0, 2) == 0:
             handle.write(b"0\n")
@@ -180,7 +183,8 @@ class FileRateLimiter:
         with _locked_rate_file(Path(self.path)) as handle:
             handle.seek(0)
             try:
-                last_call = float(handle.read().decode("ascii").strip() or 0)
+                lines = handle.read().decode("ascii").splitlines()
+                last_call = float((lines[-1] if lines else "") or 0)
             except (UnicodeDecodeError, ValueError):
                 last_call = 0.0
             now = time.time()

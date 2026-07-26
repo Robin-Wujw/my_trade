@@ -1,30 +1,33 @@
-# DuckDB 实际结构
+# SQLite 实际结构
 
 ## 1. 当前边界
 
-数据库文件固定为 `var/data/my_trade.duckdb`。迁移代码当前创建4个schema和13张应用表；`core`保留为后续规范化实体层，`derived`已保存候选、Formula33阶段与回测结果。
+数据库文件固定为 `var/data/my_trade.sqlite3`。SQLite 不使用物理 schema；迁移代码用 `raw_`、`core_`、`derived_`、`ops_` 表名前缀表达逻辑分层。代码里保留的 `raw.xxx`、`derived.xxx` 等旧调用会在数据库边界映射为 SQLite 表名。
 
-生产仍使用 `var/cache` 的增量文件缓存，并输出CSV、Excel、HTML和Markdown。DuckDB是批量历史查询和结构化研究结果的事实源；报告正文、完成清单与可恢复的接口缓存仍保留在文件系统。
+SQLite 是批量历史查询、Tushare 结构化数据和研究结果的统一缓存层；报告正文、完成清单、CSV、Excel、HTML 和 Markdown 仍保留在文件系统。
 
-## 2. 实际13张表
+## 2. 实际16张表
 
 | 表 | 用途 | 主键 |
 |---|---|---|
-| `ops.schema_migrations` | 已应用迁移版本 | `version` |
-| `ops.runs` | 可选的运行生命周期基础记录 | `run_id` |
-| `ops.run_steps` | 可选的单次运行步骤基础记录 | `run_id, step_name` |
-| `ops.pipeline_events` | 板块等分步事件和进度日志 | 无 |
-| `raw.sector_boards` | 板块名称、代码、分组和来源 | `board_name` |
-| `raw.sector_board_history` | 按来源保存的板块日线 | `board_name, trade_date, source` |
-| `raw.stock_kline_daily` | 按来源保存的股票日线 | `source, code, trade_date` |
-| `raw.fundamental_metrics` | 按报告期保存财务选股指标及原始载荷 | `code, report_period` |
-| `derived.candidate_snapshots` | 逐观察日统一候选与排名 | `observation_date, snapshot_version, code` |
-| `derived.formula33_phase` | 逐观察日Formula33阶段与连续计数 | `observation_date, version` |
-| `derived.backtest_runs` | 回测区间、资金、收益、回撤及摘要 | `run_id` |
-| `derived.backtest_trades` | 回测逐笔真实成交 | `run_id, sequence` |
-| `derived.backtest_positions` | 回测期末持仓 | `run_id, code` |
+| `ops_schema_migrations` | 已应用迁移版本 | `version` |
+| `ops_runs` | 可选的运行生命周期基础记录 | `run_id` |
+| `ops_run_steps` | 可选的单次运行步骤基础记录 | `run_id, step_name` |
+| `ops_pipeline_events` | 板块等分步事件和进度日志 | 无 |
+| `raw_sector_boards` | 板块名称、代码、分组和来源 | `board_name` |
+| `raw_sector_board_history` | 按来源保存的板块日线 | `board_name, trade_date, source` |
+| `raw_stock_kline_daily` | 按来源保存的股票日线 | `source, code, trade_date` |
+| `raw_fundamental_metrics` | 按报告期保存财务选股指标及原始载荷 | `code, report_period` |
+| `raw_tushare_dataset_rows` | Tushare 通用数据集原始行缓存 | `dataset, row_key` |
+| `raw_tushare_sync_state` | Tushare 数据集最近成功同步状态 | `dataset` |
+| `derived_candidate_snapshots` | 逐观察日统一候选与排名 | `observation_date, snapshot_version, code` |
+| `derived_candidate_snapshot_coverage` | 候选快照覆盖率摘要 | `observation_date, snapshot_version` |
+| `derived_formula33_phase` | 逐观察日Formula33阶段与连续计数 | `observation_date, version` |
+| `derived_backtest_runs` | 回测区间、资金、收益、回撤及摘要 | `run_id` |
+| `derived_backtest_trades` | 回测逐笔真实成交 | `run_id, sequence` |
+| `derived_backtest_positions` | 回测期末持仓 | `run_id, code` |
 
-除这13张表外，文档不约定任何尚未落地的表或视图。
+除上述表外，文档不约定任何尚未落地的表或视图。
 
 ## 3. 表字段
 

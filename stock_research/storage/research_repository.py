@@ -53,10 +53,13 @@ class ResearchRepository:
             connection.register("incoming_fundamental_rows", frame)
             connection.execute(
                 """
-                DELETE FROM raw.fundamental_metrics AS stored
-                USING incoming_fundamental_rows AS incoming
-                WHERE stored.code = incoming.code
-                  AND stored.report_period = incoming.report_period
+                DELETE FROM raw.fundamental_metrics
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM incoming_fundamental_rows AS incoming
+                    WHERE raw.fundamental_metrics.code = incoming.code
+                      AND raw.fundamental_metrics.report_period = incoming.report_period
+                )
                 """
             )
             columns = ", ".join(frame.columns)
@@ -164,25 +167,38 @@ class ResearchRepository:
                 "window_down_streak": int(row.get("window_down_streak") or 0),
                 "payload_json": _json(row),
             })
-        data = pd.DataFrame(rows)
+        data = pd.DataFrame(rows).drop_duplicates(
+            ["observation_date", "version"], keep="last",
+        )
         connection = self.database.connect()
         connection.execute("BEGIN TRANSACTION")
         try:
-            self._replace_frame(
-                connection,
-                "derived.formula33_phase",
-                data,
+            connection.register("incoming_formula33_phase", data)
+            connection.execute(
                 """
                 DELETE FROM derived.formula33_phase
-                WHERE version = ? AND observation_date >= ? AND observation_date <= ?
-                """,
-                [str(version), data["observation_date"].min(), data["observation_date"].max()],
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM incoming_formula33_phase AS incoming
+                    WHERE derived.formula33_phase.observation_date = incoming.observation_date
+                      AND derived.formula33_phase.version = incoming.version
+                )
+                """
             )
+            columns = ", ".join(data.columns)
+            connection.execute(
+                f"INSERT INTO derived.formula33_phase ({columns}) SELECT {columns} FROM incoming_formula33_phase"
+            )
+            connection.unregister("incoming_formula33_phase")
             connection.execute("COMMIT")
         except Exception:
             connection.execute("ROLLBACK")
             raise
         finally:
+            try:
+                connection.unregister("incoming_formula33_phase")
+            except Exception:
+                pass
             connection.close()
         return len(data)
 

@@ -17,7 +17,7 @@ from stock_research.reporting.backtest_trade_report import (
     render_trade_report_markdown,
 )
 from stock_research.reporting.trade_reminders import load_trade_plans
-from stock_research.storage import Database, KlineRepository, ResearchRepository
+from stock_research.storage import Database, KlineRepository, ResearchRepository, TushareRepository
 from stock_research.market.miniqmt_data import load_miniqmt_price_frames
 from stock_research.strategies.portfolio_backtest import run_portfolio_backtest
 from stock_research.strategies.historical_candidates import SNAPSHOT_VERSION
@@ -254,29 +254,46 @@ def load_price_frames(
     end_date=None,
     source="akshare",
     prefer_database=True,
+    database_source="auto",
 ):
     """Load OHLC frames for execution and valuation.
 
-    DuckDB is the fast authority for the normal qfq cache.  Raw historical
+    SQLite is the fast authority for the normal qfq cache.  Raw historical
     execution tests must be able to bypass it, otherwise a raw CSV directory is
     silently overwritten by qfq database rows.
     """
     normalized_codes = sorted({str(code) for code in codes})
     frames = {}
+    requested_database_source = str(database_source or "auto")
     if prefer_database and PATHS.database.is_file() and normalized_codes:
-        repository = KlineRepository(Database(PATHS.database))
-        loaded = repository.load_stock_klines(
-            source,
-            normalized_codes,
-            start_date=str(start_date or "1900-01-01"),
-            end_date=str(end_date or "2999-12-31"),
-            max_qfq_anchor_date=None if end_date is None else str(end_date),
-        )
-        if not loaded.empty:
-            frames.update({
-                str(code): group.drop(columns=["code"]).reset_index(drop=True)
-                for code, group in loaded.groupby("code", sort=False)
-            })
+        database = Database(PATHS.database)
+        if requested_database_source in {"auto", "miniqmt", "akshare"}:
+            repository = KlineRepository(database)
+            loaded = repository.load_stock_klines(
+                source,
+                normalized_codes,
+                start_date=str(start_date or "1900-01-01"),
+                end_date=str(end_date or "2999-12-31"),
+                max_qfq_anchor_date=None if end_date is None else str(end_date),
+            )
+            if not loaded.empty:
+                frames.update({
+                    str(code): group.drop(columns=["code"]).reset_index(drop=True)
+                    for code, group in loaded.groupby("code", sort=False)
+                })
+        if requested_database_source in {"auto", "tushare"}:
+            missing_codes = [code for code in normalized_codes if code not in frames]
+            if missing_codes:
+                loaded = TushareRepository(database).load_daily_kline_frames(
+                    missing_codes,
+                    start_date=str(start_date or "1900-01-01"),
+                    end_date=str(end_date or "2999-12-31"),
+                )
+                if not loaded.empty:
+                    frames.update({
+                        str(code): group.drop(columns=["code"]).reset_index(drop=True)
+                        for code, group in loaded.groupby("code", sort=False)
+                    })
     for code in (item for item in normalized_codes if item not in frames):
         path = Path(directory) / f"{str(code).replace('.', '_')}.csv"
         try:
@@ -1401,16 +1418,6 @@ def validate_backtest_input_coverage(
             "candidate snapshots contain dates outside Formula33 trade calendar; "
             f"extra={preview}"
         )
-    empty_candidate_dates = sorted(
-        date for date in formula_trade_dates
-        if not snapshots.get(date.strftime("%Y-%m-%d"))
-    )
-    if empty_candidate_dates:
-        preview = ", ".join(date.strftime("%Y-%m-%d") for date in empty_candidate_dates[:10])
-        raise RuntimeError(
-            "candidate snapshots contain empty selection days; "
-            f"every backtest day must have a fresh non-empty selection result. empty={preview}"
-        )
     candidate_end = max(snapshot_trade_dates)
     formula_end = max(formula_trade_dates)
     if formula_end != candidate_end:
@@ -1479,7 +1486,7 @@ def main(argv=None):
         help="left-grid price spacing; minimum enforced by strategy is 0.05",
     )
     parser.add_argument(
-        "--left-grid-max-exposure", type=float, default=0.20,
+        "--left-grid-max-exposure", type=float, default=0.10,
         help="maximum left-grid exposure per symbol as account fraction",
     )
     parser.add_argument(
@@ -1522,13 +1529,19 @@ def main(argv=None):
     )
     parser.add_argument(
         "--no-price-database", action="store_true",
-        help="只从 price-kline-directory 读取CSV，不使用DuckDB前复权K线",
+        help="只从 price-kline-directory 读取CSV，不使用SQLite前复权K线",
+    )
+    parser.add_argument(
+        "--price-database-source",
+        choices=("auto", "miniqmt", "akshare", "tushare"),
+        default="auto",
+        help="SQLite price source for backtest bars; auto uses the requested cache first, then Tushare.",
     )
     parser.add_argument(
         "--no-refresh-inputs", action="store_true",
         help=(
-            "research only: skip automatic input refresh; requires both "
-            "--allow-unsafe-financial and --allow-unsafe-industry"
+            "skip automatic input refresh after validating strict local manifests; "
+            "unsafe manifests still require both allow-unsafe switches"
         ),
     )
     parser.add_argument(
@@ -1614,11 +1627,13 @@ def main(argv=None):
     if args.no_refresh_inputs and not (
         args.allow_unsafe_financial and args.allow_unsafe_industry
     ):
-        raise RuntimeError(
-            "--no-refresh-inputs is research-only because strict backtests must "
-            "auto-refresh K-line, financial, Formula33, and candidate inputs. "
-            "Use both --allow-unsafe-financial and --allow-unsafe-industry only "
-            "for degraded offline research."
+        validate_candidate_manifest_financial_point_in_time(
+            args.candidate_directory,
+            allow_unsafe_financial=args.allow_unsafe_financial,
+        )
+        validate_candidate_manifest_industry_point_in_time(
+            args.candidate_directory,
+            allow_unsafe_industry=args.allow_unsafe_industry,
         )
     if not args.no_refresh_inputs:
         refresh_backtest_inputs(args)
@@ -1684,6 +1699,7 @@ def main(argv=None):
         end_date=args.end_date,
         source=infer_price_frame_source(price_kline_directory),
         prefer_database=use_price_database,
+        database_source=args.price_database_source,
     )
     price_coverage = validate_price_frame_coverage(
         price_frames,
@@ -1744,7 +1760,8 @@ def main(argv=None):
         "kline_directory": str(price_kline_directory),
         "database_enabled": bool(use_price_database),
         "source": infer_price_frame_source(price_kline_directory),
-        "mode": "不复权CSV" if not use_price_database else "DuckDB前复权优先",
+        "database_source": args.price_database_source,
+        "mode": "不复权CSV" if not use_price_database else "SQLite统一缓存优先",
         "coverage": price_coverage,
     }
     vectorbt_equity = []

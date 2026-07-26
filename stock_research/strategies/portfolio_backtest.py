@@ -844,10 +844,10 @@ def run_portfolio_backtest(
     profit_tail_min_return=0.50,
     left_grid_unit=0.02,
     left_grid_step=0.05,
-    left_grid_max_exposure=0.20,
+    left_grid_max_exposure=0.10,
     max_symbol_exposure=0.70,
     exit_tail_on_candidate_removal=False,
-    signals_effective_next_day=False,
+    signals_effective_next_day=True,
     auto_price_structure=True,
     allow_structure_pullback=True,
     allow_pullback_pilot=True,
@@ -906,8 +906,31 @@ def run_portfolio_backtest(
         for item in rows
     }
 
+    def candidate_display_name(code, candidate=None):
+        if candidate:
+            name = str(candidate.get("name") or "").strip()
+            if name and name.lower() not in {"nan", "none"}:
+                return name
+        return candidate_names.get(code) or str(plans.get(code, {}).get("name") or code)
+
+    def risk_stock_name_reason(name):
+        text = str(name or "").strip()
+        if not text or text.lower() in {"nan", "none"}:
+            return ""
+        upper = text.upper()
+        if "ST" in upper or "退" in text:
+            return "risk_name_or_status"
+        return ""
+
+    def candidate_risk_reason(candidate):
+        if not candidate:
+            return ""
+        return risk_stock_name_reason(
+            candidate_display_name(str(candidate.get("code") or ""), candidate),
+        )
+
     def is_st(code):
-        return "ST" in candidate_names.get(code, "").upper()
+        return bool(risk_stock_name_reason(candidate_display_name(code)))
 
     def occupied_codes():
         return {
@@ -1109,6 +1132,8 @@ def run_portfolio_backtest(
     def right_candidate_can_evaluate(candidate):
         if not candidate:
             return False
+        if candidate_risk_reason(candidate):
+            return False
         if (
             _enabled(candidate.get("selected_for_trading"), default=True)
             and _enabled(candidate.get("signal_eligible"), default=True)
@@ -1128,10 +1153,27 @@ def run_portfolio_backtest(
     def left_candidate_can_add(candidate):
         if not candidate:
             return False
+        if candidate_risk_reason(candidate):
+            return False
+        sources = set(str(candidate.get("candidate_source") or "").split("+"))
+        price_to_value = pd.to_numeric(candidate.get("price_to_value"), errors="coerce")
+        quality = pd.to_numeric(candidate.get("quality_score"), errors="coerce")
+        growth = pd.to_numeric(candidate.get("earnings_yoy"), errors="coerce")
+        market_cap = pd.to_numeric(candidate.get("mktcap"), errors="coerce")
         return (
             _enabled(candidate.get("selected_for_trading"), default=True)
             and _enabled(candidate.get("signal_eligible"), default=True)
             and _enabled(candidate.get("allow_left"), default=False)
+            and "value_model" in sources
+            and _enabled(candidate.get("value_industry_allowed"), default=False)
+            and pd.notna(price_to_value)
+            and 0.88 <= float(price_to_value) <= 1.03
+            and pd.notna(quality)
+            and float(quality) >= 80.0
+            and pd.notna(growth)
+            and float(growth) >= 0.20
+            and pd.notna(market_cap)
+            and float(market_cap) >= 150.0
             and not left_value_falsification_reason(candidate)
         )
 

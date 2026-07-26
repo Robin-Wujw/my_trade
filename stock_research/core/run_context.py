@@ -81,7 +81,7 @@ class RunContext:
         )
 
     def to_record(self) -> dict[str, Any]:
-        """Return values suitable for a parameterized DuckDB insert."""
+        """Return values suitable for a parameterized SQLite insert."""
         record = asdict(self)
         record["mode"] = self.mode.value
         return record

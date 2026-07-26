@@ -1,4 +1,4 @@
-"""Replay explicit author-case symbols without writing to DuckDB."""
+"""Replay explicit author-case symbols without writing to the unified SQLite cache."""
 from __future__ import annotations
 
 import argparse

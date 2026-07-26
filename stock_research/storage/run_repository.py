@@ -14,6 +14,12 @@ def _rows_as_dicts(cursor) -> list[dict]:
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
+def _as_datetime(value) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
 class RunRepository:
     """Persist one run identity and its observable step state."""
 
@@ -98,7 +104,7 @@ class RunRepository:
             ).fetchone()
             if row is None:
                 raise LookupError(f"unknown run step: {run_id}/{step_name}")
-            elapsed_seconds = max(0.0, (finished_at - row[0]).total_seconds())
+            elapsed_seconds = max(0.0, (finished_at - _as_datetime(row[0])).total_seconds())
             connection.execute(
                 """
                 UPDATE ops.run_steps

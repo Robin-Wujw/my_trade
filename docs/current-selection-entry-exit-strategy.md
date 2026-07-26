@@ -18,9 +18,9 @@ MiniQMT/本地行情与财务缓存 -> 候选快照 v5（价值线行业白名�
 
 候选快照由 `stock_research/strategies/historical_candidates.py` 生成，当前版本为 `unified-selection-v5-value-industry-allowlist`。旧 v4 快照不再允许复用为当前生产候选。
 
-- 候选池：`var/backtests/pit_candidates_20230103_20260714_final/manifest.json`
-- 回测摘要：`var/backtests/miniqmt_pit_final_20230103_20260714/miniqmt_2023-01-03_2026-07-14_summary.json`
-- 口径：`strict_financial_point_in_time=true`，`unsafe_snapshot_count=0`
+- 当前 Tushare 候选池：`var/backtests/tushare_official_candidates_2021_to_20260721_merged/manifest.json`
+- 当前修正后回测摘要：`var/backtests/portfolio_tushare_official_2021_to_20260721_pit/portfolio_2021-01-01_2026-07-21_summary.json`
+- 当前口径：`financial_point_in_time=true`，`strict_financial_point_in_time=true`，`unsafe_snapshot_count=0`；`industry_point_in_time=true`，`industry_point_in_time_status=safe`，行业来源为 Tushare `sw_member` 按 `in_date/out_date` 重建的时点快照。
 
 ### 2.1 硬门槛
 
@@ -234,7 +234,7 @@ MiniQMT 回测画像：
 - 止损是保护性结构止损，不是亏损后临时放宽
 - 盈利仓允许分批止盈和尾仓跟随，不急着把强趋势卖光
 - 候选和回测使用严格时点数据，不允许未来函数
-- 行业快照也必须满足时点规则；当前最新行业表只能以 `--allow-unsafe-industry` 显式降级为研究回测，不能包装成严格回测
+- 行业快照也必须满足时点规则；当前严格回测使用 Tushare `sw_member` 的 `in_date/out_date` 区间重建行业归属，静态最新行业表只能以 `--allow-unsafe-industry` 显式降级为研究回测。
 - MiniQMT 只读，当前不会自动实盘下单
 - 首仓上限已从激进的 50%/60% 改回 30%，仓位放大只允许通过浮盈证明后的加仓完成
 - 默认止盈份数已从 2 份改回 5 份，保留多条件分仓和最后趋势尾仓

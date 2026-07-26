@@ -5,7 +5,10 @@ import argparse
 from pathlib import Path
 
 from stock_research.core.paths import PATHS
-from stock_research.strategies.historical_formula import rebuild_formula_history
+from stock_research.strategies.historical_formula import (
+    rebuild_formula_history,
+    rebuild_formula_history_from_tushare,
+)
 
 
 def main(argv=None):
@@ -20,12 +23,21 @@ def main(argv=None):
         "--kline-directory",
         default=str(PATHS.cache / "formula33_kline" / "akshare"),
     )
+    parser.add_argument("--price-source", choices=("akshare", "tushare"), default="akshare")
+    parser.add_argument("--database", default=str(PATHS.database))
     args = parser.parse_args(argv)
-    frame = rebuild_formula_history(
-        args.kline_directory,
-        args.start_date,
-        args.end_date,
-    )
+    if args.price_source == "tushare":
+        frame = rebuild_formula_history_from_tushare(
+            args.start_date,
+            args.end_date,
+            database_path=args.database,
+        )
+    else:
+        frame = rebuild_formula_history(
+            args.kline_directory,
+            args.start_date,
+            args.end_date,
+        )
     output = Path(args.output)
     if not output.is_absolute():
         output = PATHS.project_root / output

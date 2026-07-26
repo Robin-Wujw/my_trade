@@ -1,4 +1,4 @@
-"""DuckDB persistence for sector boards and industry K-lines."""
+"""SQLite persistence for sector boards and industry K-lines."""
 from __future__ import annotations
 
 import json
@@ -72,7 +72,7 @@ def _source_filter(*, source: Optional[str], source_prefix: Optional[str]):
     if source is not None:
         return "source = ?", [str(source)]
     if source_prefix is not None:
-        return "starts_with(source, ?)", [str(source_prefix)]
+        return "source LIKE ?", [f"{source_prefix}%"]
     return None, []
 
 

@@ -7,7 +7,6 @@ import os
 import re
 from pathlib import Path
 
-import duckdb
 import pandas as pd
 
 from stock_research.indicators.technical_quant import _sma_cn
@@ -26,11 +25,12 @@ from stock_research.strategies.fundamental_selection import (
     is_value_industry_allowed,
     value_industry_allowlist_match,
 )
-from stock_research.storage import Database, KlineRepository
+from stock_research.storage import Database, KlineRepository, TushareRepository
 
 
 SNAPSHOT_VERSION = "unified-selection-v5-value-industry-allowlist"
 MAX_MAINLINE_AGE_DAYS = 31
+TUSHARE_SW_INDUSTRY_DATA_SOURCE = "tushare/pro:sw_member"
 CANDIDATE_SNAPSHOT_COLUMNS = [
     "date", "code", "name", "industry", "value_industry_allowed",
     "value_industry_allowlist_match", "value_industry_rule_version",
@@ -78,6 +78,16 @@ CANDIDATE_SNAPSHOT_COLUMNS = [
     "selection_reason", "selection_rank", "right_quant_setup",
     "allow_left", "allow_right",
 ]
+
+
+def _risk_stock_name_reason(name) -> str:
+    text = str(name or "").strip()
+    if not text or text.lower() in {"nan", "none"}:
+        return ""
+    upper = text.upper()
+    if "ST" in upper or "退" in text:
+        return "risk_name_or_status"
+    return ""
 
 
 def _technical_rsv(price: pd.Series, low: pd.Series, high: pd.Series, period: int = 9) -> pd.Series:
@@ -321,24 +331,31 @@ def _load_raw_price_frames_bulk(
         return {}
 
     frames = {}
-    connection = duckdb.connect()
-    try:
-        for offset in range(0, len(paths), max(1, int(batch_size))):
-            batch = paths[offset:offset + max(1, int(batch_size))]
+    for offset in range(0, len(paths), max(1, int(batch_size))):
+        batch = paths[offset:offset + max(1, int(batch_size))]
+        for path in batch:
             try:
-                data = connection.execute(
-                    """
-                    SELECT date, code, open, high, low, close, volume, amount, tradestatus
-                    FROM read_csv(?, header=true, union_by_name=true)
-                    WHERE CAST(date AS DATE) BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
-                    """,
-                    [batch, str(start_date), str(end_date)],
-                ).fetchdf()
-            except (duckdb.Error, OSError, ValueError):
+                header = pd.read_csv(path, nrows=0)
+                columns = [
+                    column for column in (
+                        "date", "code", "open", "high", "low", "close",
+                        "volume", "amount", "tradestatus",
+                    ) if column in header.columns
+                ]
+                data = pd.read_csv(path, usecols=columns)
+            except (OSError, ValueError):
                 continue
             if data.empty:
                 continue
+            if "code" not in data.columns:
+                stem = Path(path).stem
+                parts = stem.split("_", 1)
+                data["code"] = parts[1] if len(parts) == 2 else stem
             data["date"] = pd.to_datetime(data["date"], errors="coerce")
+            data = data[
+                (data["date"] >= pd.Timestamp(start_date))
+                & (data["date"] <= pd.Timestamp(end_date))
+            ]
             for column in (
                 "open", "high", "low", "close", "volume", "amount", "tradestatus",
             ):
@@ -352,8 +369,6 @@ def _load_raw_price_frames_bulk(
                     .set_index("date")
                     .sort_index()
                 )
-    finally:
-        connection.close()
     return frames
 
 
@@ -371,7 +386,7 @@ def _load_miniqmt_qfq_from_database(codes, start_date, end_date):
             start_date=str(start_date),
             end_date=str(end_date),
         )
-    except (duckdb.Error, OSError, ValueError):
+    except Exception:
         return {}
     if data.empty:
         return {}
@@ -382,6 +397,129 @@ def _load_miniqmt_qfq_from_database(codes, start_date, end_date):
         frame = group.drop(columns=["code"]).set_index("date").sort_index()
         frame["_qfq_anchor_date"] = pd.Timestamp(end_date).normalize()
         frames[code] = frame
+    return frames
+
+
+def _tushare_code(code: str) -> str:
+    symbol = str(code).split(".")[-1].zfill(6)
+    if symbol.startswith(("6", "9")):
+        suffix = "SH"
+    elif symbol.startswith(("4", "8")):
+        suffix = "BJ"
+    else:
+        suffix = "SZ"
+    return f"{symbol}.{suffix}"
+
+
+def _symbol_from_tushare(ts_code: str) -> str:
+    return str(ts_code).split(".", 1)[0].zfill(6)
+
+
+def _load_tushare_prices_from_database(codes, start_date, end_date):
+    """Load Tushare raw bars plus adj_factor as PIT qfq-like feature frames."""
+    if not PATHS.database.is_file():
+        return {}
+    requested = sorted({str(code).split(".")[-1].zfill(6) for code in codes if str(code).strip()})
+    if not requested:
+        return {}
+    ts_codes = [_tushare_code(code) for code in requested]
+    start = pd.Timestamp(start_date).normalize()
+    end = pd.Timestamp(end_date).normalize()
+    records = []
+    database = Database(PATHS.database, code_version="candidate-history-tushare")
+    connection = database.connect(read_only=True)
+    try:
+        for offset in range(0, len(ts_codes), 800):
+            chunk = ts_codes[offset: offset + 800]
+            placeholders = ", ".join("?" for _ in chunk)
+            params = [
+                "daily_kline",
+                "adj_factor",
+                start.strftime("%Y-%m-%d"),
+                end.strftime("%Y-%m-%d"),
+                *chunk,
+            ]
+            rows = connection.execute(
+                f"""
+                SELECT dataset, ts_code, trade_date, payload_json
+                FROM raw.tushare_dataset_rows
+                WHERE dataset IN (?, ?)
+                  AND trade_date >= ?
+                  AND trade_date <= ?
+                  AND ts_code IN ({placeholders})
+                ORDER BY ts_code, trade_date, dataset
+                """,
+                params,
+            ).fetchall()
+            records.extend(rows)
+    finally:
+        connection.close()
+    if not records:
+        return {}
+
+    daily_rows = []
+    adj_rows = []
+    for dataset, ts_code, trade_date, payload_json in records:
+        try:
+            payload = json.loads(payload_json)
+        except (TypeError, ValueError):
+            continue
+        row = {
+            "code": _symbol_from_tushare(ts_code),
+            "date": pd.to_datetime(trade_date, errors="coerce"),
+        }
+        if dataset == "daily_kline":
+            row.update({
+                "open": payload.get("open"),
+                "high": payload.get("high"),
+                "low": payload.get("low"),
+                "close": payload.get("close"),
+                "volume": payload.get("vol", payload.get("volume")),
+                "amount": payload.get("amount"),
+                "tradestatus": payload.get("tradestatus", 1),
+            })
+            daily_rows.append(row)
+        elif dataset == "adj_factor":
+            row["adj_factor"] = payload.get("adj_factor")
+            adj_rows.append(row)
+    daily = pd.DataFrame(daily_rows)
+    adj = pd.DataFrame(adj_rows)
+    if daily.empty or adj.empty:
+        return {}
+    daily = daily.dropna(subset=["date"])
+    adj = adj.dropna(subset=["date"])
+    merged = daily.merge(adj, on=["code", "date"], how="inner")
+    if merged.empty:
+        return {}
+    for column in ("open", "high", "low", "close", "volume", "amount", "adj_factor"):
+        merged[column] = pd.to_numeric(merged[column], errors="coerce")
+    merged = merged.dropna(subset=["open", "high", "low", "close", "adj_factor"])
+    # Tushare daily.amount is reported in thousand yuan; this model expects yuan.
+    merged["amount_yuan"] = merged["amount"] * 1000.0
+
+    frames = {}
+    for code, group in merged.groupby("code", sort=False):
+        group = group.sort_values("date").drop_duplicates("date", keep="last")
+        raw = pd.DataFrame({
+            "open": group["open"].astype(float).to_numpy(),
+            "high": group["high"].astype(float).to_numpy(),
+            "low": group["low"].astype(float).to_numpy(),
+            "close": group["close"].astype(float).to_numpy(),
+            "volume": group["volume"].astype(float).to_numpy(),
+            "amount": group["amount_yuan"].astype(float).to_numpy(),
+            "tradestatus": group["tradestatus"].to_numpy(),
+        }, index=group["date"])
+        adjusted = raw.copy()
+        factors = group["adj_factor"].astype(float).to_numpy()
+        for column in ("open", "high", "low", "close"):
+            adjusted[column] = group[column].astype(float).to_numpy() * factors
+        adjusted["_qfq_anchor_date"] = end
+        adjusted["_price_source"] = "tushare"
+        frames[code] = _attach_akshare_asof_prices(
+            adjusted.sort_index(),
+            raw.sort_index(),
+            source_label="Tushare",
+        )
     return frames
 
 
@@ -446,6 +584,8 @@ def _load_prices(
     price_source="akshare",
 ):
     result = {}
+    if price_source == "tushare":
+        return _load_tushare_prices_from_database(codes, start_date, end_date)
     source_label = "MiniQMT" if price_source == "miniqmt" else "AkShare"
     database_frames = (
         _load_miniqmt_qfq_from_database(codes, start_date, end_date)
@@ -1374,6 +1514,129 @@ def _load_industry_map(universe, industry_map_path=None):
     return mapping
 
 
+def _local_code_from_tushare(ts_code) -> str:
+    text = str(ts_code or "").strip().upper()
+    if "." not in text:
+        return ""
+    symbol, exchange = text.split(".", 1)
+    symbol = symbol.zfill(6)
+    exchange = exchange.lower()
+    if exchange not in {"sh", "sz", "bj"}:
+        return ""
+    return f"{exchange}.{symbol}"
+
+
+def _normalize_local_industry_code(code) -> str:
+    text = str(code or "").strip().lower().replace("_", ".")
+    if not text:
+        return ""
+    if "." in text:
+        left, right = text.split(".", 1)
+        if left in {"sh", "sz", "bj"}:
+            return f"{left}.{right.zfill(6)}"
+        if right in {"sh", "sz", "bj"}:
+            return f"{right}.{left.zfill(6)}"
+        return text
+    symbol = text.zfill(6)
+    if symbol.startswith(("6", "9")):
+        exchange = "sh"
+    elif symbol.startswith(("4", "8")):
+        exchange = "bj"
+    else:
+        exchange = "sz"
+    return f"{exchange}.{symbol}"
+
+
+def _clean_industry_label(value) -> str:
+    text = str(value or "").strip()
+    if not text or text.lower() in {"nan", "none", "nat"}:
+        return ""
+    return text
+
+
+def _tushare_member_date(value) -> pd.Timestamp:
+    text = str(value or "").strip()
+    if not text or text.lower() in {"nan", "none", "nat"}:
+        return pd.NaT
+    return pd.to_datetime(text, format="%Y%m%d", errors="coerce")
+
+
+def _load_tushare_sw_industry_history(database_path=None) -> pd.DataFrame:
+    """Load dated Shenwan industry membership from the local Tushare cache."""
+    path = Path(database_path or PATHS.database)
+    if not path.is_file():
+        return pd.DataFrame()
+    try:
+        frame = TushareRepository(
+            Database(path, code_version="candidate-history-industry-pit")
+        ).load_dataset("sw_member")
+    except Exception:
+        return pd.DataFrame()
+    if frame.empty or "ts_code" not in frame:
+        return pd.DataFrame()
+
+    data = frame.copy()
+    data["code"] = data["ts_code"].map(_local_code_from_tushare)
+    data["in_date_ts"] = data.get("in_date", pd.Series(dtype=str)).map(
+        _tushare_member_date
+    )
+    data["out_date_ts"] = data.get("out_date", pd.Series(dtype=str)).map(
+        _tushare_member_date
+    )
+    industry_columns = [
+        column for column in ("l3_name", "l2_name", "l1_name") if column in data
+    ]
+    if industry_columns:
+        data["industry"] = ""
+        for column in industry_columns:
+            labels = data[column].map(_clean_industry_label)
+            data["industry"] = data["industry"].where(data["industry"].ne(""), labels)
+    else:
+        data["industry"] = ""
+    data = data[
+        data["code"].ne("")
+        & data["in_date_ts"].notna()
+    ].copy()
+    if data.empty:
+        return pd.DataFrame()
+    data["industry"] = data["industry"].map(_clean_industry_label)
+    sort_columns = [column for column in ("code", "in_date_ts", "out_date_ts") if column in data]
+    return data.sort_values(sort_columns).reset_index(drop=True)
+
+
+def _build_tushare_sw_industry_lookup(history: pd.DataFrame):
+    if history is None or history.empty:
+        return None
+    grouped = {
+        str(code): group.sort_values(["in_date_ts", "out_date_ts"], na_position="last")
+        for code, group in history.groupby("code")
+    }
+    cache = {}
+
+    def lookup(code, observation_date):
+        local_code = _normalize_local_industry_code(code)
+        date = pd.Timestamp(observation_date).normalize()
+        key = (local_code, date.strftime("%Y-%m-%d"))
+        if key in cache:
+            return cache[key]
+        group = grouped.get(local_code)
+        if group is None or group.empty:
+            cache[key] = ("", True)
+            return cache[key]
+        active = group[
+            (group["in_date_ts"] <= date)
+            & (group["out_date_ts"].isna() | (group["out_date_ts"] >= date))
+        ]
+        if active.empty:
+            cache[key] = ("", True)
+            return cache[key]
+        preferred = active.iloc[-1]
+        cache[key] = (_clean_industry_label(preferred.get("industry")), True)
+        return cache[key]
+
+    return lookup
+
+
 def _value_nonselection_reasons(price_to_value, financial_reasons) -> list[str]:
     reasons = list(financial_reasons)
     if not reasons:
@@ -1444,7 +1707,9 @@ def build_historical_candidate_snapshots(
         for _, row in universe.iterrows()
     }
     industry_map = _load_industry_map(universe, industry_map_path)
-    industry_point_in_time = False
+    industry_lookup = _build_tushare_sw_industry_lookup(
+        _load_tushare_sw_industry_history()
+    )
     periods = visible_report_periods(start, end)
     financial = {
         period: _load_financial_cache(value_cache_directory, period)
@@ -1455,10 +1720,11 @@ def build_historical_candidate_snapshots(
         research_repository.persist_fundamentals(financial)
     mainline_snapshots = _load_mainline_snapshots(mainline_directory)
     codes = set().union(*(rows.keys() for rows in financial.values()))
+    potential_codes = _potential_candidate_codes(financial)
     price_start = start - pd.Timedelta(days=420)
     all_prices = _load_prices(
         kline_directory,
-        codes,
+        potential_codes,
         price_start,
         end,
         raw_kline_directory=raw_kline_directory,
@@ -1470,7 +1736,6 @@ def build_historical_candidate_snapshots(
         for date in frame.index
         if start <= date.normalize() <= end
     })
-    potential_codes = _potential_candidate_codes(financial)
     prices = {
         code: _candidate_feature_frame(frame)
         for code, frame in all_prices.items()
@@ -1542,7 +1807,11 @@ def build_historical_candidate_snapshots(
             if any(pd.isna(item) for item in (quality, yoy, market_cap)):
                 continue
             full_code = ("sh." if code.startswith(("6", "9")) else "sz.") + code
-            industry = industry_map.get(full_code, "")
+            if industry_lookup is not None:
+                industry, industry_point_in_time = industry_lookup(full_code, date)
+            else:
+                industry = industry_map.get(full_code, "")
+                industry_point_in_time = False
             value_industry_allowed = is_value_industry_allowed(industry)
             value_industry_match = value_industry_allowlist_match(industry)
             price_to_value = (
@@ -1648,6 +1917,23 @@ def build_historical_candidate_snapshots(
                 "alpha_intraday_strength_20": None if pd.isna(market_row.get("_alpha_intraday_strength_20")) else float(market_row.get("_alpha_intraday_strength_20")),
                 "alpha_gap_5d_count": None if pd.isna(market_row.get("_alpha_gap_5d_count")) else float(market_row.get("_alpha_gap_5d_count")),
             })
+            risk_name_reason = _risk_stock_name_reason(base.get("name"))
+            if risk_name_reason:
+                diagnostic_rows.append({
+                    **base,
+                    "strategy_part": "risk_name_or_status_diagnostic",
+                    "candidate_score": 0.0,
+                    "candidate_source": "risk_name_or_status",
+                    "signal_eligible": False,
+                    "selected_for_trading": False,
+                    "candidate_failure_reason": risk_name_reason,
+                    "value_falsified": False,
+                    "value_falsification_reason": "",
+                    "selection_reason": (
+                        "diagnostic row only; stock name indicates ST or delisting risk"
+                    ),
+                })
+                continue
             passes_fundamental_gate = _passes_fundamental_gate(quality, yoy, market_cap)
             if passes_fundamental_gate:
                 right_side_pool_rows.append(base)
@@ -1894,7 +2180,63 @@ def build_historical_candidate_snapshots(
     return snapshots
 
 
-def _industry_manifest_metadata(industry_map_path=None, universe_path=None):
+def _tushare_sw_industry_manifest_metadata(audit_directory, universe_path=None):
+    history = _load_tushare_sw_industry_history()
+    if history.empty:
+        return None
+    target = Path(audit_directory)
+    target.mkdir(parents=True, exist_ok=True)
+    source_path = target / "industry_source_tushare_sw_member.csv"
+    audit_columns = [
+        column for column in (
+            "code", "ts_code", "industry", "l1_code", "l1_name", "l2_code",
+            "l2_name", "l3_code", "l3_name", "in_date", "out_date", "is_new",
+        ) if column in history
+    ]
+    audit_frame = history.reindex(columns=audit_columns).drop_duplicates()
+    temporary = source_path.with_suffix(".csv.tmp")
+    audit_frame.to_csv(temporary, index=False, encoding="utf-8-sig")
+    temporary.replace(source_path)
+
+    mapped_codes = set(history["code"].dropna().astype(str))
+    universe_codes = set()
+    universe = Path(universe_path).resolve() if universe_path else None
+    if universe is not None and universe.is_file():
+        universe_frame = pd.read_csv(universe, dtype={"code": str}, usecols=["code"])
+        universe_codes = {
+            _normalize_local_industry_code(code)
+            for code in universe_frame["code"].dropna()
+            if _normalize_local_industry_code(code)
+        }
+    earliest = history["in_date_ts"].dropna().min()
+    return {
+        "industry_source_path": str(source_path.resolve()),
+        "industry_source_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "industry_source_modified_at": pd.Timestamp(
+            source_path.stat().st_mtime, unit="s", tz="UTC"
+        ).isoformat(),
+        "industry_as_of_date": (
+            earliest.strftime("%Y-%m-%d") if pd.notna(earliest) else None
+        ),
+        "industry_data_source": TUSHARE_SW_INDUSTRY_DATA_SOURCE,
+        "industry_point_in_time_status": "safe",
+        "industry_mapping_count": len(mapped_codes),
+        "industry_universe_count": len(universe_codes),
+        "industry_coverage_ratio": (
+            len(mapped_codes & universe_codes) / len(universe_codes)
+            if universe_codes else 0.0
+        ),
+    }
+
+
+def _industry_manifest_metadata(industry_map_path=None, universe_path=None, audit_directory=None):
+    if audit_directory is not None:
+        tushare_metadata = _tushare_sw_industry_manifest_metadata(
+            audit_directory, universe_path,
+        )
+        if tushare_metadata is not None:
+            return tushare_metadata
+
     path = Path(industry_map_path).resolve() if industry_map_path else None
     universe = Path(universe_path).resolve() if universe_path else None
     metadata = {
@@ -2003,7 +2345,7 @@ def save_historical_candidate_snapshots(
         financial_point_in_time = all(
             row.get("financial_point_in_time") is True for row in rows
         )
-        industry_point_in_time = bool(rows) and all(
+        industry_point_in_time = all(
             row.get("industry_point_in_time") is True for row in rows
         )
         manifest_rows.append({
@@ -2037,7 +2379,11 @@ def save_historical_candidate_snapshots(
             "lack strict per-company announce_time visibility; this is research-only."
         )
     )
-    industry_metadata = _industry_manifest_metadata(industry_map_path, universe_path)
+    industry_metadata = _industry_manifest_metadata(
+        industry_map_path,
+        universe_path,
+        audit_directory=target,
+    )
     manifest = {
         "version": SNAPSHOT_VERSION,
         "requested_start": str(start_date),

@@ -1,4 +1,4 @@
-"""Ordered DuckDB schema migrations."""
+"""Ordered SQLite schema migrations."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -174,7 +174,7 @@ MIGRATIONS = (
             "DROP TABLE raw.sector_board_history",
             """
             ALTER TABLE raw.sector_board_history_provider_aware
-            RENAME TO sector_board_history
+            RENAME TO raw.sector_board_history
             """,
         ),
     ),
@@ -337,6 +337,40 @@ MIGRATIONS = (
             "ALTER TABLE raw.stock_kline_daily ADD COLUMN qfq_anchor_date DATE",
             "ALTER TABLE raw.stock_kline_daily ADD COLUMN cache_version VARCHAR",
             "CREATE INDEX IF NOT EXISTS idx_stock_kline_anchor ON raw.stock_kline_daily (source, code, qfq_anchor_date)",
+        ),
+    ),
+    Migration(
+        version=11,
+        name="tushare_unified_cache",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS raw.tushare_dataset_rows (
+                dataset VARCHAR NOT NULL,
+                row_key VARCHAR NOT NULL,
+                ts_code VARCHAR,
+                trade_date DATE,
+                report_period DATE,
+                ann_date DATE,
+                end_date DATE,
+                source VARCHAR NOT NULL,
+                payload_json VARCHAR NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (dataset, row_key)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS raw.tushare_sync_state (
+                dataset VARCHAR PRIMARY KEY,
+                source VARCHAR NOT NULL,
+                last_params_json VARCHAR NOT NULL,
+                last_row_count BIGINT NOT NULL DEFAULT 0,
+                last_success_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                payload_json VARCHAR NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_tushare_dataset_ts_code ON raw.tushare_dataset_rows (dataset, ts_code)",
+            "CREATE INDEX IF NOT EXISTS idx_tushare_dataset_trade_date ON raw.tushare_dataset_rows (dataset, trade_date)",
+            "CREATE INDEX IF NOT EXISTS idx_tushare_dataset_report_period ON raw.tushare_dataset_rows (dataset, report_period)",
         ),
     ),
 )

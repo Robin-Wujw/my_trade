@@ -39,7 +39,7 @@ def build_parser():
     ))
     parser.add_argument("--trade-plans", default=str(PATHS.project_root / "config" / "trade_plans.json"))
     parser.add_argument("--output-directory", default=str(PATHS.runtime_root / "backtests" / "miniqmt"))
-    parser.add_argument("--price-source", choices=("akshare", "miniqmt"), default="miniqmt")
+    parser.add_argument("--price-source", choices=("akshare", "miniqmt", "tushare"), default="miniqmt")
     parser.add_argument("--bar-period", default="1d")
     parser.add_argument("--miniqmt-dividend-type", default="front")
     parser.add_argument("--miniqmt-refresh", action="store_true")
@@ -146,6 +146,22 @@ def main(argv=None):
                 f"insufficient={lookback_summary['insufficient_sample']}"
             )
         price_source_summary["lookback"] = lookback_summary
+    elif args.price_source == "tushare":
+        price_frames = load_price_frames(
+            codes,
+            PATHS.cache / "formula33_kline" / "tushare",
+            start_date=price_start_date,
+            end_date=args.end_date,
+            source="tushare",
+            database_source="tushare",
+        )
+        price_source_summary = {
+            "source": "tushare",
+            "database_source": "tushare",
+            "requested_count": len(codes),
+            "loaded_count": len(price_frames),
+            "missing_count": len(set(codes) - set(price_frames)),
+        }
     else:
         price_frames = load_price_frames(
             codes,

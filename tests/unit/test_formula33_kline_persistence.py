@@ -665,13 +665,13 @@ def test_csv_atomic_write_failure_is_not_swallowed(monkeypatch, tmp_path):
     assert not Path(formula33.kline_cache_path("akshare", "sz.000001")).exists()
 
 
-def test_duckdb_write_failure_is_not_swallowed():
+def test_sqlite_write_failure_is_not_swallowed():
     class FailingRepository:
         @staticmethod
         def upsert_stock_kline(*_args, **_kwargs):
             raise RuntimeError("write retries exhausted")
 
-    with pytest.raises(RuntimeError, match="DuckDB K-line write failed.*retries exhausted"):
+    with pytest.raises(RuntimeError, match="SQLite K-line write failed.*retries exhausted"):
         formula33.save_persisted_kline(
             FailingRepository(),
             "akshare",

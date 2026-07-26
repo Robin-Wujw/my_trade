@@ -140,7 +140,7 @@ var/cache/formula33_kline/akshare_raw
 1. 底层 `run_portfolio_backtest()` 默认仍是 `signals_effective_next_day=False`。生产入口已经显式传了次日生效，但底层默认有误用风险。
 2. `order_type == close` 的右侧信号使用当日收盘确认，又按当日收盘成交，属于同 bar 执行污染。严格口径应改为次日开盘或条件单。
 3. Top10 展示池和交易候选池没有完全分开。某些 Top10 外诊断行仍可交易，容易造成口径冲突。
-4. 财务缓存仍标记 `financial_point_in_time=False`，不能声称严格公告时点回测。
+4. 财务缓存已经在当前 Tushare 候选池中标记为 `financial_point_in_time=True`、`strict_financial_point_in_time=True`，行业快照也已通过 Tushare `sw_member` 的 `in_date/out_date` 区间重建为 `industry_point_in_time=True`；当前严格候选 manifest 的行业覆盖率为 99.97%。
 
 ### 模型效果问题
 

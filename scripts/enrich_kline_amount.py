@@ -395,7 +395,7 @@ def update_csv_amount(
     return audit, summary
 
 
-def sync_duckdb_amount(paths: list[Path], summaries: list[dict]) -> dict:
+def sync_sqlite_amount(paths: list[Path], summaries: list[dict]) -> dict:
     try:
         from stock_research.storage import Database, KlineRepository
     except Exception as exc:
@@ -512,7 +512,7 @@ def main(argv=None) -> int:
             all_audit.append(audit)
         if index % 100 == 0 or index == len(paths):
             print(f"amount backfill progress {index}/{len(paths)}")
-    duckdb_sync = sync_duckdb_amount(paths, summaries)
+    sqlite_sync = sync_sqlite_amount(paths, summaries)
     audit_frame = pd.concat(all_audit, ignore_index=True) if all_audit else pd.DataFrame()
     summary_frame = pd.DataFrame(summaries)
     _atomic_write_csv(audit_frame, audit_dir / "row_audit.csv")
@@ -526,7 +526,7 @@ def main(argv=None) -> int:
         "updated_symbols": int(summary_frame.get("updated_csv", pd.Series(dtype=bool)).fillna(False).sum()) if not summary_frame.empty else 0,
         "updated_rows": int(summary_frame.get("updated_rows", pd.Series(dtype=float)).fillna(0).sum()) if not summary_frame.empty else 0,
         "error_symbols": int(summary_frame.get("error_message", pd.Series(dtype=str)).fillna("").astype(str).ne("").sum()) if not summary_frame.empty else 0,
-        "duckdb_sync": duckdb_sync,
+        "sqlite_sync": sqlite_sync,
         "audit_directory": str(audit_dir),
     }
     (audit_dir / "summary.json").write_text(

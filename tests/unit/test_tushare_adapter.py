@@ -25,6 +25,8 @@ def test_query_builds_standard_frame_without_exposing_token_in_result(monkeypatc
     result = tushare.query("daily", ts_code="000001.SZ", retries=1)
 
     assert result.to_dict("records") == [{"ts_code": "000001.SZ", "close": 10.5}]
+    assert captured["url"] == tushare.API_URL
+    assert captured["headers"] == {"Accept-Encoding": "gzip"}
     assert captured["json"]["token"] == "secret-token"
     assert "secret-token" not in repr(result)
 
@@ -59,3 +61,39 @@ def test_empty_success_response_returns_empty_frame(monkeypatch):
     monkeypatch.setattr(tushare.requests, "post", lambda *_args, **_kwargs: response)
 
     assert tushare.query("daily", retries=1).empty
+
+
+def test_query_pads_short_rows_from_proxy(monkeypatch):
+    response = SimpleNamespace(
+        raise_for_status=lambda: None,
+        json=lambda: {
+            "code": 0,
+            "data": {"fields": ["ts_code", "close", "limit_status"], "items": [["000001.SZ", 10.5]]},
+        },
+    )
+    monkeypatch.setattr(tushare, "get_token", lambda: "secret-token")
+    monkeypatch.setattr(tushare._RATE_LIMITER, "wait", lambda: None)
+    monkeypatch.setattr(tushare.requests, "post", lambda *_args, **_kwargs: response)
+
+    result = tushare.query("daily_basic", retries=1)
+
+    assert result.to_dict("records") == [
+        {"ts_code": "000001.SZ", "close": 10.5, "limit_status": None}
+    ]
+
+
+def test_query_truncates_long_rows_from_proxy(monkeypatch):
+    response = SimpleNamespace(
+        raise_for_status=lambda: None,
+        json=lambda: {
+            "code": 0,
+            "data": {"fields": ["ts_code", "close"], "items": [["000001.SZ", 10.5, "extra"]]},
+        },
+    )
+    monkeypatch.setattr(tushare, "get_token", lambda: "secret-token")
+    monkeypatch.setattr(tushare._RATE_LIMITER, "wait", lambda: None)
+    monkeypatch.setattr(tushare.requests, "post", lambda *_args, **_kwargs: response)
+
+    result = tushare.query("daily_basic", retries=1)
+
+    assert result.to_dict("records") == [{"ts_code": "000001.SZ", "close": 10.5}]

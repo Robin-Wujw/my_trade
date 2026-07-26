@@ -6,7 +6,7 @@ def test_project_paths_put_all_runtime_files_under_var(tmp_path):
 
     assert paths.runtime_root == tmp_path / "var"
     assert paths.cache == tmp_path / "var" / "cache"
-    assert paths.database == tmp_path / "var" / "data" / "my_trade.duckdb"
+    assert paths.database == tmp_path / "var" / "data" / "my_trade.sqlite3"
     assert paths.selection_exports == tmp_path / "var" / "exports" / "selection"
     assert paths.market_exports == tmp_path / "var" / "exports" / "market"
     assert paths.report_exports == tmp_path / "var" / "exports" / "reports"

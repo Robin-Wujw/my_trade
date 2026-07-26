@@ -33,6 +33,7 @@ from stock_research.indicators.price_structure import (
 )
 from stock_research.strategies.historical_candidates import (
     CANDIDATE_SNAPSHOT_COLUMNS,
+    _build_tushare_sw_industry_lookup,
     _leadership_snapshot,
     _merge_candidate_model_rows,
     _passes_fundamental_gate,
@@ -75,6 +76,7 @@ from stock_research.strategies.portfolio_backtest import (
     build_formula_phase_history,
     run_portfolio_backtest,
 )
+from stock_research.storage import Database, TushareRepository
 
 
 _run_portfolio_backtest = run_portfolio_backtest
@@ -108,6 +110,7 @@ def normalize_candidate_snapshots(snapshots, **kwargs):
 
 def run_portfolio_backtest(price_frames, candidate_snapshots, *args, **kwargs):
     """Give synthetic value candidates the same explicit audit as production rows."""
+    kwargs.setdefault("signals_effective_next_day", False)
     audited_snapshots = {}
     for date, rows in candidate_snapshots.items():
         audited_rows = []
@@ -274,6 +277,67 @@ def test_load_price_frames_can_bypass_database_for_raw_execution_prices(tmp_path
 
     assert frames["sz.002594"].loc[0, "close"] == pytest.approx(254.29)
     assert frames["sz.002594"].loc[0, "raw_to_qfq_factor"] == pytest.approx(3.03591, rel=1e-4)
+
+
+def test_load_price_frames_can_use_tushare_sqlite_without_future_bars(tmp_path, monkeypatch):
+    runtime = tmp_path / "var"
+    monkeypatch.setenv("STOCK_RESEARCH_VAR", str(runtime))
+    database = Database(portfolio_backtest_app.PATHS.database, code_version="test")
+    database.initialize()
+    TushareRepository(database).upsert_dataset(
+        "daily_kline",
+        pd.DataFrame([
+            {
+                "ts_code": "600000.SH",
+                "trade_date": "20260720",
+                "open": 8.0,
+                "high": 8.3,
+                "low": 7.9,
+                "close": 8.2,
+                "vol": 100,
+                "amount": 200,
+            },
+            {
+                "ts_code": "600000.SH",
+                "trade_date": "20260721",
+                "open": 100.0,
+                "high": 100.0,
+                "low": 100.0,
+                "close": 100.0,
+                "vol": 1,
+                "amount": 1,
+            },
+        ]),
+    )
+    TushareRepository(database).upsert_dataset(
+        "adj_factor",
+        pd.DataFrame([
+            {
+                "ts_code": "600000.SH",
+                "trade_date": "20260720",
+                "adj_factor": 4.0,
+            },
+            {
+                "ts_code": "600000.SH",
+                "trade_date": "20260721",
+                "adj_factor": 5.0,
+            },
+        ]),
+    )
+
+    frames = load_price_frames(
+        ["sh.600000"],
+        tmp_path / "unused",
+        start_date="2026-07-01",
+        end_date="2026-07-20",
+        source="tushare",
+        database_source="tushare",
+    )
+
+    assert list(frames) == ["sh.600000"]
+    assert frames["sh.600000"]["date"].tolist() == ["2026-07-20"]
+    assert frames["sh.600000"].loc[0, "close"] == pytest.approx(8.2)
+    assert frames["sh.600000"].loc[0, "raw_to_qfq_factor"] == pytest.approx(0.25)
 
 
 def test_price_frame_coverage_requires_all_candidate_codes_to_endpoint():
@@ -628,7 +692,8 @@ def test_right_quant_score_changes_final_growth_candidate_ranking():
     assert selected[0]["candidate_score"] > selected[1]["candidate_score"]
 
 
-def test_saved_candidate_snapshots_keep_right_quant_columns(tmp_path):
+def test_saved_candidate_snapshots_keep_right_quant_columns(monkeypatch, tmp_path):
+    monkeypatch.setenv("STOCK_RESEARCH_VAR", str(tmp_path / "runtime"))
     industry_path = tmp_path / "industry.csv"
     universe_path = tmp_path / "universe.csv"
     pd.DataFrame([
@@ -679,6 +744,84 @@ def test_saved_candidate_snapshots_keep_right_quant_columns(tmp_path):
     assert manifest["industry_point_in_time_status"] == "safe"
     assert manifest["industry_point_in_time"] is False
     assert manifest["value_industry_rule_version"] == VALUE_INDUSTRY_RULE_VERSION
+
+
+def test_tushare_sw_industry_lookup_uses_observation_date_membership():
+    history = pd.DataFrame([
+        {
+            "code": "sz.000001",
+            "industry": "old-industry",
+            "in_date_ts": pd.Timestamp("2020-01-01"),
+            "out_date_ts": pd.Timestamp("2022-12-31"),
+        },
+        {
+            "code": "sz.000001",
+            "industry": "new-industry",
+            "in_date_ts": pd.Timestamp("2023-01-01"),
+            "out_date_ts": pd.NaT,
+        },
+    ])
+
+    lookup = _build_tushare_sw_industry_lookup(history)
+
+    assert lookup("000001.SZ", "2022-06-30") == ("old-industry", True)
+    assert lookup("sz.000001", "2023-06-30") == ("new-industry", True)
+    assert lookup("sh.600000", "2023-06-30") == ("", True)
+
+
+def test_saved_candidate_manifest_uses_tushare_sw_member_audit_source(
+    monkeypatch, tmp_path,
+):
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("STOCK_RESEARCH_VAR", str(runtime))
+    database = Database(runtime / "data" / "my_trade.sqlite3", code_version="test")
+    database.initialize()
+    TushareRepository(database).upsert_dataset(
+        "sw_member",
+        pd.DataFrame([
+            {
+                "ts_code": "000001.SZ",
+                "l1_name": "bank",
+                "l2_name": "bank-2",
+                "l3_name": "bank-3",
+                "in_date": "19910403",
+                "out_date": "",
+                "is_new": "Y",
+            },
+        ]),
+    )
+    universe_path = tmp_path / "universe.csv"
+    pd.DataFrame([{"code": "sz.000001"}]).to_csv(universe_path, index=False)
+    output = tmp_path / "out"
+
+    manifest = save_historical_candidate_snapshots(
+        output,
+        {"2026-07-10": [{
+            "date": "2026-07-10",
+            "code": "sz.000001",
+            "name": "sample",
+            "report_period": "2026-03-31",
+            "candidate_source": "factor_quant",
+            "quality_score": 90,
+            "earnings_yoy": 0.30,
+            "mktcap": 150,
+            "financial_point_in_time": True,
+            "industry_point_in_time": True,
+        }]},
+        start_date="2026-07-10",
+        end_date="2026-07-10",
+        universe_path=universe_path,
+    )
+
+    source = output / "industry_source_tushare_sw_member.csv"
+    assert manifest["industry_source_path"] == str(source.resolve())
+    assert manifest["industry_source_sha256"] == portfolio_backtest_app.file_sha256(source)
+    assert manifest["industry_data_source"] == "tushare/pro:sw_member"
+    assert manifest["industry_point_in_time_status"] == "safe"
+    assert manifest["industry_coverage_ratio"] == pytest.approx(1.0)
+    assert validate_candidate_manifest_industry_point_in_time(
+        output
+    )["metadata_errors"] == []
 
 
 def test_feature_prefilter_keeps_any_code_that_passed_in_one_visible_period():
@@ -863,6 +1006,20 @@ def test_formula_phase_history_uses_three_five_and_exit_streaks():
     assert list(result.values()) == ["waiting", "watch", "active", "exited"]
 
 
+def test_portfolio_backtest_defaults_to_next_day_signals():
+    bars = breakout_bars()
+    date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
+    snapshots = {date: [{"code": "A"}]}
+
+    result = _run_portfolio_backtest(
+        {"A": bars}, snapshots, {},
+        requested_start=date, end_date=date,
+    )
+
+    assert result["signals_effective_next_day"] is True
+    assert result["final_positions"] == []
+
+
 def test_portfolio_does_not_chain_open_symbols_on_the_same_day():
     bars = breakout_bars()
     date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
@@ -873,6 +1030,7 @@ def test_portfolio_does_not_chain_open_symbols_on_the_same_day():
         {code: bars for code in codes}, snapshots,
         {date: {"phase": "active", "window_up_streak": 5}},
         requested_start=date, end_date=date, max_positions=3,
+        signals_effective_next_day=False,
     )
 
     assert len(result["final_positions"]) == 1
@@ -2063,6 +2221,47 @@ def test_unified_candidate_interface_honors_signal_eligible():
     )
 
     assert result["events"] == []
+    assert result["final_positions"] == []
+
+
+def test_backtest_rejects_st_named_candidates_at_runtime():
+    bars = breakout_bars()
+    date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
+
+    result = run_portfolio_backtest(
+        {"A": bars},
+        {date: [{"code": "A", "name": "*ST闻泰", "allow_right": True}]},
+        {date: {"phase": "active", "window_up_streak": 5}},
+        requested_start=date, end_date=date,
+    )
+
+    assert result["events"] == []
+    assert result["final_positions"] == []
+
+
+def test_left_grid_requires_tighter_value_band_for_new_buys():
+    dates = pd.bdate_range("2026-01-01", periods=81)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 81,
+        "high": [100.5] * 81,
+        "low": [99.5] * 81,
+        "close": [100.0] * 81,
+        "volume": [1000.0] * 81,
+    })
+    date = dates[-1].strftime("%Y-%m-%d")
+
+    result = run_portfolio_backtest(
+        {"A": bars},
+        {date: [{
+            "code": "A", "candidate_source": "value_model",
+            "value_line": 100.0, "mktcap": 150,
+            "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.05,
+        }]},
+        {}, requested_start=date, end_date=date,
+    )
+
+    assert not [event for event in result["events"] if event["action"] == "左侧网格买入"]
     assert result["final_positions"] == []
 
 
@@ -3319,19 +3518,18 @@ def test_backtest_input_coverage_must_match_between_candidates_and_formula():
         )
 
 
-def test_backtest_input_coverage_rejects_empty_candidate_days():
+def test_backtest_input_coverage_allows_manifested_empty_candidate_days():
     formula = pd.DataFrame({"date": ["2024-09-24", "2024-09-25"]})
 
-    with pytest.raises(RuntimeError, match="empty selection days"):
-        validate_backtest_input_coverage(
-            {
-                "2024-09-24": [{"code": "A"}],
-                "2024-09-25": [],
-            },
-            formula,
-            "2024-09-24",
-            "2024-09-25",
-        )
+    assert validate_backtest_input_coverage(
+        {
+            "2024-09-24": [{"code": "A"}],
+            "2024-09-25": [],
+        },
+        formula,
+        "2024-09-24",
+        "2024-09-25",
+    ) == "2024-09-25"
 
 
 def test_backtest_input_coverage_requires_every_formula_trade_date():
@@ -3682,8 +3880,8 @@ def test_financial_preflight_fails_when_auto_fetch_remains_below_target(monkeypa
         ensure_financial_cache_for_backtest(args)
 
 
-def test_no_refresh_inputs_is_blocked_for_strict_backtests():
-    with pytest.raises(RuntimeError, match="no-refresh-inputs"):
+def test_no_refresh_inputs_requires_strict_candidate_manifest():
+    with pytest.raises(RuntimeError, match="candidate manifest"):
         portfolio_backtest_app.main([
             "--start-date", "2026-07-10",
             "--end-date", "2026-07-14",

@@ -12,7 +12,8 @@ from stock_research.core.paths import PATHS
 from .retry import FileRateLimiter, call_with_backoff, is_transient_error
 
 
-API_URL = "https://api.tushare.pro"
+DEFAULT_API_URL = "https://ts.gyzcloud.top/api"
+API_URL = os.environ.get("TUSHARE_API_URL", DEFAULT_API_URL).strip() or DEFAULT_API_URL
 # Keep a conservative cross-process default. Tushare permissions and limits
 # are endpoint-specific; for example, daily and adj_factor use different tiers.
 _RATE_LIMITER = FileRateLimiter(
@@ -79,6 +80,7 @@ def query(
                 "params": params,
                 "fields": fields,
             },
+            headers={"Accept-Encoding": "gzip"},
             timeout=timeout,
         )
         response.raise_for_status()
@@ -89,7 +91,15 @@ def query(
         data = payload.get("data") or {}
         columns = data.get("fields") or []
         items = data.get("items") or []
-        return pd.DataFrame(items, columns=columns)
+        normalized_items = []
+        for item in items:
+            values = list(item)
+            if len(values) < len(columns):
+                values.extend([None] * (len(columns) - len(values)))
+            elif len(values) > len(columns):
+                values = values[: len(columns)]
+            normalized_items.append(values)
+        return pd.DataFrame(normalized_items, columns=columns)
 
     return call_with_backoff(
         request_once,
