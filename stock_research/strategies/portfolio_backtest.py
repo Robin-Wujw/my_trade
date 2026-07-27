@@ -286,6 +286,77 @@ def _board_lot_quantity(code, quantity) -> int:
     return max(0, int(float(quantity) // lot) * lot)
 
 
+def _normalize_action_date(value):
+    converted = pd.to_datetime(value, errors="coerce")
+    if pd.isna(converted):
+        return None
+    return pd.Timestamp(converted).normalize()
+
+
+def _action_share_multiplier(action):
+    if action is None:
+        return None
+    if isinstance(action, (int, float)):
+        value = float(action)
+        return value if value > 0 else None
+    if not isinstance(action, dict):
+        return None
+    components = []
+    for key in ("stk_bo_rate", "stk_co_rate"):
+        value = pd.to_numeric(action.get(key), errors="coerce")
+        if pd.notna(value) and float(value) > 0:
+            components.append(float(value))
+    if components:
+        return 1.0 + sum(components)
+    value = pd.to_numeric(action.get("stk_div"), errors="coerce")
+    if pd.notna(value) and float(value) > 0:
+        return 1.0 + float(value)
+    return None
+
+
+def _normalize_corporate_actions(corporate_actions):
+    lookup = {}
+    if hasattr(corporate_actions, "to_dict"):
+        rows = corporate_actions.to_dict("records")
+        corporate_actions = {}
+        for row in rows:
+            code = str(row.get("code") or row.get("ts_code") or "").strip()
+            if code:
+                corporate_actions.setdefault(code, []).append(row)
+    for code, rows in dict(corporate_actions or {}).items():
+        by_date = lookup.setdefault(str(code), {})
+        if isinstance(rows, dict):
+            iterator = rows.items()
+        else:
+            iterator = ((None, row) for row in rows or [])
+        for date_key, row in iterator:
+            if isinstance(row, dict):
+                action_date = _normalize_action_date(
+                    row.get("ex_date") or row.get("div_listdate") or row.get("date") or date_key,
+                )
+            else:
+                action_date = _normalize_action_date(date_key)
+            if action_date is None:
+                continue
+            multiplier = _action_share_multiplier(row)
+            if multiplier is None:
+                continue
+            by_date.setdefault(action_date, []).append(row)
+    return lookup
+
+
+def _corporate_action_quantity_multiplier(actions, factor_multiplier):
+    for action in actions or []:
+        multiplier = _action_share_multiplier(action)
+        if multiplier is not None and multiplier > 0:
+            return float(multiplier)
+    raw_multiplier = float(factor_multiplier)
+    tenth = round(raw_multiplier * 10.0) / 10.0
+    if abs(raw_multiplier - tenth) / raw_multiplier <= 0.015:
+        return tenth
+    return raw_multiplier
+
+
 def _effective_profit_tranches(code, quantity, configured_parts) -> int:
     """Never promise more exit slices than the acquired board lots support."""
     available_board_lots = int(float(quantity) // board_lot_size(code))
@@ -857,6 +928,7 @@ def run_portfolio_backtest(
     initial_capital=1_000_000.0,
     sell_stamp_duty_rate=0.0,
     estimated_slippage_rate=0.0,
+    corporate_actions=None,
 ):
     """Replay a portfolio without filling dates before candidate coverage."""
     if close_confirmed_execution not in {"next_open", "close_proxy"}:
@@ -880,6 +952,7 @@ def run_portfolio_backtest(
     # the remaining balance.  Sort symbols to keep reruns independent of file
     # discovery/dictionary insertion order.
     frames = {code: _prepare_frame(price_frames[code]) for code in sorted(price_frames)}
+    corporate_action_lookup = _normalize_corporate_actions(corporate_actions or {})
     plans = dict((trade_plans or {}).get("plans") or {})
     states = {code: PositionState() for code in frames}
     events = []
@@ -1626,21 +1699,40 @@ def run_portfolio_backtest(
                 return
         if not (0.05 <= multiplier <= 20.0):
             return
-        for lot in state.left:
-            lot["quantity"] = float(lot["quantity"]) * multiplier
+        quantity_multiplier = _corporate_action_quantity_multiplier(
+            corporate_action_lookup.get(code, {}).get(date),
+            multiplier,
+        )
+        if quantity_multiplier <= 0:
+            return
+
+        def adjust_lot(lot):
+            original_quantity = float(lot["quantity"])
+            if original_quantity <= 0:
+                return 1.0
+            adjusted_quantity = max(1, int(round(original_quantity * quantity_multiplier)))
+            effective_multiplier = adjusted_quantity / original_quantity
+            lot["quantity"] = float(adjusted_quantity)
             lot["cost"] = float(lot["cost"]) / multiplier
+            lot["size"] = float(lot["size"]) * effective_multiplier / multiplier
+            return effective_multiplier
+
+        for lot in state.left:
+            effective_multiplier = adjust_lot(lot)
             if lot.get("sell_price") is not None:
                 lot["sell_price"] = float(lot["sell_price"]) / multiplier
         if state.left_value_line is not None:
             state.left_value_line = float(state.left_value_line) / multiplier
         for lot in state.right:
-            lot["quantity"] = float(lot["quantity"]) * multiplier
-            lot["cost"] = float(lot["cost"]) / multiplier
+            effective_multiplier = adjust_lot(lot)
             lot["stop"] = float(lot["stop"]) / multiplier
             if lot.get("reconfirm_level") is not None:
                 lot["reconfirm_level"] = float(lot["reconfirm_level"]) / multiplier
+            if lot.get("origin_left_value_line") is not None:
+                lot["origin_left_value_line"] = float(lot["origin_left_value_line"]) / multiplier
         adjustment_reason = (
-            f"不复权成交价会计调整; 股数倍率={multiplier:.6f}; "
+            f"不复权成交价会计调整; 价格倍率={multiplier:.6f}; "
+            f"股数倍率={quantity_multiplier:.6f}; "
             f"原始/前复权因子 {float(previous_factor):.6f}->{float(current_factor):.6f}"
         )
         if observed_price_ratio is not None:

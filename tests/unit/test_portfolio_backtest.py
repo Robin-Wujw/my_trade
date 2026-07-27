@@ -210,6 +210,64 @@ def test_raw_execution_adjusts_position_across_ex_rights_factor_change():
     assert position["unrealized_pnl_pct"] == pytest.approx(0.0)
 
 
+def test_raw_execution_uses_dividend_share_rate_before_factor_fallback():
+    bars = breakout_bars()
+    action_dates = pd.bdate_range(
+        bars.iloc[-1]["date"] + pd.Timedelta(days=1), periods=2,
+    )
+    noisy_factor_multiplier = 1.605162
+    adjusted_price = 10.4 / noisy_factor_multiplier
+    action_bars = pd.DataFrame({
+        "date": action_dates,
+        "open": [adjusted_price, adjusted_price],
+        "high": [adjusted_price, adjusted_price],
+        "low": [adjusted_price, adjusted_price],
+        "close": [adjusted_price, adjusted_price],
+        "volume": [3000, 3000],
+        "raw_to_qfq_factor": [1.0, 1.0],
+    })
+    bars["raw_to_qfq_factor"] = noisy_factor_multiplier
+    bars = pd.concat([bars, action_bars], ignore_index=True)
+    snapshot_date = breakout_bars().iloc[-2]["date"].strftime("%Y-%m-%d")
+    ex_date = action_dates[0].strftime("%Y%m%d")
+
+    result = run_portfolio_backtest(
+        {"sz.000001": bars},
+        {snapshot_date: [{"code": "sz.000001"}]},
+        {},
+        requested_start=snapshot_date,
+        end_date=bars.iloc[-1]["date"].strftime("%Y-%m-%d"),
+        initial_capital=100_000,
+        commission_rate=0,
+        minimum_commission=0,
+        signals_effective_next_day=True,
+        corporate_actions={
+            "sz.000001": [
+                {
+                    "ex_date": ex_date,
+                    "stk_bo_rate": 0.6,
+                    "stk_co_rate": 0.0,
+                    "cash_div": 0.1,
+                },
+            ],
+        },
+    )
+
+    buy_quantity = next(
+        event["quantity"] for event in result["trade_ledger"]
+        if event["trade_side"] == "买入"
+    )
+    sell_quantity = sum(
+        event["quantity"] for event in result["trade_ledger"]
+        if event["trade_side"] == "卖出"
+    )
+    position = result["final_positions"][0]
+    assert position["quantity"] + sell_quantity == pytest.approx(buy_quantity * 1.6)
+    assert float(position["quantity"]).is_integer()
+    assert all(float(event["quantity"]).is_integer() for event in result["trade_ledger"])
+    assert position["cost"] == pytest.approx(10.4 / noisy_factor_multiplier, rel=1e-3)
+
+
 def test_raw_execution_ignores_small_cash_dividend_factor_drift():
     bars = breakout_bars()
     dividend_dates = pd.bdate_range(

@@ -100,3 +100,40 @@ def test_tushare_daily_kline_loader_normalizes_codes_and_filters_future_rows(tmp
             "raw_to_qfq_factor": 0.5,
         }
     ]
+
+
+def test_tushare_dividend_loader_filters_by_ex_date_and_project_code(tmp_path):
+    database = Database(tmp_path / "my_trade.sqlite3", code_version="test")
+    database.initialize()
+    repository = TushareRepository(database)
+    repository.upsert_dataset(
+        "dividend",
+        pd.DataFrame([
+            {
+                "ts_code": "000001.SZ",
+                "end_date": "20251231",
+                "ex_date": "20260504",
+                "stk_bo_rate": 0.3,
+                "stk_co_rate": 0.3,
+                "stk_div": 0.6,
+                "cash_div": 0.1,
+            },
+            {
+                "ts_code": "000001.SZ",
+                "end_date": "20261231",
+                "ex_date": "20270504",
+                "stk_bo_rate": 0.1,
+            },
+        ]),
+    )
+
+    actions = repository.load_dividend_actions(
+        ["sz.000001"],
+        start_date="2026-01-01",
+        end_date="2026-12-31",
+    )
+
+    assert list(actions) == ["sz.000001"]
+    assert len(actions["sz.000001"]) == 1
+    assert actions["sz.000001"][0]["ex_date"] == "20260504"
+    assert actions["sz.000001"][0]["stk_div"] == 0.6

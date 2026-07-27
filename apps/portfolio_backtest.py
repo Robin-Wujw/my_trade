@@ -309,6 +309,21 @@ def load_price_frames(
     return frames
 
 
+def load_corporate_actions(codes, *, start_date, end_date):
+    if not PATHS.database.is_file():
+        return {}
+    database = Database(PATHS.database)
+    try:
+        return TushareRepository(database).load_dividend_actions(
+            codes,
+            start_date=str(start_date),
+            end_date=str(end_date),
+        )
+    except Exception as exc:
+        print(f"[portfolio-backtest] skip local dividend actions: {exc}")
+        return {}
+
+
 def validate_price_frame_coverage(price_frames, codes, start_date, end_date, *, code_start_dates=None):
     """Require loaded execution/valuation bars through the backtest endpoint."""
     start = pd.Timestamp(start_date).normalize()
@@ -1726,6 +1741,11 @@ def main(argv=None):
         }
         for _, row in formula.iterrows()
     }
+    corporate_actions = load_corporate_actions(
+        codes,
+        start_date=args.start_date,
+        end_date=args.end_date,
+    )
     result = run_portfolio_backtest(
         price_frames,
         snapshots,
@@ -1755,6 +1775,7 @@ def main(argv=None):
         initial_capital=args.initial_capital,
         sell_stamp_duty_rate=args.sell_stamp_duty_rate,
         estimated_slippage_rate=args.estimated_slippage_rate,
+        corporate_actions=corporate_actions,
     )
     result["price_source"] = {
         "kline_directory": str(price_kline_directory),
@@ -1763,6 +1784,11 @@ def main(argv=None):
         "database_source": args.price_database_source,
         "mode": "不复权CSV" if not use_price_database else "SQLite统一缓存优先",
         "coverage": price_coverage,
+    }
+    result["corporate_action_source"] = {
+        "source": "local_tushare_dividend",
+        "loaded_symbol_count": len(corporate_actions),
+        "loaded_event_count": sum(len(rows) for rows in corporate_actions.values()),
     }
     vectorbt_equity = []
     if args.vectorbt_cross_check:

@@ -295,3 +295,58 @@ class TushareRepository:
             "date", "code", "open", "high", "low", "close", "volume",
             "amount", "tradestatus", "raw_to_qfq_factor",
         ]]
+
+    def load_dividend_actions(
+        self,
+        codes,
+        *,
+        start_date: str,
+        end_date: str,
+    ) -> dict[str, list[dict]]:
+        """Load local Tushare dividend/ex-rights rows keyed by project code."""
+        requested = [str(code) for code in codes if str(code).strip()]
+        ts_to_requested: dict[str, list[str]] = {}
+        for code in requested:
+            ts_code = normalize_tushare_code(code)
+            if ts_code:
+                ts_to_requested.setdefault(ts_code, []).append(code)
+        if not ts_to_requested:
+            return {}
+        start = pd.to_datetime(start_date, errors="coerce")
+        end = pd.to_datetime(end_date, errors="coerce")
+        if pd.isna(start) or pd.isna(end) or start > end:
+            raise ValueError(f"invalid Tushare dividend date range: {start_date}..{end_date}")
+
+        placeholders = ", ".join("?" for _ in ts_to_requested)
+        connection = self.database.connect(read_only=True)
+        try:
+            rows = connection.execute(
+                f"""
+                SELECT ts_code, payload_json
+                FROM raw.tushare_dataset_rows
+                WHERE dataset = ?
+                  AND ts_code IN ({placeholders})
+                ORDER BY ts_code, row_key
+                """,
+                ["dividend", *sorted(ts_to_requested)],
+            ).fetchall()
+        finally:
+            connection.close()
+
+        actions: dict[str, list[dict]] = {}
+        for ts_code, payload_json in rows:
+            payload = json.loads(payload_json)
+            ex_date = pd.to_datetime(
+                payload.get("ex_date") or payload.get("div_listdate"),
+                errors="coerce",
+            )
+            if pd.isna(ex_date):
+                continue
+            ex_date = pd.Timestamp(ex_date).normalize()
+            if ex_date < start.normalize() or ex_date > end.normalize():
+                continue
+            for requested_code in ts_to_requested.get(str(ts_code), []):
+                action = dict(payload)
+                action["code"] = requested_code
+                actions.setdefault(requested_code, []).append(action)
+        return actions
