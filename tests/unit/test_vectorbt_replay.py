@@ -111,3 +111,50 @@ def test_vectorbt_replay_compares_final_position_direct_quantity():
     position = checked["final_positions"][0]
     assert position["original_model_quantity"] == pytest.approx(100.0)
     assert position["quantity_delta"] == pytest.approx(0.0)
+
+
+def test_vectorbt_replay_applies_corporate_action_quantity_delta():
+    frame = pd.DataFrame({
+        "date": pd.to_datetime(["2026-01-05", "2026-01-06"]),
+        "open": [10.0, 5.0],
+        "high": [10.0, 5.0],
+        "low": [10.0, 5.0],
+        "close": [10.0, 5.0],
+        "volume": [1_000_000, 1_000_000],
+    })
+    result = {
+        "events": [
+            {
+                "date": "2026-01-05", "code": "A", "price": 10.0,
+                "execution_quantity": 100.0,
+            },
+            {
+                "date": "2026-01-06", "code": "A", "price": 5.0,
+                "execution_quantity": 0.0,
+                "account_mode": "corporate_action",
+                "corporate_action_quantity_delta": 100.0,
+            },
+        ],
+        "equity_curve": [
+            {"date": "2026-01-05", "equity": 1.0},
+            {"date": "2026-01-06", "equity": 1.0},
+        ],
+        "final_return_pct": 0.0,
+        "maximum_drawdown_pct": 0.0,
+        "final_positions": [{"code": "A", "quantity": 200.0}],
+    }
+
+    checked = run_vectorbt_cross_check(
+        {"A": frame}, result,
+        commission_rate=0.0,
+        minimum_commission=0.0,
+        initial_capital=10_000.0,
+        sell_stamp_duty_rate=0.0,
+        estimated_slippage_rate=0.0,
+    )
+
+    assert checked["requested_order_count"] == 1
+    assert checked["filled_order_count"] == 1
+    assert checked["corporate_action_adjustment_count"] == 1
+    assert checked["final_return_delta_pct"] == pytest.approx(0.0, abs=1e-8)
+    assert checked["final_positions"][0]["quantity"] == pytest.approx(200.0)

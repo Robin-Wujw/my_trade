@@ -1706,10 +1706,14 @@ def run_portfolio_backtest(
         if quantity_multiplier <= 0:
             return
 
+        adjusted_quantity_before = sum(
+            float(lot["quantity"]) for lot in state.left + state.right
+        )
+
         def adjust_lot(lot):
             original_quantity = float(lot["quantity"])
             if original_quantity <= 0:
-                return 1.0
+                return 0.0
             adjusted_quantity = max(1, int(round(original_quantity * quantity_multiplier)))
             effective_multiplier = adjusted_quantity / original_quantity
             lot["quantity"] = float(adjusted_quantity)
@@ -1737,9 +1741,19 @@ def run_portfolio_backtest(
         )
         if observed_price_ratio is not None:
             adjustment_reason += f"; 价格比例={observed_price_ratio:.6f}"
+        adjusted_quantity_after = sum(
+            float(lot["quantity"]) for lot in state.left + state.right
+        )
         add_event(
             date, code, "除权持仓调整", float(data.iloc[index]["close"]), 0.0,
             adjustment_reason,
+            corporate_action_price_multiplier=float(multiplier),
+            corporate_action_quantity_multiplier=float(quantity_multiplier),
+            corporate_action_quantity_before=float(adjusted_quantity_before),
+            corporate_action_quantity_after=float(adjusted_quantity_after),
+            corporate_action_quantity_delta=(
+                float(adjusted_quantity_after) - float(adjusted_quantity_before)
+            ),
             account_mode="corporate_action",
         )
 

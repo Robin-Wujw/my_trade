@@ -12,6 +12,8 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 
+SYNTHETIC_CORPORATE_ACTION_PRICE = 1e-9
+
 
 def _load_vectorbt():
     try:
@@ -40,12 +42,35 @@ def _daily_closes(price_frames, dates, codes):
     return closes.ffill().bfill()
 
 
+def _corporate_action_quantity_delta(event):
+    if str(event.get("account_mode") or "") != "corporate_action":
+        return 0.0
+    value = pd.to_numeric(event.get("corporate_action_quantity_delta"), errors="coerce")
+    if pd.isna(value):
+        return 0.0
+    return float(value)
+
+
+def _replay_events(events):
+    replay = []
+    for event in events:
+        row = dict(event)
+        quantity = float(row.get("execution_quantity") or 0.0)
+        if abs(quantity) > 0:
+            row["vectorbt_event_type"] = "trade"
+            replay.append(row)
+            continue
+        quantity_delta = _corporate_action_quantity_delta(row)
+        if abs(quantity_delta) > 1e-12:
+            row["execution_quantity"] = quantity_delta
+            row["vectorbt_event_type"] = "corporate_action"
+            replay.append(row)
+    return replay
+
+
 def _build_timeline(price_frames, events, equity_curve):
-    trade_events = [
-        dict(event) for event in events
-        if abs(float(event.get("execution_quantity") or 0.0)) > 0
-    ]
-    codes = sorted({str(event["code"]) for event in trade_events})
+    replay_events = _replay_events(events)
+    codes = sorted({str(event["code"]) for event in replay_events})
     missing = sorted(set(codes) - set(price_frames))
     if missing:
         raise ValueError(f"price frames missing vectorbt order symbols: {missing}")
@@ -53,14 +78,14 @@ def _build_timeline(price_frames, events, equity_curve):
     dates = {
         pd.Timestamp(row["date"]).normalize() for row in equity_curve
     }
-    dates.update(pd.Timestamp(event["date"]).normalize() for event in trade_events)
+    dates.update(pd.Timestamp(event["date"]).normalize() for event in replay_events)
     dates = sorted(dates)
     if not dates:
         return None
 
     daily_close = _daily_closes(price_frames, dates, codes)
     events_by_date = defaultdict(list)
-    for event in trade_events:
+    for event in replay_events:
         events_by_date[pd.Timestamp(event["date"]).normalize()].append(event)
 
     rows = []
@@ -124,19 +149,30 @@ def run_vectorbt_cross_check(
     fixed_fees = size.copy()
     log = pd.DataFrame(False, index=close.index, columns=close.columns)
 
+    synthetic_timestamps = {
+        timestamp for timestamp, event in event_at.items()
+        if event.get("vectorbt_event_type") == "corporate_action"
+    }
     for timestamp, event in event_at.items():
         code = str(event["code"])
         quantity = float(event["execution_quantity"])
-        execution_price = float(event.get("execution_price") or event["price"])
+        if event.get("vectorbt_event_type") == "corporate_action":
+            execution_price = SYNTHETIC_CORPORATE_ACTION_PRICE
+        else:
+            execution_price = float(event.get("execution_price") or event["price"])
         turnover = abs(quantity * execution_price)
-        # vectorbt computes percentage fee + fixed fee.  The dynamic fixed
-        # component below reproduces max(turnover * 万0.85, 5), not 万0.85+5.
-        minimum_top_up = max(
-            0.0, float(minimum_commission) - turnover * float(commission_rate),
-        )
-        variable_rate = float(commission_rate) + float(estimated_slippage_rate)
-        if quantity < 0:
-            variable_rate += float(sell_stamp_duty_rate)
+        if event.get("vectorbt_event_type") == "corporate_action":
+            minimum_top_up = 0.0
+            variable_rate = 0.0
+        else:
+            # vectorbt computes percentage fee + fixed fee.  The dynamic fixed
+            # component below reproduces max(turnover * 万0.85, 5), not 万0.85+5.
+            minimum_top_up = max(
+                0.0, float(minimum_commission) - turnover * float(commission_rate),
+            )
+            variable_rate = float(commission_rate) + float(estimated_slippage_rate)
+            if quantity < 0:
+                variable_rate += float(sell_stamp_duty_rate)
         size.loc[timestamp, code] = quantity
         price.loc[timestamp, code] = execution_price
         fees.loc[timestamp, code] = variable_rate
@@ -191,16 +227,20 @@ def run_vectorbt_cross_check(
     order_issues = []
     if logs.empty:
         rejected = partial = 0
+        actual_logs = logs
     else:
-        rejected = int((logs["Result Status"] != "Filled").sum())
-        filled_logs = logs[logs["Result Status"] == "Filled"]
+        actual_logs = logs[
+            ~logs["Timestamp"].map(lambda value: pd.Timestamp(value) in synthetic_timestamps)
+        ]
+        rejected = int((actual_logs["Result Status"] != "Filled").sum())
+        filled_logs = actual_logs[actual_logs["Result Status"] == "Filled"]
         partial_mask = (
             (filled_logs["Result Size"].abs() - filled_logs["Request Size"].abs()).abs()
             > 1e-7
         )
         partial = int(partial_mask.sum())
         issue_logs = pd.concat([
-            logs[logs["Result Status"] != "Filled"],
+            actual_logs[actual_logs["Result Status"] != "Filled"],
             filled_logs[partial_mask],
         ]).sort_values(["Timestamp", "Column"])
         for _, row in issue_logs.iterrows():
@@ -279,8 +319,14 @@ def run_vectorbt_cross_check(
     return {
         "engine": "vectorbt",
         "vectorbt_version": vbt.__version__,
-        "requested_order_count": len(event_at),
-        "filled_order_count": int(portfolio.orders.count()),
+        "requested_order_count": sum(
+            1 for event in event_at.values()
+            if event.get("vectorbt_event_type") == "trade"
+        ),
+        "filled_order_count": (
+            0 if logs.empty else int((actual_logs["Result Status"] == "Filled").sum())
+        ),
+        "corporate_action_adjustment_count": len(synthetic_timestamps),
         "partial_fill_count": partial,
         "rejected_order_count": rejected,
         "order_issues": order_issues,
