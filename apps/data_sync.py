@@ -16,7 +16,10 @@ TUSHARE_DEFAULT_FIELDS = {
     "cashflow": "ts_code,ann_date,f_ann_date,end_date,report_type,n_cashflow_act,n_cashflow_inv_act,n_cash_flows_fnc_act",
     "fina_indicator": "ts_code,ann_date,end_date,eps,dt_eps,bps,roe,roe_dt,netprofit_yoy,or_yoy",
     "share_float": "ts_code,ann_date,float_date,float_share,float_ratio,holder_name,share_type",
-    "dividend": "ts_code,ann_date,end_date,div_proc,stk_div,stk_bo_rate,cash_div,cash_div_tax",
+    "dividend": (
+        "ts_code,ann_date,end_date,record_date,ex_date,div_listdate,div_proc,"
+        "stk_div,stk_bo_rate,stk_co_rate,cash_div,cash_div_tax"
+    ),
 }
 
 

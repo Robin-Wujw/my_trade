@@ -137,3 +137,61 @@ def test_tushare_dividend_loader_filters_by_ex_date_and_project_code(tmp_path):
     assert len(actions["sz.000001"]) == 1
     assert actions["sz.000001"][0]["ex_date"] == "20260504"
     assert actions["sz.000001"][0]["stk_div"] == 0.6
+
+
+def test_tushare_event_datasets_keep_distinct_event_rows(tmp_path):
+    database = Database(tmp_path / "my_trade.sqlite3", code_version="test")
+    database.initialize()
+    repository = TushareRepository(database)
+
+    dividend_rows = repository.upsert_dataset(
+        "dividend",
+        pd.DataFrame([
+            {
+                "ts_code": "300751.SZ",
+                "ann_date": "20260428",
+                "end_date": "20251231",
+                "div_proc": "预案",
+                "cash_div": 0.0,
+                "cash_div_tax": 0.5,
+            },
+            {
+                "ts_code": "300751.SZ",
+                "ann_date": "20260428",
+                "end_date": "20251231",
+                "record_date": "20260528",
+                "ex_date": "20260529",
+                "div_proc": "实施",
+                "cash_div": 0.5,
+                "cash_div_tax": 0.5,
+            },
+        ]),
+    )
+    share_float_rows = repository.upsert_dataset(
+        "share_float",
+        pd.DataFrame([
+            {
+                "ts_code": "300751.SZ",
+                "ann_date": "20210127",
+                "float_date": "20240201",
+                "float_share": 2187978.0,
+                "float_ratio": 3.8219,
+                "holder_name": "王正根",
+                "share_type": "定增股份",
+            },
+            {
+                "ts_code": "300751.SZ",
+                "ann_date": "20210127",
+                "float_date": "20240201",
+                "float_share": 2853447.0,
+                "float_ratio": 4.9843,
+                "holder_name": "周剑",
+                "share_type": "定增股份",
+            },
+        ]),
+    )
+
+    assert dividend_rows == 2
+    assert share_float_rows == 2
+    assert len(repository.load_dataset("dividend", ts_code="300751.SZ")) == 2
+    assert len(repository.load_dataset("share_float", ts_code="300751.SZ")) == 2

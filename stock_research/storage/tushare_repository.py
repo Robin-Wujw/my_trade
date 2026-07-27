@@ -25,6 +25,63 @@ def _date_value(row: dict, names: Iterable[str]):
     return None
 
 
+DEFAULT_KEY_COLUMNS = (
+    "ts_code",
+    "trade_date",
+    "cal_date",
+    "ann_date",
+    "end_date",
+    "f_ann_date",
+    "index_code",
+    "con_code",
+    "exchange",
+    "symbol",
+    "broker",
+    "warehouse",
+    "week",
+    "week_date",
+    "prd",
+    "l1_code",
+    "l2_code",
+    "l3_code",
+    "industry_code",
+    "in_date",
+    "out_date",
+    "opt_code",
+    "mapping_ts_code",
+)
+
+DATASET_KEY_COLUMNS = {
+    "dividend": (
+        "ts_code",
+        "ann_date",
+        "end_date",
+        "record_date",
+        "ex_date",
+        "div_listdate",
+        "div_proc",
+        "stk_div",
+        "stk_bo_rate",
+        "stk_co_rate",
+        "cash_div",
+        "cash_div_tax",
+    ),
+    "share_float": (
+        "ts_code",
+        "ann_date",
+        "float_date",
+        "float_share",
+        "float_ratio",
+        "holder_name",
+        "share_type",
+    ),
+}
+
+
+def dataset_key_columns(dataset: str) -> tuple[str, ...]:
+    return DATASET_KEY_COLUMNS.get(str(dataset), DEFAULT_KEY_COLUMNS)
+
+
 def _row_key(dataset: str, row: dict, key_columns: tuple[str, ...]) -> str:
     values = [str(row.get(column) or "") for column in key_columns]
     if any(values):
@@ -65,35 +122,12 @@ class TushareRepository:
         frame: pd.DataFrame,
         *,
         source: str = "tushare",
-        key_columns: tuple[str, ...] = (
-            "ts_code",
-            "trade_date",
-            "cal_date",
-            "ann_date",
-            "end_date",
-            "f_ann_date",
-            "index_code",
-            "con_code",
-            "exchange",
-            "symbol",
-            "broker",
-            "warehouse",
-            "week",
-            "week_date",
-            "prd",
-            "l1_code",
-            "l2_code",
-            "l3_code",
-            "industry_code",
-            "in_date",
-            "out_date",
-            "opt_code",
-            "mapping_ts_code",
-        ),
+        key_columns: tuple[str, ...] | None = None,
         params: dict | None = None,
     ) -> int:
         if frame is None or frame.empty:
             return 0
+        key_columns = key_columns or dataset_key_columns(dataset)
         rows = []
         for raw_row in frame.to_dict("records"):
             row = {str(key): value for key, value in raw_row.items()}

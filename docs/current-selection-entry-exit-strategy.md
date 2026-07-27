@@ -19,7 +19,7 @@ MiniQMT/本地行情与财务缓存 -> 候选快照 v5（价值线行业白名�
 候选快照由 `stock_research/strategies/historical_candidates.py` 生成，当前版本为 `unified-selection-v5-value-industry-allowlist`。旧 v4 快照不再允许复用为当前生产候选。
 
 - 当前 Tushare 候选池：`var/backtests/tushare_official_candidates_2021_to_20260721_merged/manifest.json`
-- 当前修正后回测摘要：`var/backtests/portfolio_tushare_official_2021_to_20260721_pit/portfolio_2021-01-01_2026-07-21_summary.json`
+- 当前修正后回测摘要：`var/backtests/portfolio_tushare_official_2021_to_20260721_raw_qfq_split_dividend_exdate_sync_left_management_fix_vectorbt/portfolio_2021-01-01_2026-07-21_summary.json`
 - 当前口径：`financial_point_in_time=true`，`strict_financial_point_in_time=true`，`unsafe_snapshot_count=0`；`industry_point_in_time=true`，`industry_point_in_time_status=safe`，行业来源为 Tushare `sw_member` 按 `in_date/out_date` 重建的时点快照。
 
 ### 2.1 硬门槛
@@ -255,4 +255,13 @@ MiniQMT 回测画像：
 - 买入 30 次，卖出 27 次
 - 主要利润来自 2025 年 6 月以后对核心右侧机会的持有和加仓
 
-当前已将默认首仓、单股暴露和止盈份数改回白大纪律；新结果必须重新回测后写入，不能沿用旧激进参数收益。
+当前已将默认首仓、单股暴露和止盈份数改回白大纪律，并完成 Tushare 时点候选、raw 成交/qfq 信号拆分、分红除权持仓调整和 VectorBT 独立复放后的 2021-01-04 至 2026-07-21 回测：
+
+- 总收益：`+159.502%`
+- 已实现收益：`+104.339%`
+- 持仓浮盈：`+55.163%`
+- 最大回撤：`-23.590%`
+- 买入 127 笔，卖出 213 笔；按前一交易日有效候选快照审计，非候选新增买入为 0
+- VectorBT 复放：340 笔订单全部成交复放，6 次公司行为调整，最终收益差 `0.000065` 个百分点，逐日权益最大差为 0
+
+该结果的主要不稳定来源是少数强趋势尾仓，尤其是新易盛左侧价值核心在 2024-10-17 被右侧接管后保留尾仓；这属于当前规则允许的“左侧低成本核心 + 右侧接管 + 分仓止盈”路径，但不能简单外推为稳定年化能力。

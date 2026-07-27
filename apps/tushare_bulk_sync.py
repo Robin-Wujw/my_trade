@@ -12,12 +12,26 @@ from stock_research.storage import Database, TushareRepository
 
 
 DEFAULT_FINANCIAL_DATASETS = ("fina_indicator", "income", "balancesheet", "cashflow")
+EVENT_DATASETS = ("dividend", "share_float")
+BULK_DATASET_FIELDS = {
+    "dividend": (
+        "ts_code,ann_date,end_date,record_date,ex_date,div_listdate,div_proc,"
+        "stk_div,stk_bo_rate,stk_co_rate,cash_div,cash_div_tax"
+    ),
+    "share_float": (
+        "ts_code,ann_date,float_date,float_share,float_ratio,holder_name,share_type"
+    ),
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--datasets", default=",".join(DEFAULT_FINANCIAL_DATASETS))
-    parser.add_argument("--period", required=True, help="Report period, for example 20260331.")
+    parser.add_argument(
+        "--period",
+        default="",
+        help="Report period, for financial datasets, for example 20260331.",
+    )
     parser.add_argument("--database", default=str(PATHS.database))
     parser.add_argument("--max-codes", type=int, default=0, help="Optional cap for smoke runs.")
     parser.add_argument("--sleep", type=float, default=0.0, help="Extra sleep between calls.")
@@ -60,6 +74,10 @@ def _save_state(path: Path, state: dict) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     datasets = tuple(item.strip() for item in args.datasets.split(",") if item.strip())
+    financial = set(DEFAULT_FINANCIAL_DATASETS)
+    missing_period = sorted(set(datasets) & financial) and not args.period
+    if missing_period:
+        raise SystemExit("--period is required for financial datasets")
     database = Database(args.database, code_version="tushare-bulk-sync-v1")
     database.initialize()
     repository = TushareRepository(database)
@@ -67,7 +85,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.max_codes > 0:
         codes = codes[: args.max_codes]
 
-    state_path = _state_path(args.period, args.state_file)
+    state_label = args.period or "events"
+    state_path = _state_path(state_label, args.state_file)
     state = _load_state(state_path)
     state.setdefault("done", {})
     state.setdefault("errors", [])
@@ -84,17 +103,16 @@ def main(argv: list[str] | None = None) -> int:
             if ts_code in done_codes:
                 continue
             try:
-                frame = tushare_api.query(
-                    dataset,
-                    fields="",
-                    ts_code=ts_code,
-                    period=args.period,
-                )
+                query_params = {"ts_code": ts_code}
+                if args.period:
+                    query_params["period"] = args.period
+                fields = BULK_DATASET_FIELDS.get(dataset, "")
+                frame = tushare_api.query(dataset, fields=fields, **query_params)
                 rows = repository.upsert_dataset(
                     dataset,
                     frame,
                     source="tushare/pro",
-                    params={"ts_code": ts_code, "period": args.period, "fields": "*"},
+                    params={**query_params, "fields": fields or "*"},
                 )
                 synced_rows += rows
                 request_count += 1

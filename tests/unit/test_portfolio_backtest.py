@@ -205,7 +205,16 @@ def test_raw_execution_adjusts_position_across_ex_rights_factor_change():
         if event["action"] == "除权持仓调整"
     ]
     assert adjustment
+    buy = next(event for event in result["trade_ledger"] if event["execution_quantity"] > 0)
+    assert buy["execution_price"] == pytest.approx(10.4)
+    assert buy["execution_price_basis"] == "raw_unadjusted"
+    assert buy["signal_price_basis"] == "qfq_end_anchored"
+    assert buy["trigger_raw_price"] == pytest.approx(buy["trigger"] * 3)
+    assert buy["stop_raw_price"] == pytest.approx(buy["stop"] * 3)
     position = result["final_positions"][0]
+    assert position["position_pct_basis"] == "initial_capital_cost_exposure"
+    assert position["market_weight_pct_basis"] == "final_equity_market_value"
+    assert position["market_weight_pct"] is not None
     assert position["cost"] == pytest.approx(split_price, rel=1e-3)
     assert position["unrealized_pnl_pct"] == pytest.approx(0.0)
 
@@ -266,6 +275,26 @@ def test_raw_execution_uses_dividend_share_rate_before_factor_fallback():
     assert float(position["quantity"]).is_integer()
     assert all(float(event["quantity"]).is_integer() for event in result["trade_ledger"])
     assert position["cost"] == pytest.approx(10.4 / noisy_factor_multiplier, rel=1e-3)
+
+
+def test_prepare_frame_uses_qfq_signal_prices_but_keeps_raw_execution_prices():
+    raw = pd.DataFrame({
+        "date": pd.to_datetime(["2025-05-26", "2025-05-27", "2025-05-28"]),
+        "open": [117.0, 114.12, 81.03],
+        "high": [117.6, 115.05, 85.8],
+        "low": [113.4, 108.88, 81.03],
+        "close": [115.76, 112.13, 84.62],
+        "volume": [211831.55, 366623.79, 580524.98],
+        "raw_to_qfq_factor": [1 / 8.4973, 1 / 8.4973, 1 / 11.9444],
+    })
+
+    prepared = _prepare_frame(raw)
+
+    assert prepared.loc[1, "raw_close"] == pytest.approx(112.13)
+    assert prepared.loc[2, "raw_close"] == pytest.approx(84.62)
+    assert prepared.loc[2, "close"] == pytest.approx(84.62)
+    assert prepared.loc[1, "close"] == pytest.approx(112.13 * 8.4973 / 11.9444)
+    assert prepared.loc[1, "qfq_to_raw_factor"] == pytest.approx(11.9444 / 8.4973)
 
 
 def test_raw_execution_ignores_small_cash_dividend_factor_drift():
@@ -1096,6 +1125,119 @@ def test_portfolio_does_not_chain_open_symbols_on_the_same_day():
     assert sum(item["position_pct"] for item in result["final_positions"]) == pytest.approx(29.95)
 
 
+def test_right_add_on_requires_current_effective_candidate(monkeypatch):
+    dates = pd.bdate_range("2026-01-01", periods=82)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [10.0] * 82,
+        "high": [10.0] * 79 + [10.0, 11.6, 11.8],
+        "low": [10.0] * 82,
+        "close": [10.0] * 79 + [10.0, 11.5, 11.6],
+        "volume": [1000] * 82,
+    })
+
+    def always_buy_signal(data, index, plan=None, **kwargs):
+        return {
+            "rank": 5,
+            "trigger": 10.0,
+            "stop": 9.5,
+            "order_type": "close",
+            "reason": "synthetic signal",
+            "known_volume_ratio": 1.2,
+            "signal_type": "consolidation_breakout",
+        }
+
+    monkeypatch.setattr(
+        "stock_research.strategies.portfolio_backtest._right_signal",
+        always_buy_signal,
+    )
+    first = dates[-3].strftime("%Y-%m-%d")
+    second = dates[-2].strftime("%Y-%m-%d")
+    third = dates[-1].strftime("%Y-%m-%d")
+
+    result = run_portfolio_backtest(
+        {"A": bars},
+        {first: [{"code": "A"}], second: [], third: []},
+        {first: {"phase": "active", "window_up_streak": 5}},
+        requested_start=first,
+        end_date=third,
+        signals_effective_next_day=False,
+        commission_rate=0,
+        minimum_commission=0,
+    )
+
+    buys = [event for event in result["trade_ledger"] if event["execution_quantity"] > 0]
+    assert len(buys) == 1
+    assert buys[0]["date"] == first
+
+
+def test_left_to_right_switch_without_current_candidate_only_manages_existing_left(monkeypatch):
+    dates = pd.bdate_range("2026-01-01", periods=82)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 80 + [100.0, 121.0],
+        "high": [100.5] * 80 + [100.5, 122.0],
+        "low": [99.5] * 80 + [99.5, 120.0],
+        "close": [100.0] * 80 + [100.0, 121.0],
+        "volume": [1000.0] * 82,
+    })
+
+    def always_buy_signal(data, index, plan=None, **kwargs):
+        return {
+                "rank": 5,
+                "trigger": 100.0,
+                "stop": 115.0,
+                "target_price": 140.0,
+                "order_type": "close",
+                "reason": "synthetic right signal",
+                "known_volume_ratio": 1.2,
+            "signal_type": "consolidation_breakout",
+        }
+
+    monkeypatch.setattr(
+        "stock_research.strategies.portfolio_backtest._right_signal",
+        always_buy_signal,
+    )
+    first = dates[-2].strftime("%Y-%m-%d")
+    second = dates[-1].strftime("%Y-%m-%d")
+
+    result = run_portfolio_backtest(
+        {"A": bars},
+        {
+            first: [{
+                "code": "A", "candidate_source": "value_model",
+                "value_line": 100.0, "industry": "汽车电子电气系统", "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
+                "trade_basis_score": 8, "leadership_score": 18,
+                "value_industry_allowed": True,
+                "value_industry_allowlist_match": "汽车电子电气系统",
+                "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
+            }],
+            second: [],
+        },
+        {},
+        requested_start=first,
+        end_date=second,
+        signals_effective_next_day=False,
+        commission_rate=0,
+        minimum_commission=0,
+    )
+
+    buys = [
+        event for event in result["trade_ledger"]
+        if event["execution_quantity"] > 0
+    ]
+    assert buys
+    assert not [event for event in result["events"] if event["action"] == "右侧买入"]
+    takeover = [
+        event for event in result["events"]
+        if event["action"] == "左转右接管左仓"
+    ]
+    assert takeover
+    assert all(float(event.get("execution_quantity") or 0.0) == 0.0 for event in takeover)
+    assert all(event["date"] == first for event in buys)
+
+
 def test_portfolio_result_does_not_depend_on_price_frame_insertion_order():
     bars = breakout_bars()
     date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
@@ -1529,6 +1671,36 @@ def test_value_grid_keeps_core_sells_two_upper_units_and_rebuys_them():
     assert result["trade_mix_summary"]["left_grid_trade_count_by_symbol_top"] == [
         {"symbol": "A A", "trade_count": 9},
     ]
+
+
+def test_value_grid_candidate_raw_value_line_is_not_readjusted_as_qfq():
+    dates = pd.bdate_range("2026-01-01", periods=82)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 80 + [110.0, 55.0],
+        "high": [100.5] * 80 + [111.0, 56.0],
+        "low": [99.5] * 80 + [109.0, 54.0],
+        "close": [100.0] * 80 + [110.0, 55.0],
+        "volume": [1000.0] * 82,
+        "raw_to_qfq_factor": [1.0] * 81 + [0.5],
+    })
+    date = dates[80].strftime("%Y-%m-%d")
+
+    result = run_portfolio_backtest(
+        {"A": bars},
+        {date: [{
+            "code": "A", "candidate_source": "value_model",
+            "value_line": 100.0, "industry": "test", "mktcap": 150,
+            "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
+        }]},
+        {}, requested_start=date, end_date=date,
+    )
+
+    assert not [
+        event for event in result["events"]
+        if event["action"] == "宸︿晶缃戞牸涔板叆"
+    ]
+    assert result["final_positions"] == []
 
 
 def test_value_grid_candidate_removal_stops_new_left_buys_without_clearing():

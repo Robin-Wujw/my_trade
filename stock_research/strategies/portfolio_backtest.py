@@ -106,6 +106,7 @@ class PositionState:
     left: list[dict] = field(default_factory=list)
     left_value_line: float | None = None
     left_grid_started: bool = False
+    left_candidate_profile: dict | None = None
     right: list[dict] = field(default_factory=list)
     right_parts: int = 5
     right_sold: set[str] = field(default_factory=set)
@@ -184,8 +185,27 @@ def _prepare_frame(frame):
         data["raw_to_qfq_factor"] = pd.to_numeric(
             data["raw_to_qfq_factor"], errors="coerce",
         )
+    for column in ("open", "high", "low", "close"):
+        data[f"raw_{column}"] = pd.to_numeric(
+            data.get(f"raw_{column}", data[column]), errors="coerce",
+        )
     data = data.dropna(subset=["date", "high", "low", "close"])
     data = data.sort_values("date").drop_duplicates("date").reset_index(drop=True)
+    if "raw_to_qfq_factor" in data:
+        valid_factor = data["raw_to_qfq_factor"].dropna()
+    else:
+        valid_factor = pd.Series(dtype=float)
+    if not valid_factor.empty and float(valid_factor.iloc[-1]) > 0:
+        anchor_factor = float(valid_factor.iloc[-1])
+        signal_multiplier = anchor_factor / data["raw_to_qfq_factor"]
+        signal_multiplier = signal_multiplier.where(signal_multiplier > 0).ffill().bfill()
+    else:
+        signal_multiplier = pd.Series(1.0, index=data.index)
+    data["qfq_to_raw_factor"] = 1.0 / signal_multiplier.where(signal_multiplier > 0)
+    for column in ("open", "high", "low", "close"):
+        signal = data[f"raw_{column}"].mul(signal_multiplier)
+        data[f"signal_{column}"] = signal
+        data[column] = signal.where(signal.notna(), data[column])
     for period in (5, 10, 20, 60, 120):
         data[f"ma{period}"] = data["close"].rolling(period).mean()
     close = data["close"]
@@ -1005,6 +1025,58 @@ def run_portfolio_backtest(
     def is_st(code):
         return bool(risk_stock_name_reason(candidate_display_name(code)))
 
+    def raw_price(row, column="close"):
+        value = row.get(f"raw_{column}", row.get(column))
+        number = pd.to_numeric(value, errors="coerce")
+        return None if pd.isna(number) else float(number)
+
+    def execution_bar(row):
+        item = row.copy()
+        for column in ("open", "high", "low", "close"):
+            value = raw_price(row, column)
+            if value is not None:
+                item[column] = value
+        return item
+
+    def qfq_to_raw_price(row, price):
+        factor = pd.to_numeric(row.get("qfq_to_raw_factor"), errors="coerce")
+        factor = 1.0 if pd.isna(factor) or float(factor) <= 0 else float(factor)
+        return float(price) * factor
+
+    def raw_to_qfq_price(row, price):
+        factor = pd.to_numeric(row.get("qfq_to_raw_factor"), errors="coerce")
+        factor = 1.0 if pd.isna(factor) or float(factor) <= 0 else float(factor)
+        return float(price) / factor
+
+    def candidate_raw_price_to_signal(row, price):
+        return raw_to_qfq_price(row, price)
+
+    def lot_signal_cost(lot):
+        return float(lot.get("signal_cost", lot.get("cost")))
+
+    def with_raw_signal_price_metadata(row, metadata):
+        enriched = dict(metadata)
+        for key in (
+            "entry_target_price",
+            "trigger",
+            "stop",
+            "anchor_low",
+            "anchor_high",
+            "anchor_pullback_low",
+            "value_line",
+            "left_value_line",
+        ):
+            value = pd.to_numeric(enriched.get(key), errors="coerce")
+            if pd.notna(value) and float(value) > 0:
+                enriched[f"{key}_raw_price"] = round(
+                    qfq_to_raw_price(row, float(value)),
+                    3,
+                )
+        if enriched:
+            enriched.setdefault("signal_price_basis", "qfq_end_anchored")
+            enriched.setdefault("execution_price_basis", "raw_unadjusted")
+        return enriched
+
     def occupied_codes():
         return {
             code for code, state in states.items()
@@ -1026,7 +1098,7 @@ def run_portfolio_backtest(
         if quantity <= 1e-9:
             return 0.0
         cost = sum(
-            float(lot.get("quantity") or 0.0) * float(lot.get("cost") or 0.0)
+            float(lot.get("quantity") or 0.0) * lot_signal_cost(lot)
             for lot in state.left
         ) / quantity
         if cost <= 1e-9:
@@ -1317,6 +1389,24 @@ def run_portfolio_backtest(
         return False
 
     def record_entry_block(date, code, candidate, signal, reason):
+        signal_metadata = {}
+        if signal:
+            visible = frames.get(code, pd.DataFrame())
+            if not visible.empty:
+                day_row = visible[visible["date"].dt.normalize() == date]
+                if not day_row.empty:
+                    signal_metadata = with_raw_signal_price_metadata(
+                        day_row.iloc[-1],
+                        {
+                            key: signal.get(key)
+                            for key in (
+                                "entry_target_price", "trigger", "stop",
+                                "anchor_low", "anchor_high",
+                                "anchor_pullback_low",
+                            )
+                            if signal.get(key) is not None
+                        },
+                    )
         entry_blocks.append({
             "date": pd.Timestamp(date).strftime("%Y-%m-%d"),
             "code": code,
@@ -1331,6 +1421,11 @@ def run_portfolio_backtest(
             "entry_reward_risk": signal.get("entry_reward_risk") if signal else None,
             "entry_target_price": signal.get("entry_target_price") if signal else None,
             "entry_target_basis": signal.get("entry_target_basis") if signal else None,
+            "entry_target_raw_price": signal_metadata.get("entry_target_price_raw_price"),
+            "signal_trigger_raw_price": signal_metadata.get("trigger_raw_price"),
+            "signal_stop_raw_price": signal_metadata.get("stop_raw_price"),
+            "signal_price_basis": signal_metadata.get("signal_price_basis"),
+            "execution_price_basis": signal_metadata.get("execution_price_basis"),
             "candidate_score": candidate.get("candidate_score"),
             "trade_basis_score": candidate.get("trade_basis_score"),
             "leadership_score": candidate.get("leadership_score"),
@@ -1344,7 +1439,7 @@ def run_portfolio_backtest(
             if visible.empty:
                 continue
             close = float(visible.iloc[-1]["close"])
-            if any(close / lot["cost"] - 1 >= 0.20 for lot in state.right):
+            if any(close / lot_signal_cost(lot) - 1 >= 0.20 for lot in state.right):
                 return True
             if any(float(lot.get("max_return") or 0.0) >= 0.20 for lot in state.right):
                 return True
@@ -1356,7 +1451,7 @@ def run_portfolio_backtest(
         if visible.empty or not state.right:
             return False
         close = float(visible.iloc[-1]["close"])
-        return any(close / lot["cost"] - 1 >= float(threshold) for lot in state.right)
+        return any(close / lot_signal_cost(lot) - 1 >= float(threshold) for lot in state.right)
 
     def add_on_float_threshold():
         return 0.20 if current_down_streak >= 3 else 0.10
@@ -1372,7 +1467,7 @@ def run_portfolio_backtest(
             lot_returns = [
                 max(
                     float(lot.get("max_return") or 0.0),
-                    close / float(lot["cost"]) - 1,
+                    close / lot_signal_cost(lot) - 1,
                 )
                 for lot in state.right
             ]
@@ -1683,8 +1778,14 @@ def run_portfolio_backtest(
         multiplier = float(previous_factor) / float(current_factor)
         if 0.925 < multiplier < 1.08:
             return
-        previous_close = pd.to_numeric(data.iloc[index - 1].get("close"), errors="coerce")
-        current_close = pd.to_numeric(data.iloc[index].get("close"), errors="coerce")
+        previous_close = pd.to_numeric(
+            data.iloc[index - 1].get("raw_close", data.iloc[index - 1].get("close")),
+            errors="coerce",
+        )
+        current_close = pd.to_numeric(
+            data.iloc[index].get("raw_close", data.iloc[index].get("close")),
+            errors="coerce",
+        )
         observed_price_ratio = None
         if (
             pd.notna(previous_close)
@@ -1723,17 +1824,8 @@ def run_portfolio_backtest(
 
         for lot in state.left:
             effective_multiplier = adjust_lot(lot)
-            if lot.get("sell_price") is not None:
-                lot["sell_price"] = float(lot["sell_price"]) / multiplier
-        if state.left_value_line is not None:
-            state.left_value_line = float(state.left_value_line) / multiplier
         for lot in state.right:
             effective_multiplier = adjust_lot(lot)
-            lot["stop"] = float(lot["stop"]) / multiplier
-            if lot.get("reconfirm_level") is not None:
-                lot["reconfirm_level"] = float(lot["reconfirm_level"]) / multiplier
-            if lot.get("origin_left_value_line") is not None:
-                lot["origin_left_value_line"] = float(lot["origin_left_value_line"]) / multiplier
         adjustment_reason = (
             f"不复权成交价会计调整; 价格倍率={multiplier:.6f}; "
             f"股数倍率={quantity_multiplier:.6f}; "
@@ -1745,7 +1837,7 @@ def run_portfolio_backtest(
             float(lot["quantity"]) for lot in state.left + state.right
         )
         add_event(
-            date, code, "除权持仓调整", float(data.iloc[index]["close"]), 0.0,
+            date, code, "除权持仓调整", raw_price(data.iloc[index], "close"), 0.0,
             adjustment_reason,
             corporate_action_price_multiplier=float(multiplier),
             corporate_action_quantity_multiplier=float(quantity_multiplier),
@@ -1820,7 +1912,7 @@ def run_portfolio_backtest(
             if held_quantity <= 0:
                 continue
             held_cost = sum(
-                float(lot["quantity"]) * float(lot["cost"])
+                float(lot["quantity"]) * lot_signal_cost(lot)
                 for lot in held_state.right
             ) / held_quantity
             held_return = float(held_row["close"]) / held_cost - 1.0
@@ -1874,7 +1966,7 @@ def run_portfolio_backtest(
             visible = frames[held_code][frames[held_code]["date"] <= date]
             if visible.empty:
                 continue
-            sell = float(visible.iloc[-1]["close"])
+            sell = raw_price(visible.iloc[-1], "close")
             for lot in list(held_state.right):
                 quantity = float(lot["quantity"])
                 entry_fee_cash = float(lot.get("entry_fee_cash") or 0.0)
@@ -1936,6 +2028,7 @@ def run_portfolio_backtest(
             return [], first_right_batch_id
         promoted = []
         next_right_batch_id = first_right_batch_id
+        origin_candidate_profile = dict(state.left_candidate_profile or {})
         reconfirm_on_next_day = (
             bool(signal.get("requires_next_day_confirmation"))
             or (
@@ -1957,6 +2050,7 @@ def run_portfolio_backtest(
                 "origin_account": "left",
                 "origin_batch": origin_batch,
                 "origin_left_value_line": state.left_value_line,
+                "origin_left_candidate_profile": origin_candidate_profile,
                 "left_grid_slot": int(lot["slot"]),
                 "reconfirm_level": float(signal["trigger"]),
                 "reconfirm_on_next_day": reconfirm_on_next_day,
@@ -1966,6 +2060,7 @@ def run_portfolio_backtest(
             promoted.append(promoted_lot)
         state.left_value_line = None
         state.left_grid_started = False
+        state.left_candidate_profile = None
         return promoted, next_right_batch_id
 
     def demote_origin_left_lot(code, state, lot, date, price, reason):
@@ -1973,6 +2068,7 @@ def run_portfolio_backtest(
         restored_lot["batch"] = str(lot.get("origin_batch") or lot["batch"]).replace("R", "L", 1)
         restored_lot["slot"] = int(lot.get("left_grid_slot") or lot.get("slot") or 0)
         restored_lot["date"] = lot.get("origin_date", lot.get("date"))
+        origin_candidate_profile = restored_lot.pop("origin_left_candidate_profile", None)
         for key in (
             "stop", "merged", "proven", "max_return", "origin_account",
             "origin_batch", "origin_left_value_line", "left_grid_slot",
@@ -1989,6 +2085,8 @@ def run_portfolio_backtest(
         if pd.notna(value_line) and float(value_line) > 0:
             state.left_value_line = float(value_line)
         state.left_grid_started = True
+        if isinstance(origin_candidate_profile, dict) and origin_candidate_profile:
+            state.left_candidate_profile = dict(origin_candidate_profile)
         if not state.right:
             state.right_parts = configured_profit_tranches
             state.right_sold.clear()
@@ -2017,6 +2115,8 @@ def run_portfolio_backtest(
     def left_to_right_switch_signal(code, date, candidate):
         state = states[code]
         if not state.left or state.right or code in pending_left_exits:
+            return None
+        if not candidate:
             return None
         data = frames[code]
         indexes = data.index[data["date"].dt.normalize() == date]
@@ -2074,9 +2174,9 @@ def run_portfolio_backtest(
                 continue
             index = int(indexes[0])
             row = data.iloc[index]
-            previous_close = data.iloc[index - 1]["close"] if index > 0 else None
+            previous_close = raw_price(data.iloc[index - 1], "close") if index > 0 else None
             fill = fill_sell_stop(
-                row, stop_price=float("inf"), previous_close=previous_close,
+                execution_bar(row), stop_price=float("inf"), previous_close=previous_close,
                 code=code, is_st=is_st(code),
             )
             if not fill["filled"]:
@@ -2209,15 +2309,15 @@ def run_portfolio_backtest(
                 continue
             index = int(indexes[0])
             row = data.iloc[index]
-            previous_close = data.iloc[index - 1]["close"] if index > 0 else None
+            previous_close = raw_price(data.iloc[index - 1], "close") if index > 0 else None
             for lot in pending_lots:
                 level = float(lot["reconfirm_level"])
                 if float(row["open"]) >= level:
                     lot["reconfirm_on_next_day"] = False
-                    add_event(date, code, "突破次日确认持有", row["open"], 0.0, f"{lot['batch']}; 开盘仍在{level:.3f}上方")
+                    add_event(date, code, "突破次日确认持有", raw_price(row, "open"), 0.0, f"{lot['batch']}; 开盘仍在{level:.3f}上方")
                     continue
                 fill = fill_sell_stop(
-                    row, stop_price=float("inf"), previous_close=previous_close,
+                    execution_bar(row), stop_price=float("inf"), previous_close=previous_close,
                     code=code, is_st=is_st(code),
                 )
                 if not fill["filled"]:
@@ -2255,9 +2355,9 @@ def run_portfolio_backtest(
                 continue
             index = int(indexes[0])
             row = data.iloc[index]
-            previous_close = data.iloc[index - 1]["close"] if index > 0 else None
+            previous_close = raw_price(data.iloc[index - 1], "close") if index > 0 else None
             fill = fill_sell_stop(
-                row, stop_price=float("inf"), previous_close=previous_close,
+                execution_bar(row), stop_price=float("inf"), previous_close=previous_close,
                 code=code, is_st=is_st(code),
             )
             if not fill["filled"]:
@@ -2290,9 +2390,9 @@ def run_portfolio_backtest(
                 continue
             index = int(indexes[0])
             row = data.iloc[index]
-            previous_close = data.iloc[index - 1]["close"] if index > 0 else None
+            previous_close = raw_price(data.iloc[index - 1], "close") if index > 0 else None
             fill = fill_sell_stop(
-                row, stop_price=float("inf"), previous_close=previous_close,
+                execution_bar(row), stop_price=float("inf"), previous_close=previous_close,
                 code=code, is_st=is_st(code),
             )
             if not fill["filled"]:
@@ -2325,9 +2425,9 @@ def run_portfolio_backtest(
                 continue
             index = int(indexes[0])
             row = data.iloc[index]
-            previous_close = data.iloc[index - 1]["close"] if index > 0 else None
+            previous_close = raw_price(data.iloc[index - 1], "close") if index > 0 else None
             fill = fill_sell_stop(
-                row, stop_price=float("inf"), previous_close=previous_close,
+                execution_bar(row), stop_price=float("inf"), previous_close=previous_close,
                 code=code, is_st=is_st(code),
             )
             if not fill["filled"]:
@@ -2347,6 +2447,7 @@ def run_portfolio_backtest(
                 )
             state.left_value_line = None
             state.left_grid_started = False
+            state.left_candidate_profile = None
             pending_left_exits.pop(code, None)
             exited_today.add(code)
         for code, reason in list(pending_left_quota_exits.items()):
@@ -2355,6 +2456,7 @@ def run_portfolio_backtest(
                 if state is not None:
                     state.left_value_line = None
                     state.left_grid_started = False
+                    state.left_candidate_profile = None
                 pending_left_quota_exits.pop(code, None)
                 continue
             data = frames[code]
@@ -2363,9 +2465,9 @@ def run_portfolio_backtest(
                 continue
             index = int(indexes[0])
             row = data.iloc[index]
-            previous_close = data.iloc[index - 1]["close"] if index > 0 else None
+            previous_close = raw_price(data.iloc[index - 1], "close") if index > 0 else None
             fill = fill_sell_stop(
-                row, stop_price=float("inf"), previous_close=previous_close,
+                execution_bar(row), stop_price=float("inf"), previous_close=previous_close,
                 code=code, is_st=is_st(code),
             )
             if not fill["filled"]:
@@ -2385,6 +2487,7 @@ def run_portfolio_backtest(
                 )
             state.left_value_line = None
             state.left_grid_started = False
+            state.left_candidate_profile = None
             pending_left_quota_exits.pop(code, None)
             exited_today.add(code)
         eligible_snapshots = [
@@ -2410,14 +2513,20 @@ def run_portfolio_backtest(
             if reason:
                 pending_left_exits[code] = reason
         left_right_switch_signals = {}
+        left_right_switch_candidates = {}
+        left_right_switch_candidate_current = {}
         for code, state in states.items():
             if not state.left or state.right:
                 continue
+            current_candidate = current_candidates.get(code)
+            switch_candidate = current_candidate or state.left_candidate_profile or {}
             signal = left_to_right_switch_signal(
-                code, date, current_candidates.get(code, {}),
+                code, date, switch_candidate,
             )
             if signal:
                 left_right_switch_signals[code] = signal
+                left_right_switch_candidates[code] = dict(switch_candidate)
+                left_right_switch_candidate_current[code] = current_candidate is not None
         # Existing grids remain active even after dropping out of the daily
         # top ten. New campaigns, however, compete by candidate score so file
         # or ticker ordering can never decide which four symbols get capital.
@@ -2442,16 +2551,16 @@ def run_portfolio_backtest(
                     code, float(value_line),
                 ))
         left_targets = [
-            (code, float(states[code].left_value_line))
+            (code, float(states[code].left_value_line), False)
             for code in active_left_codes
         ] + [
-            (code, value_line)
+            (code, value_line, True)
             for _, code, value_line in sorted(
                 new_left_candidates, key=lambda item: (-item[0], item[1]),
             )
         ]
 
-        for code, grid_anchor in left_targets:
+        for code, grid_anchor, anchor_is_candidate_raw in left_targets:
             state = states[code]
             if code in pending_left_exits:
                 continue
@@ -2463,7 +2572,9 @@ def run_portfolio_backtest(
                 continue
             index = int(indexes[0])
             row = data.iloc[index]
-            previous_close = data.iloc[index - 1]["close"] if index > 0 else None
+            if anchor_is_candidate_raw:
+                grid_anchor = candidate_raw_price_to_signal(row, grid_anchor)
+            previous_close = raw_price(data.iloc[index - 1], "close") if index > 0 else None
             candidate = current_candidates.get(code, {})
             can_add_left = left_candidate_can_add(candidate)
             plan_by_slot = {
@@ -2478,7 +2589,8 @@ def run_portfolio_backtest(
                 if sell_price is None:
                     continue
                 fill = fill_limit_order(
-                    row, side="sell", limit_price=float(sell_price),
+                    execution_bar(row), side="sell",
+                    limit_price=qfq_to_raw_price(row, float(sell_price)),
                     previous_close=previous_close, code=code, is_st=is_st(code),
                 )
                 if not fill["filled"]:
@@ -2493,7 +2605,10 @@ def run_portfolio_backtest(
                     f"{lot['batch']}; 上一格卖出; {fill['status']}", pnl,
                     cost_basis=lot["cost"], execution_quantity=-quantity,
                     entry_fee_cash=entry_fee_cash, grid_slot=int(lot["slot"]),
-                    value_line=grid_anchor, account_mode="left",
+                    **with_raw_signal_price_metadata(row, {
+                        "value_line": grid_anchor,
+                        "account_mode": "left",
+                    }),
                 )
 
             held_slots = {int(lot["slot"]) for lot in state.left}
@@ -2544,7 +2659,8 @@ def run_portfolio_backtest(
                 if requested_size <= 1e-9 or gross_exposure() + requested_size > 1.0 + 1e-9:
                     continue
                 fill = fill_limit_order(
-                    row, side="buy", limit_price=float(planned["buy_price"]),
+                    execution_bar(row), side="buy",
+                    limit_price=qfq_to_raw_price(row, float(planned["buy_price"])),
                     previous_close=previous_close, code=code, is_st=is_st(code),
                 )
                 if not fill["filled"]:
@@ -2556,6 +2672,7 @@ def run_portfolio_backtest(
                     continue
                 lot = {
                     "cost": float(fill["price"]), "date": row["date"],
+                    "signal_cost": raw_to_qfq_price(row, float(fill["price"])),
                     "buy_price": float(planned["buy_price"]),
                     "sell_price": planned["sell_price"], "size": size,
                     "quantity": quantity, "entry_fee_cash": entry_fee_cash,
@@ -2571,6 +2688,8 @@ def run_portfolio_backtest(
                 }
                 if state.left_value_line is None:
                     state.left_value_line = grid_anchor
+                if state.left_candidate_profile is None and candidate:
+                    state.left_candidate_profile = dict(candidate)
                 state.left.append(lot)
                 held_slots.add(slot)
                 if {0, 1, 2, 3, 4}.issubset(held_slots):
@@ -2583,7 +2702,10 @@ def run_portfolio_backtest(
                     cash_limited=cash_limited,
                     lot_rounded=size < requested_size - 1e-9 and not cash_limited,
                     board_lot_size=board_lot_size(code), grid_slot=slot,
-                    value_line=grid_anchor, account_mode="left",
+                    **with_raw_signal_price_metadata(row, {
+                        "value_line": grid_anchor,
+                        "account_mode": "left",
+                    }),
                 )
 
         for code, state in states.items():
@@ -2598,7 +2720,7 @@ def run_portfolio_backtest(
                 for lot in list(state.right):
                     prior_close = float(data.iloc[index - 1]["close"]) if index > 0 else None
                     if prior_close is not None:
-                        prior_return = prior_close / lot["cost"] - 1
+                        prior_return = prior_close / lot_signal_cost(lot) - 1
                         lot["max_return"] = max(
                             float(lot.get("max_return") or 0.0),
                             prior_return,
@@ -2610,7 +2732,7 @@ def run_portfolio_backtest(
                     time_limit = int(lot.get("time_limit_days") or (8 if current_down_streak >= 3 else 13))
                     space_stop_pct = lot.get("space_stop_pct")
                     risk = position_exit_snapshot(
-                        history, lot["cost"], lot["date"], entry_mode="right",
+                        history, lot_signal_cost(lot), lot["date"], entry_mode="right",
                         condition_stop=lot["stop"], time_limit_days=time_limit,
                         space_stop_pct=space_stop_pct,
                         bearish_divergence=bool(
@@ -2619,10 +2741,10 @@ def run_portfolio_backtest(
                     )
                     if risk.get("space_stop_triggered"):
                         quantity = float(lot["quantity"])
-                        stop_price = float(risk["space_stop"])
-                        previous_close = data.iloc[index - 1]["close"] if index > 0 else None
+                        stop_price = qfq_to_raw_price(row, float(risk["space_stop"]))
+                        previous_close = raw_price(data.iloc[index - 1], "close") if index > 0 else None
                         fill = fill_sell_stop(
-                            row, stop_price=stop_price,
+                            execution_bar(row), stop_price=stop_price,
                             previous_close=previous_close, code=code, is_st=is_st(code),
                         )
                         if not fill["filled"]:
@@ -2652,13 +2774,13 @@ def run_portfolio_backtest(
                         if close_confirmed_execution == "close_proxy":
                             if lot.get("origin_account") == "left":
                                 demote_origin_left_lot(
-                                    code, state, lot, date, float(row["close"]),
+                                    code, state, lot, date, raw_price(row, "close"),
                                     f"{reason}; 14:55/close proxy",
                                 )
                                 exited_today.add(code)
                                 continue
                             quantity = float(lot["quantity"])
-                            sell = float(row["close"])
+                            sell = raw_price(row, "close")
                             entry_fee_cash = float(lot.get("entry_fee_cash") or 0.0)
                             size, pnl = execute_sell(quantity, sell, lot["cost"])
                             state.right.remove(lot)
@@ -2679,7 +2801,7 @@ def run_portfolio_backtest(
                     merge_threshold = 0.20 if current_down_streak >= 3 else 0.10
                     merged_new_batch = False
                     for lot in state.right:
-                        if not lot["merged"] and prior_close is not None and prior_close / lot["cost"] - 1 >= merge_threshold:
+                        if not lot["merged"] and prior_close is not None and prior_close / lot_signal_cost(lot) - 1 >= merge_threshold:
                             lot["merged"] = True
                             merged_new_batch = True
                             add_event(date, code, "加仓批次合并", row["close"], 0.0, f"{lot['batch']}; 浮盈达到{merge_threshold:.0%}")
@@ -2694,7 +2816,7 @@ def run_portfolio_backtest(
                     if merged and state.right_parts > 0:
                         merged_quantity = sum(float(lot["quantity"]) for lot in merged)
                         merged_cost = sum(
-                            float(lot["quantity"]) * float(lot["cost"])
+                            float(lot["quantity"]) * lot_signal_cost(lot)
                             for lot in merged
                         ) / merged_quantity
                         merged_entry = state.right_plan_date or min(lot["date"] for lot in merged)
@@ -2715,7 +2837,7 @@ def run_portfolio_backtest(
                                 parts = len(executed_ids)
                                 if not parts:
                                     continue
-                                sell = float(row["close"])
+                                sell = raw_price(row, "close")
                                 planned_ratio = parts / state.right_parts
                                 desired_quantity = merged_quantity * planned_ratio
                                 quantity = float(_board_lot_quantity(code, desired_quantity))
@@ -2779,13 +2901,16 @@ def run_portfolio_backtest(
             for code in right_entry_codes:
                 if code not in states or code in exited_today:
                     continue
-                candidate = current_candidates.get(code) or last_candidates.get(code, {})
-                if (
-                    code not in left_right_switch_signals
-                    and code not in capacity_codes()
-                    and not right_candidate_can_evaluate(candidate)
-                ):
-                    continue
+                candidate_is_current = code in current_candidates
+                candidate = current_candidates.get(code) or (
+                    left_right_switch_candidates.get(code, {})
+                    if code in left_right_switch_signals else {}
+                )
+                if code not in left_right_switch_signals:
+                    if not candidate_is_current:
+                        continue
+                    if not right_candidate_can_evaluate(candidate):
+                        continue
                 allow_right = _enabled(candidate.get("allow_right"), default=True)
                 # A pure value candidate can switch only after the left
                 # position has left the value zone and a right signal appears.
@@ -2843,7 +2968,11 @@ def run_portfolio_backtest(
                 # A left-held symbol is already part of the portfolio. Its
                 # management transition must not be gated as a new symbol.
                 opening_right_symbol = code not in occupied_codes()
-                candidate = current_candidates.get(code) or last_candidates.get(code, {})
+                candidate = (
+                    current_candidates.get(code)
+                    or left_right_switch_candidates.get(code)
+                    or last_candidates.get(code, {})
+                )
                 if opening_right_symbol:
                     if total_symbol_limit_reached(code):
                         record_entry_block(date, code, candidate, signal, "total_symbol_limit")
@@ -2868,7 +2997,7 @@ def run_portfolio_backtest(
                             held_row = visible.iloc[-1]
                             held_quantity = sum(lot["quantity"] for lot in held_state.right)
                             held_cost = sum(
-                                lot["quantity"] * lot["cost"] for lot in held_state.right
+                                lot["quantity"] * lot_signal_cost(lot) for lot in held_state.right
                             ) / held_quantity
                             held_return = float(held_row["close"]) / held_cost - 1
                             holding_days = max(
@@ -2891,21 +3020,23 @@ def run_portfolio_backtest(
                             record_entry_block(date, code, candidate, signal, "symbol_limit_no_weak_replacement")
                         continue
                 row = frames[code].iloc[index]
-                previous_close = frames[code].iloc[index - 1]["close"] if index > 0 else None
+                previous_close = raw_price(frames[code].iloc[index - 1], "close") if index > 0 else None
                 if signal["order_type"] == "stop":
                     fill = fill_buy_stop(
-                        row, trigger_price=signal["trigger"],
+                        execution_bar(row),
+                        trigger_price=qfq_to_raw_price(row, signal["trigger"]),
                         previous_close=previous_close, code=code, is_st=is_st(code),
                     )
                 elif signal["order_type"] == "close":
                     fill = {
                         "filled": True,
-                        "price": float(row["close"]),
+                        "price": raw_price(row, "close"),
                         "status": "close_confirmed",
                     }
                 else:
                     fill = fill_limit_order(
-                        row, side="buy", limit_price=signal["trigger"],
+                        execution_bar(row), side="buy",
+                        limit_price=qfq_to_raw_price(row, signal["trigger"]),
                         previous_close=previous_close, code=code, is_st=is_st(code),
                     )
                 if not fill["filled"]:
@@ -2914,9 +3045,14 @@ def run_portfolio_backtest(
                 existing_size = sum(lot["size"] for lot in states[code].right)
                 starting_new_right_campaign = not states[code].right or reopening_profit_tail
                 left_to_right = False
+                left_to_right_management_only = False
                 pullback_pilot = False
                 if starting_new_right_campaign:
                     left_to_right = bool(states[code].left)
+                    left_to_right_management_only = (
+                        left_to_right
+                        and not left_right_switch_candidate_current.get(code, False)
+                    )
                     preferred_breakout = signal.get("signal_type") in {
                         "uptrend_50_reclaim",
                         "pullback_50_breakout",
@@ -2961,8 +3097,12 @@ def run_portfolio_backtest(
                         entry_kind = f"尾仓再入; {entry_kind}"
                     elif left_to_right:
                         left_size = sum(float(lot["size"]) for lot in states[code].left)
-                        size = min(size, left_size * 0.50)
-                        entry_kind = f"左转右切换; 加仓不超过原左仓一半; {entry_kind}"
+                        if left_to_right_management_only:
+                            size = 0.0
+                            entry_kind = f"左转右仅接管原左仓; 非当日候选不新增右仓; {entry_kind}"
+                        else:
+                            size = min(size, left_size * 0.50)
+                            entry_kind = f"左转右切换; 加仓不超过原左仓一半; {entry_kind}"
                 else:
                     if any(not lot.get("proven", False) for lot in states[code].right):
                         continue
@@ -2973,6 +3113,38 @@ def run_portfolio_backtest(
                     ratio = 0.50 if pullback_entry else 1 / 3
                     size = existing_size * ratio
                     entry_kind = f"浮盈加仓{ratio:.0%}"
+                if left_to_right_management_only:
+                    states[code].pending_tail_capacity_free = False
+                    states[code].right_tail_capacity_free = False
+                    states[code].right_sold.clear()
+                    states[code].pending_profit_ids.clear()
+                    promoted_left_lots, next_batch_id = promote_left_grid_to_right_campaign(
+                        code, states[code], row, signal, next_batch_id,
+                    )
+                    states[code].right_parts = _effective_profit_tranches(
+                        code,
+                        sum(float(lot["quantity"]) for lot in states[code].right),
+                        configured_profit_tranches,
+                    )
+                    states[code].right_plan_date = row["date"]
+                    promoted_batch_labels = ",".join(
+                        f"{lot['batch']}(原{lot.get('origin_batch', lot['batch'])})"
+                        for lot in promoted_left_lots
+                    )
+                    add_event(
+                        date, code, "左转右接管左仓", fill["price"], 0.0,
+                        (
+                            f"接管左侧批次={promoted_batch_labels}; "
+                            f"右侧止损={float(signal['stop']):.3f}; 左侧网格暂停; "
+                            "非当日候选，仅切换管理状态，未新增右侧仓位"
+                        ),
+                        account_mode="right",
+                    )
+                    record_entry_block(
+                        date, code, candidate, signal,
+                        "left_to_right_management_only_without_current_candidate",
+                    )
+                    continue
                 size = _capped_entry_size(
                     symbol_exposure(code), size, max_symbol_exposure,
                 )
@@ -3067,6 +3239,7 @@ def run_portfolio_backtest(
                 next_batch_id += 1
                 states[code].right.append({
                     "cost": float(fill["price"]), "date": row["date"],
+                    "signal_cost": raw_to_qfq_price(row, float(fill["price"])),
                     "stop": float(signal["stop"]), "size": size,
                     "quantity": quantity,
                     "entry_fee_cash": entry_fee_cash,
@@ -3124,6 +3297,15 @@ def run_portfolio_backtest(
                     )
                     if signal.get(key) is not None
                 }
+                structure_metadata.update({
+                    key: signal.get(key)
+                    for key in ("trigger", "stop")
+                    if signal.get(key) is not None
+                })
+                structure_metadata = with_raw_signal_price_metadata(
+                    row,
+                    structure_metadata,
+                )
                 structure_metadata["industry_tags"] = "、".join(
                     sorted(candidate_industry_tags(candidate))
                 )
@@ -3155,7 +3337,7 @@ def run_portfolio_backtest(
             visible = data[data["date"] <= date]
             if visible.empty:
                 continue
-            close = float(visible.iloc[-1]["close"])
+            close = raw_price(visible.iloc[-1], "close")
             if state.left or state.right:
                 unrealized += sum(
                     float(lot["quantity"]) * (close - float(lot["cost"]))
@@ -3202,13 +3384,18 @@ def run_portfolio_backtest(
         ]
     }
 
-    def _right_batch_snapshot(lot):
+    def _right_batch_snapshot(lot, row=None):
         item = {
             "batch": lot["batch"],
             "position_pct": round(lot["size"] * 100, 2),
             "quantity": round(lot["quantity"], 8),
             "cost": round(lot["cost"], 3),
+            "signal_cost": round(lot_signal_cost(lot), 3),
             "stop": round(lot["stop"], 3),
+            "stop_raw_price": (
+                None if row is None
+                else round(qfq_to_raw_price(row, float(lot["stop"])), 3)
+            ),
             "merged": lot["merged"],
             "proven": lot.get("proven", False),
             "max_return_pct": round(float(lot.get("max_return") or 0.0) * 100, 2),
@@ -3222,11 +3409,13 @@ def run_portfolio_backtest(
         return item
 
     final_position_details = []
+    final_portfolio_market_value = final_equity * float(initial_capital)
     for code in sorted(occupied_codes()):
         state = states[code]
         frame = frames[code]
         visible = frame[frame["date"] <= end]
-        close = None if visible.empty else float(visible.iloc[-1]["close"])
+        last_row = None if visible.empty else visible.iloc[-1]
+        close = None if last_row is None else raw_price(last_row, "close")
         left_size = sum(float(lot["size"]) for lot in state.left)
         left_quantity = sum(float(lot["quantity"]) for lot in state.left)
         left_value = sum(float(lot["quantity"]) * float(lot["cost"]) for lot in state.left)
@@ -3245,6 +3434,12 @@ def run_portfolio_backtest(
             "name": candidate_names.get(code) or str(plans.get(code, {}).get("name") or code),
             "close": close,
             "position_pct": round((left_size + right_size) * 100, 2),
+            "position_pct_basis": "initial_capital_cost_exposure",
+            "market_weight_pct": (
+                None if market_value is None or final_portfolio_market_value <= 0
+                else round(market_value / final_portfolio_market_value * 100, 4)
+            ),
+            "market_weight_pct_basis": "final_equity_market_value",
             "left_position_pct": round(left_size * 100, 2),
             "right_position_pct": round(right_size * 100, 2),
             "position_mode": (
@@ -3266,22 +3461,31 @@ def run_portfolio_backtest(
             ),
             "cost": None if not total_quantity else round(total_value / total_quantity, 3),
             "left_value_line": state.left_value_line,
+            "left_value_line_raw_price": (
+                None if state.left_value_line is None or last_row is None
+                else round(qfq_to_raw_price(last_row, float(state.left_value_line)), 3)
+            ),
             "left_batches": [
                 {
                     "batch": lot["batch"], "grid_slot": int(lot["slot"]),
                     "position_pct": round(lot["size"] * 100, 2),
                     "quantity": round(lot["quantity"], 8),
                     "cost": round(lot["cost"], 3),
+                    "signal_cost": round(lot_signal_cost(lot), 3),
                     "sell_price": (
                         None if lot.get("sell_price") is None
                         else round(float(lot["sell_price"]), 3)
+                    ),
+                    "sell_price_raw_price": (
+                        None if lot.get("sell_price") is None or last_row is None
+                        else round(qfq_to_raw_price(last_row, float(lot["sell_price"])), 3)
                     ),
                     "core": bool(lot.get("core")),
                 }
                 for lot in state.left
             ],
             "batches": [
-                _right_batch_snapshot(lot)
+                _right_batch_snapshot(lot, last_row)
                 for lot in state.right
             ],
         })
