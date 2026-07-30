@@ -1440,12 +1440,30 @@ def _right_quant_selection_rows(rows: list[dict]) -> list[dict]:
             and return_60d >= 0.15
             and drawdown_60 >= -0.08
         )
+        large_liquid_trend_core = (
+            rank <= 70
+            and score >= 85.0
+            and ranked_number("quality_score") >= 75.0
+            and ranked_number("earnings_yoy") >= 0.20
+            and ranked_number("mktcap") >= 3000.0
+            and avg_amount_20 >= 3_000_000_000.0
+            and ranked_number("trade_basis_score") >= 6.0
+            and alpha_rank >= 55.0
+            and trend_stability_rank >= 70.0
+            and structure_rank >= 35.0
+            and volume_confirm_rank >= 45.0
+            and low_risk_rank >= 25.0
+            and 0.0 <= return_20d <= 0.40
+            and return_60d >= 0.25
+            and drawdown_60 >= -0.16
+        )
         if (
             not qualified
             and not strong_trend_exception
             and not high_payoff_setup
             and not asymmetric_pivot_watch
             and not compact_attack_core
+            and not large_liquid_trend_core
         ):
             continue
         right_quant_setup = (
@@ -1457,6 +1475,8 @@ def _right_quant_selection_rows(rows: list[dict]) -> list[dict]:
             right_quant_setup = "asymmetric_pivot_watch"
         if compact_attack_core:
             right_quant_setup = "compact_attack_core"
+        if large_liquid_trend_core and not compact_attack_core:
+            right_quant_setup = "large_liquid_trend_core"
         selected.append({
             **ranked,
             "strategy_part": "3.多因子量化选股候选",

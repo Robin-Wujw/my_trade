@@ -244,6 +244,12 @@ def get_trade_dates(lookback, extra_days):
     return df["calendar_date"].tail(lookback).tolist()
 
 
+def should_fallback_to_akshare_calendar(raw_trade_dates, calculation_days, has_start_date):
+    if not raw_trade_dates:
+        return True
+    return not has_start_date and len(raw_trade_dates) < calculation_days
+
+
 def _calendar_snapshot_is_reusable(payload, required_through):
     dates = payload.get("trade_dates")
     if not isinstance(dates, list) or not dates:
@@ -2793,7 +2799,11 @@ def main(argv=None):
             if bs_available and args.metadata_source in ("baostock", "auto")
             else []
         )
-        if len(raw_trade_dates) < calculation_days:
+        if should_fallback_to_akshare_calendar(
+            raw_trade_dates,
+            calculation_days,
+            bool(args.start_date),
+        ):
             raw_trade_dates = get_trade_dates_akshare(
                 calculation_days + 5,
                 calendar_extra_days,

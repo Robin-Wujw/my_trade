@@ -765,6 +765,24 @@ def test_trade_calendar_snapshot_is_reused_only_when_it_covers_request(
         )
 
 
+def test_explicit_start_date_does_not_fallback_when_baostock_calendar_exists():
+    assert not formula33.should_fallback_to_akshare_calendar(
+        ["2023-01-03", "2026-07-28"],
+        calculation_days=4_000,
+        has_start_date=True,
+    )
+    assert formula33.should_fallback_to_akshare_calendar(
+        ["2023-01-03", "2026-07-28"],
+        calculation_days=4_000,
+        has_start_date=False,
+    )
+    assert formula33.should_fallback_to_akshare_calendar(
+        [],
+        calculation_days=4_000,
+        has_start_date=True,
+    )
+
+
 def test_formula_input_snapshots_reuse_same_observation_and_rotate_next_date(
     monkeypatch, tmp_path
 ):

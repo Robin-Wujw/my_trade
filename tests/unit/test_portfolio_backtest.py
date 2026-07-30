@@ -1,10 +1,13 @@
-import json
+﻿import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from apps import portfolio_backtest as portfolio_backtest_app
+from apps import portfolio_yearly_backtest
 from apps.portfolio_backtest import (
+    apply_candidate_exclusions,
     candidate_manifest_empty_dates,
     candidate_manifest_financial_status,
     candidate_manifest_industry_status,
@@ -16,6 +19,7 @@ from apps.portfolio_backtest import (
     first_candidate_dates,
     formula33_refresh_window_args,
     invalidate_formula33_manifest_if_kline_cache_incomplete,
+    infer_price_frame_source,
     load_candidate_snapshots,
     load_price_frames,
     report_period_visible_date,
@@ -63,12 +67,18 @@ from stock_research.strategies.portfolio_backtest import (
     _active_profit_trigger_ids,
     _affordable_buy_notional,
     _capped_entry_size,
+    _corporate_action_adjusted_quantities,
     _entry_risk_still_controls_lot,
     _effective_profit_tranches,
+    _portfolio_profit_concentration_summary,
+    _portfolio_r_multiple_summary,
+    _large_liquid_trend_core_profile,
     _leader_trend_add_signal,
+    _minimum_trimmed_entry_size,
     _price_structure_signal,
     _prepare_frame,
     _semantic_right_entry_gate,
+    _signal_support_has_fast_ma_confluence,
     _is_profit_tail,
     _profit_ids_to_execute,
     _qualifies_profit_tail,
@@ -120,6 +130,64 @@ def run_portfolio_backtest(price_frames, candidate_snapshots, *args, **kwargs):
     return _run_portfolio_backtest(
         price_frames, audited_snapshots, *args, **kwargs,
     )
+
+
+def test_apply_candidate_exclusions_recomputes_daily_candidate_ranks():
+    snapshots = {
+        "2026-01-02": [
+            {
+                "code": "A",
+                "candidate_score": 100,
+                "selected_for_trading": True,
+                "signal_eligible": True,
+                "selection_rank": 1,
+            },
+            {
+                "code": "B",
+                "candidate_score": 90,
+                "selected_for_trading": True,
+                "signal_eligible": True,
+                "selection_rank": 2,
+            },
+            {
+                "code": "C",
+                "candidate_score": 80,
+                "selected_for_trading": False,
+                "signal_eligible": False,
+                "allow_right": True,
+                "quality_score": 80,
+                "earnings_yoy": 0.20,
+                "mktcap": 200,
+                "candidate_failure_reason": (
+                    "not_selected_for_trading: factor_rank_not_in_observation_pool"
+                ),
+            },
+            {
+                "code": "D",
+                "candidate_score": 120,
+                "selected_for_trading": False,
+                "signal_eligible": False,
+                "allow_right": True,
+                "quality_score": 90,
+                "earnings_yoy": 0.30,
+                "mktcap": 300,
+                "candidate_failure_reason": "value_industry_not_allowlisted",
+            },
+        ]
+    }
+
+    result = apply_candidate_exclusions(snapshots, ["A"])
+    by_code = {row["code"]: row for row in result["2026-01-02"]}
+
+    assert "A" not in by_code
+    assert by_code["B"]["selected_for_trading"] is True
+    assert by_code["B"]["selection_rank"] == 1
+    assert by_code["C"]["selected_for_trading"] is True
+    assert by_code["C"]["signal_eligible"] is True
+    assert by_code["C"]["selection_rank"] == 2
+    assert by_code["C"]["candidate_failure_reason"] == ""
+    assert by_code["D"]["selected_for_trading"] is False
+    assert by_code["D"]["signal_eligible"] is False
 
 
 def test_affordable_notional_reserves_commission_and_slippage():
@@ -266,15 +334,82 @@ def test_raw_execution_uses_dividend_share_rate_before_factor_fallback():
         event["quantity"] for event in result["trade_ledger"]
         if event["trade_side"] == "买入"
     )
+    cash_event = next(
+        event for event in result["events"]
+        if event.get("corporate_action_cash_amount") is not None
+    )
     sell_quantity = sum(
         event["quantity"] for event in result["trade_ledger"]
         if event["trade_side"] == "卖出"
     )
     position = result["final_positions"][0]
+    assert cash_event["corporate_action_cash_amount"] == pytest.approx(buy_quantity * 0.1)
+    assert cash_event["cash_change_amount"] == pytest.approx(buy_quantity * 0.1)
     assert position["quantity"] + sell_quantity == pytest.approx(buy_quantity * 1.6)
     assert float(position["quantity"]).is_integer()
     assert all(float(event["quantity"]).is_integer() for event in result["trade_ledger"])
     assert position["cost"] == pytest.approx(10.4 / noisy_factor_multiplier, rel=1e-3)
+
+
+def test_corporate_action_quantity_allocation_preserves_account_total():
+    adjusted = _corporate_action_adjusted_quantities([400, 400, 928], 1.4)
+
+    assert adjusted == [560, 560, 1299]
+    assert sum(adjusted) == 2419
+
+
+def test_profit_concentration_summary_flags_single_symbol_dependency():
+    summary = _portfolio_profit_concentration_summary(
+        [
+            {
+                "code": "A",
+                "name": "Alpha",
+                "execution_quantity": -100,
+                "profit_loss_amount": 1000,
+                "industry_tags": "AI",
+            },
+            {
+                "code": "A",
+                "name": "Alpha",
+                "execution_quantity": 0,
+                "profit_loss_amount": 50,
+                "account_mode": "corporate_action",
+                "corporate_action_cash_amount": 50,
+            },
+            {
+                "code": "B",
+                "name": "Beta",
+                "execution_quantity": -100,
+                "profit_loss_amount": -100,
+                "industry_tags": "EV",
+            },
+        ],
+        [
+            {
+                "code": "A",
+                "name": "Alpha",
+                "industry_tags": ["AI"],
+                "unrealized_pnl_amount": 500,
+                "market_value": 2000,
+            },
+            {
+                "code": "C",
+                "name": "Gamma",
+                "industry_tags": ["AI"],
+                "unrealized_pnl_amount": 100,
+                "market_value": 1000,
+            },
+        ],
+        initial_capital=10_000,
+        final_return_pct=15.5,
+    )
+
+    assert summary["top1_symbol"]["code"] == "A"
+    assert summary["top1_symbol"]["total_pnl_amount"] == pytest.approx(1550)
+    assert summary["top1_return_contribution_pct"] == pytest.approx(15.5)
+    assert summary["exclude_top1_approx_final_return_pct"] == pytest.approx(0.0)
+    assert summary["concentration_warning"] is True
+    assert summary["industry_contribution_top"][0]["industry_tag"] == "AI"
 
 
 def test_prepare_frame_uses_qfq_signal_prices_but_keeps_raw_execution_prices():
@@ -364,6 +499,10 @@ def test_load_price_frames_can_bypass_database_for_raw_execution_prices(tmp_path
 
     assert frames["sz.002594"].loc[0, "close"] == pytest.approx(254.29)
     assert frames["sz.002594"].loc[0, "raw_to_qfq_factor"] == pytest.approx(3.03591, rel=1e-4)
+
+
+def test_infer_price_frame_source_recognizes_formula33_miniqmt_cache():
+    assert infer_price_frame_source(r"D:\repo\var\cache\formula33_kline\miniqmt") == "miniqmt"
 
 
 def test_load_price_frames_can_use_tushare_sqlite_without_future_bars(tmp_path, monkeypatch):
@@ -712,7 +851,12 @@ def test_right_quant_selection_keeps_the_fundamental_gate_unchanged():
     assert [item["code"] for item in selected] == ["PASS"]
     assert selected[0]["candidate_source"] == "factor_quant"
     assert selected[0]["signal_eligible"] is True
-    assert selected[0]["right_quant_setup"] in {"标准量化", "强趋势", "高盈亏比"}
+    assert selected[0]["right_quant_setup"] in {
+        "标准量化",
+        "强趋势",
+        "高盈亏比",
+        "large_liquid_trend_core",
+    }
     assert "财务硬门槛通过" in selected[0]["selection_reason"]
 
 
@@ -2047,7 +2191,7 @@ def test_left_origin_batches_demote_back_to_left_on_right_stop(monkeypatch):
             return None
         return {
             "rank": 10,
-            "stop": 110.0,
+            "stop": 109.1,
             "trigger": 112.0,
             "target_price": 126.0,
             "order_type": "close",
@@ -2134,7 +2278,7 @@ def test_demoted_left_core_survives_left_quota_conflict(monkeypatch):
             return None
         return {
             "rank": 10,
-            "stop": 110.0,
+            "stop": 109.1,
             "trigger": 112.0,
             "target_price": 126.0,
             "order_type": "close",
@@ -2275,6 +2419,42 @@ def test_left_core_only_position_does_not_consume_capacity():
 
     position = result["final_positions"][0]
     assert position["left_position_pct"] == pytest.approx(6)
+    assert {item["grid_slot"] for item in position["left_batches"]} == {0, 1, 2}
+    assert position["capacity_counted"] is False
+
+
+def test_reduced_left_grid_max_exposure_starts_capped_initial_grid():
+    dates = pd.bdate_range("2026-01-01", periods=81)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 81,
+        "high": [100.5] * 81,
+        "low": [99.5] * 81,
+        "close": [100.0] * 81,
+        "volume": [1000.0] * 81,
+    })
+    first = dates[80].strftime("%Y-%m-%d")
+
+    result = run_portfolio_backtest(
+        {"A": bars},
+        {
+            first: [{
+                "code": "A", "candidate_source": "value_model",
+                "value_line": 100.0, "industry": "test", "mktcap": 150,
+                "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
+            }],
+        },
+        {},
+        requested_start=first,
+        end_date=first,
+        left_grid_max_exposure=0.05,
+    )
+
+    position = result["final_positions"][0]
+    assert result["left_grid_max_exposure_pct"] == pytest.approx(5)
+    assert result["left_grid_initial_slots"] == 3
+    assert result["left_grid_core_slots"] == 3
+    assert position["left_position_pct"] == pytest.approx(5)
     assert {item["grid_slot"] for item in position["left_batches"]} == {0, 1, 2}
     assert position["capacity_counted"] is False
 
@@ -2674,6 +2854,156 @@ def test_semantic_entry_gate_rejects_high_score_with_wide_stop():
     assert enriched["entry_risk_pct"] > 10
 
 
+def test_semantic_entry_gate_rejects_daily_stop_that_is_too_tight():
+    bars = _prepare_frame(breakout_bars())
+    index = len(bars) - 1
+    candidate = {
+        "candidate_source": "growth_leadership",
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+        "mktcap": 300,
+        "trade_basis_score": 10,
+        "leadership_score": 30,
+        "return_20d": 0.20,
+        "return_60d": 0.45,
+        "avg_amount_20": 3_000_000_000,
+    }
+    signal = {
+        "rank": 15,
+        "entry_evidence_score": 15,
+        "order_type": "close",
+        "trigger": 10.4,
+        "stop": 10.35,
+        "target_price": 12.5,
+        "known_volume_ratio": 2.0,
+        "signal_type": "consolidation_breakout",
+    }
+
+    ok, enriched, reason = _semantic_right_entry_gate(
+        bars, index, candidate, signal,
+    )
+
+    assert not ok
+    assert reason == "risk_pct_too_tight"
+    assert enriched["entry_risk_pct"] < 1
+    assert enriched["entry_minimum_risk_pct"] == pytest.approx(1.0)
+
+
+def test_semantic_entry_gate_rejects_close_confirmed_stop_too_tight_for_daily_bars():
+    bars = _prepare_frame(breakout_bars())
+    index = len(bars) - 1
+    entry_price = float(bars.iloc[index]["close"])
+    candidate = {
+        "candidate_source": "growth_leadership",
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+        "mktcap": 300,
+        "trade_basis_score": 10,
+        "leadership_score": 30,
+        "return_20d": 0.20,
+        "return_60d": 0.45,
+        "avg_amount_20": 3_000_000_000,
+    }
+    signal = {
+        "rank": 15,
+        "entry_evidence_score": 15,
+        "order_type": "close",
+        "trigger": entry_price,
+        "stop": entry_price * 0.985,
+        "target_price": entry_price * 1.12,
+        "known_volume_ratio": 2.0,
+        "signal_type": "consolidation_breakout",
+    }
+
+    ok, enriched, reason = _semantic_right_entry_gate(
+        bars, index, candidate, signal,
+    )
+
+    assert not ok
+    assert reason == "close_confirmed_risk_pct_too_tight"
+    assert enriched["entry_risk_pct"] == pytest.approx(1.5)
+    assert enriched["entry_minimum_close_confirmed_risk_pct"] == pytest.approx(1.8)
+
+
+def test_close_proxy_exit_waits_through_locked_limit_down(monkeypatch):
+    dates = pd.bdate_range("2026-01-01", periods=83)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 81 + [90.0, 88.0],
+        "high": [101.0] * 81 + [90.0, 89.0],
+        "low": [99.0] * 81 + [90.0, 87.0],
+        "close": [100.0] * 81 + [90.0, 88.0],
+        "volume": [1000.0] * 83,
+    })
+    entry_date = dates[80].strftime("%Y-%m-%d")
+    locked_date = dates[81].strftime("%Y-%m-%d")
+    exit_date = dates[82].strftime("%Y-%m-%d")
+
+    def fake_signal(data, index, plan=None, **kwargs):
+        if data.iloc[index]["date"].strftime("%Y-%m-%d") != entry_date:
+            return None
+        return {
+            "rank": 10,
+            "entry_evidence_score": 10,
+            "order_type": "close",
+            "trigger": 100.0,
+            "stop": 95.0,
+            "target_price": 120.0,
+            "known_volume_ratio": 1.2,
+            "signal_type": "consolidation_breakout",
+            "reason": "test close-proxy locked limit exit",
+        }
+
+    monkeypatch.setattr(
+        "stock_research.strategies.portfolio_backtest._right_signal",
+        fake_signal,
+    )
+
+    result = run_portfolio_backtest(
+        {"sh.600000": bars},
+        {entry_date: [{
+            "code": "sh.600000",
+            "candidate_source": "growth_leadership",
+            "quality_score": 90,
+            "earnings_yoy": 0.30,
+            "mktcap": 300,
+            "trade_basis_score": 8,
+            "leadership_score": 28,
+            "return_20d": 0.10,
+            "return_60d": 0.30,
+            "avg_amount_20": 2_000_000_000,
+        }]},
+        {entry_date: {"phase": "active", "window_up_streak": 5}},
+        requested_start=entry_date,
+        end_date=exit_date,
+        signals_effective_next_day=False,
+        close_confirmed_execution="close_proxy",
+        initial_capital=1_000_000,
+        commission_rate=0,
+        minimum_commission=0,
+        sell_stamp_duty_rate=0,
+        estimated_slippage_rate=0,
+    )
+
+    sells = [
+        event for event in result["trade_ledger"]
+        if float(event.get("execution_quantity") or 0.0) < 0
+    ]
+    assert len(sells) == 1
+    assert sells[0]["date"] == exit_date
+    assert sells[0]["execution_price"] == pytest.approx(88.0)
+    assert sells[0]["initial_risk_per_share_raw"] == pytest.approx(5.0)
+    assert sells[0]["realized_r_multiple"] == pytest.approx(-2.4)
+    r_summary = _portfolio_r_multiple_summary(result["events"])
+    assert r_summary["average_realized_r"] == pytest.approx(-2.4)
+    assert r_summary["loss_beyond_one_r_count"] == 1
+    assert not [
+        event for event in result["trade_ledger"]
+        if event["date"] == locked_date
+        and float(event.get("execution_quantity") or 0.0) < 0
+    ]
+
+
 def test_semantic_entry_gate_accepts_lower_score_with_tight_high_rr_setup():
     bars = _prepare_frame(breakout_bars())
     index = len(bars) - 1
@@ -2786,6 +3116,157 @@ def test_compact_attack_core_uses_setup_specific_liquidity_floor():
     assert enriched["entry_liquidity_profile"] == "compact_attack_core_450m"
     assert enriched["entry_target_basis"] == "compact_attack_core_3_5r_pivot_continuation"
     assert enriched["entry_reward_risk"] >= 2.5
+
+
+def test_large_liquid_trend_core_accepts_broad_quality_trend_profile():
+    candidate = {
+        "candidate_source": "factor_quant",
+        "right_quant_setup": "强趋势",
+        "quality_score": 82,
+        "earnings_yoy": 0.45,
+        "mktcap": 4_000,
+        "avg_amount_20": 5_000_000_000,
+        "trade_basis_score": 6,
+        "technical_alignment": "trade_ready",
+        "right_quant_score": 92,
+        "return_20d": 0.12,
+        "return_60d": 0.55,
+        "drawdown_60": -0.10,
+        "quant_alpha_rank": 70,
+        "quant_trend_stability_rank": 85,
+        "quant_structure_rank": 45,
+        "quant_volume_confirm_rank": 55,
+        "quant_low_risk_rank": 35,
+    }
+
+    assert _large_liquid_trend_core_profile(candidate)
+
+
+def test_large_liquid_trend_core_keeps_higher_pullback_rr_gate():
+    bars = _prepare_frame(breakout_bars())
+    index = len(bars) - 1
+    candidate = {
+        "candidate_source": "factor_quant",
+        "right_quant_setup": "强趋势",
+        "quality_score": 82,
+        "earnings_yoy": 0.45,
+        "mktcap": 4_000,
+        "avg_amount_20": 5_000_000_000,
+        "trade_basis_score": 6,
+        "technical_alignment": "trade_ready",
+        "right_quant_score": 92,
+        "leadership_score": 22,
+        "return_20d": 0.12,
+        "return_60d": 0.55,
+        "drawdown_60": -0.10,
+        "quant_alpha_rank": 70,
+        "quant_trend_stability_rank": 85,
+        "quant_structure_rank": 45,
+        "quant_volume_confirm_rank": 55,
+        "quant_low_risk_rank": 35,
+    }
+    entry_price = float(bars.iloc[index]["close"])
+    signal = {
+        "rank": 1,
+        "stop": entry_price * 0.96,
+        "trigger": entry_price,
+        "target_price": entry_price * 1.13,
+        "order_type": "close",
+        "known_volume_ratio": 1.0,
+        "signal_type": "uptrend_support_pullback",
+        "entry_evidence_score": 0,
+    }
+
+    ok, enriched, reason = _semantic_right_entry_gate(
+        bars, index, candidate, signal,
+    )
+
+    assert not ok
+    assert reason == "reward_risk_too_low"
+    assert enriched["entry_reward_risk"] < 3.5
+
+
+def test_large_liquid_trend_core_support_pullback_rejects_watch_state():
+    bars = _prepare_frame(breakout_bars())
+    index = len(bars) - 1
+    entry_price = float(bars.iloc[index]["close"])
+    candidate = {
+        "candidate_source": "factor_quant",
+        "right_quant_setup": "强趋势",
+        "quality_score": 82,
+        "earnings_yoy": 0.45,
+        "mktcap": 4_000,
+        "avg_amount_20": 5_000_000_000,
+        "trade_basis_score": 6,
+        "technical_alignment": "watch",
+        "right_quant_score": 92,
+        "leadership_score": 22,
+        "return_20d": 0.12,
+        "return_60d": 0.55,
+        "drawdown_60": -0.10,
+        "quant_alpha_rank": 70,
+        "quant_trend_stability_rank": 85,
+        "quant_structure_rank": 45,
+        "quant_volume_confirm_rank": 55,
+        "quant_low_risk_rank": 35,
+    }
+    signal = {
+        "rank": 1,
+        "stop": entry_price * 0.97,
+        "trigger": entry_price,
+        "target_price": entry_price * 1.14,
+        "order_type": "close",
+        "known_volume_ratio": 1.0,
+        "signal_type": "uptrend_support_pullback",
+        "entry_evidence_score": 0,
+    }
+
+    ok, enriched, reason = _semantic_right_entry_gate(
+        bars, index, candidate, signal,
+    )
+
+    assert not ok
+    assert reason == "large_liquid_trend_watch_only"
+    assert enriched["entry_gate_reason"] == "large_liquid_trend_watch_only"
+
+
+def test_support_pullback_first_entry_requires_fast_ma_confluence():
+    bars = _prepare_frame(breakout_bars())
+    index = len(bars) - 1
+    entry_price = float(bars.iloc[index]["close"])
+    candidate = {
+        "candidate_source": "factor_quant",
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+        "mktcap": 300,
+        "avg_amount_20": 1_000_000_000,
+        "trade_basis_score": 8,
+        "right_quant_score": 86,
+        "leadership_score": 20,
+        "return_20d": 0.12,
+        "return_60d": 0.35,
+        "drawdown_60": -0.08,
+    }
+    slow_signal = {
+        "rank": 1,
+        "stop": entry_price * 0.97,
+        "trigger": entry_price,
+        "target_price": entry_price * 1.14,
+        "order_type": "close",
+        "known_volume_ratio": 1.0,
+        "signal_type": "uptrend_support_pullback",
+        "support_confluence": ["MA60"],
+    }
+    fast_signal = {**slow_signal, "support_confluence": ["MA20"]}
+
+    assert not _signal_support_has_fast_ma_confluence(slow_signal)
+    assert _signal_support_has_fast_ma_confluence(fast_signal)
+
+    ok, enriched, reason = _semantic_right_entry_gate(
+        bars, index, candidate, slow_signal,
+    )
+    assert not ok
+    assert reason == "support_pullback_without_fast_ma_confluence"
 
 
 def test_generic_high_is_replaced_by_close_confirmed_consolidation_breakout():
@@ -3002,12 +3483,12 @@ def test_configured_price_structure_ratio_is_a_pre_known_condition_order():
     date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
     plan = {"price_structures": [{
         "kind": "uptrend_support", "uptrend_low": 2.0,
-        "uptrend_high": 18.0, "ratio": 0.50,
+        "uptrend_high": 17.6, "ratio": 0.50,
         "confluence": ["MA20"],
     }]}
     plans = {"plans": {"A": {"price_structures": [{
         "kind": "uptrend_support", "uptrend_low": 2.0,
-        "uptrend_high": 18.0, "ratio": 0.50,
+        "uptrend_high": 17.6, "ratio": 0.50,
         "confluence": ["MA20"],
     }]}}}
 
@@ -3084,7 +3565,7 @@ def test_auto_big_wave_support_can_still_trigger_pullback():
 
 def test_leading_pullback_pilot_is_enabled_by_default_and_can_be_disabled():
     dates = pd.bdate_range("2026-01-01", periods=80)
-    closes = list(pd.Series(range(78)).map(lambda value: 7.0 + value * 3.0 / 77)) + [10.2, 10.1]
+    closes = list(pd.Series(range(78)).map(lambda value: 7.0 + value * 3.0 / 77)) + [10.3, 10.2]
     bars = pd.DataFrame({
         "date": dates,
         "open": closes,
@@ -3094,12 +3575,13 @@ def test_leading_pullback_pilot_is_enabled_by_default_and_can_be_disabled():
         "volume": [1000] * 79 + [2000],
     })
     date = dates[-1].strftime("%Y-%m-%d")
+    snapshot_date = dates[-2].strftime("%Y-%m-%d")
     plans = {"plans": {"A": {"price_structures": [{
         "kind": "uptrend_support", "uptrend_low": 2.0,
-        "uptrend_high": 18.0, "ratio": 0.50,
+        "uptrend_high": 17.6, "ratio": 0.50,
         "confluence": ["MA20"],
     }]}}}
-    snapshots = {date: [{
+    snapshots = {snapshot_date: [{
         "code": "A",
         "name": "A",
         "candidate_source": "growth_leadership+standard_mainline",
@@ -3113,7 +3595,7 @@ def test_leading_pullback_pilot_is_enabled_by_default_and_can_be_disabled():
         "drawdown_60": -0.10,
         "avg_amount_20": 3_000_000_000,
     }]}
-    phases = {date: {"phase": "active", "window_up_streak": 3, "window_down_streak": 0}}
+    phases = {snapshot_date: {"phase": "active", "window_up_streak": 3, "window_down_streak": 0}}
 
     default_result = run_portfolio_backtest(
         {"A": bars}, snapshots, phases,
@@ -3128,14 +3610,14 @@ def test_leading_pullback_pilot_is_enabled_by_default_and_can_be_disabled():
 
     assert default_result["allow_pullback_pilot"] is True
     assert default_result["events"][0]["signal_type"] == "uptrend_support_pullback"
-    assert default_result["events"][0]["requested_position_pct"] == pytest.approx(20)
+    assert default_result["events"][0]["requested_position_pct"] == pytest.approx(8)
     assert disabled_result["events"] == []
     assert disabled_result["allow_pullback_pilot"] is False
 
 
 def test_factor_quant_support_pullback_can_start_right_pilot():
     dates = pd.bdate_range("2026-01-01", periods=80)
-    closes = list(pd.Series(range(78)).map(lambda value: 7.0 + value * 3.0 / 77)) + [10.2, 10.1]
+    closes = list(pd.Series(range(78)).map(lambda value: 7.0 + value * 3.0 / 77)) + [10.3, 10.2]
     bars = pd.DataFrame({
         "date": dates,
         "open": closes,
@@ -3145,12 +3627,13 @@ def test_factor_quant_support_pullback_can_start_right_pilot():
         "volume": [1000] * 79 + [2000],
     })
     date = dates[-1].strftime("%Y-%m-%d")
+    snapshot_date = dates[-2].strftime("%Y-%m-%d")
     plans = {"plans": {"A": {"price_structures": [{
         "kind": "uptrend_support", "uptrend_low": 2.0,
-        "uptrend_high": 18.0, "ratio": 0.50,
+        "uptrend_high": 17.6, "ratio": 0.50,
         "confluence": ["MA20"],
     }]}}}
-    snapshots = {date: [{
+    snapshots = {snapshot_date: [{
         "code": "A",
         "name": "A",
         "candidate_source": "factor_quant",
@@ -3158,14 +3641,14 @@ def test_factor_quant_support_pullback_can_start_right_pilot():
         "earnings_yoy": 0.30,
         "mktcap": 300,
         "trade_basis_score": 7,
-        "right_quant_score": 60,
+        "right_quant_score": 86,
         "candidate_score": 120,
         "return_20d": 0.02,
-        "return_60d": 0.05,
-        "drawdown_60": -0.20,
-        "avg_amount_20": 600_000_000,
+        "return_60d": 0.15,
+        "drawdown_60": -0.10,
+        "avg_amount_20": 1_000_000_000,
     }]}
-    phases = {date: {"phase": "active", "window_up_streak": 3, "window_down_streak": 0}}
+    phases = {snapshot_date: {"phase": "active", "window_up_streak": 3, "window_down_streak": 0}}
 
     result = run_portfolio_backtest(
         {"A": bars}, snapshots, phases,
@@ -3173,7 +3656,59 @@ def test_factor_quant_support_pullback_can_start_right_pilot():
     )
 
     assert result["events"][0]["signal_type"] == "uptrend_support_pullback"
-    assert result["events"][0]["requested_position_pct"] == pytest.approx(15)
+    assert result["events"][0]["requested_position_pct"] == pytest.approx(8)
+    assert result["entry_blocks"] == []
+
+
+def test_large_liquid_trend_core_support_pullback_uses_smaller_probe():
+    dates = pd.bdate_range("2026-01-01", periods=80)
+    closes = list(pd.Series(range(78)).map(lambda value: 7.0 + value * 3.0 / 77)) + [10.3, 10.2]
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": closes,
+        "high": [value + 0.2 for value in closes],
+        "low": [value - 0.2 for value in closes[:-1]] + [9.8],
+        "close": closes,
+        "volume": [1000] * 79 + [2000],
+    })
+    date = dates[-1].strftime("%Y-%m-%d")
+    snapshot_date = dates[-2].strftime("%Y-%m-%d")
+    plans = {"plans": {"A": {"price_structures": [{
+        "kind": "uptrend_support", "uptrend_low": 2.0,
+        "uptrend_high": 17.6, "ratio": 0.50,
+        "confluence": ["MA20"],
+    }]}}}
+    snapshots = {snapshot_date: [{
+        "code": "A",
+        "name": "A",
+        "candidate_source": "factor_quant",
+        "right_quant_setup": "强趋势",
+        "quality_score": 82,
+        "earnings_yoy": 0.45,
+        "mktcap": 4_000,
+        "avg_amount_20": 5_000_000_000,
+        "trade_basis_score": 6,
+        "right_quant_score": 92,
+        "candidate_score": 125,
+        "return_20d": 0.12,
+        "return_60d": 0.55,
+        "drawdown_60": -0.10,
+        "quant_alpha_rank": 70,
+        "quant_trend_stability_rank": 85,
+        "quant_structure_rank": 45,
+        "quant_volume_confirm_rank": 55,
+        "quant_low_risk_rank": 35,
+    }]}
+    phases = {snapshot_date: {"phase": "active", "window_up_streak": 3, "window_down_streak": 0}}
+
+    result = run_portfolio_backtest(
+        {"A": bars}, snapshots, phases,
+        requested_start=date, end_date=date, trade_plans=plans,
+    )
+
+    assert result["events"][0]["signal_type"] == "uptrend_support_pullback"
+    assert result["events"][0]["requested_position_pct"] == pytest.approx(6)
+    assert result["events"][0]["entry_liquidity_profile"] == "large_liquid_trend_core_3b"
     assert result["entry_blocks"] == []
 
 
@@ -3192,12 +3727,12 @@ def test_support_pullback_pilot_ignores_legacy_evidence_score(monkeypatch):
     def fake_signal(data, index, plan=None, **kwargs):
         return {
             "rank": 1,
-            "stop": 95.0,
+            "stop": 96.0,
             "trigger": 100.0,
             "target_price": 116.0,
             "order_type": "close",
             "reason": "quantified support pullback without evidence score",
-            "known_volume_ratio": 1.0,
+            "known_volume_ratio": 1.2,
             "signal_type": "uptrend_support_pullback",
             "entry_evidence_score": 0,
         }
@@ -3231,7 +3766,7 @@ def test_support_pullback_pilot_ignores_legacy_evidence_score(monkeypatch):
 
     assert result["entry_evidence_score_role"] == "legacy_explanation_only"
     assert result["events"][0]["signal_type"] == "uptrend_support_pullback"
-    assert result["events"][0]["requested_position_pct"] == pytest.approx(20)
+    assert result["events"][0]["requested_position_pct"] == pytest.approx(10)
     assert result["entry_blocks"] == []
 
 
@@ -3249,7 +3784,7 @@ def test_leading_pullback_pilot_still_blocks_ordinary_pullback_profiles():
     date = dates[-1].strftime("%Y-%m-%d")
     plans = {"plans": {"A": {"price_structures": [{
         "kind": "uptrend_support", "uptrend_low": 2.0,
-        "uptrend_high": 18.0, "ratio": 0.50,
+        "uptrend_high": 17.6, "ratio": 0.50,
         "confluence": ["MA20"],
     }]}}}
     snapshots = {date: [{
@@ -3281,6 +3816,34 @@ def test_leading_pullback_pilot_still_blocks_ordinary_pullback_profiles():
 def test_symbol_cap_is_independent_from_price_structure_ratios():
     assert _capped_entry_size(0.60, 0.20) == pytest.approx(0.10)
     assert _capped_entry_size(0.30, 0.15) == pytest.approx(0.15)
+
+
+def test_pullback_pilot_trim_minimum_uses_probe_size():
+    assert _minimum_trimmed_entry_size(
+        0.10,
+        starting_new_right_campaign=True,
+        pullback_pilot=True,
+    ) == pytest.approx(0.08)
+    assert _minimum_trimmed_entry_size(
+        0.08,
+        starting_new_right_campaign=True,
+        pullback_pilot=True,
+    ) == pytest.approx(0.08)
+    assert _minimum_trimmed_entry_size(
+        0.06,
+        starting_new_right_campaign=True,
+        pullback_pilot=True,
+    ) == pytest.approx(0.06)
+    assert _minimum_trimmed_entry_size(
+        0.30,
+        starting_new_right_campaign=True,
+        pullback_pilot=False,
+    ) == pytest.approx(0.20)
+    assert _minimum_trimmed_entry_size(
+        0.12,
+        starting_new_right_campaign=False,
+        pullback_pilot=False,
+    ) == pytest.approx(0.10)
 
 
 def test_support_pullback_can_only_add_after_float_profit_buffer():
@@ -4111,12 +4674,76 @@ def test_financial_preflight_fails_when_auto_fetch_remains_below_target(monkeypa
 
 
 def test_no_refresh_inputs_requires_strict_candidate_manifest():
-    with pytest.raises(RuntimeError, match="candidate manifest"):
+    with pytest.raises(RuntimeError, match="production backtests must refresh"):
         portfolio_backtest_app.main([
             "--start-date", "2026-07-10",
             "--end-date", "2026-07-14",
             "--no-refresh-inputs",
         ])
+
+
+def test_allow_frozen_inputs_still_requires_strict_candidate_manifest():
+    with pytest.raises(RuntimeError, match="candidate manifest"):
+        portfolio_backtest_app.main([
+            "--start-date", "2026-07-10",
+            "--end-date", "2026-07-14",
+            "--no-refresh-inputs",
+            "--allow-frozen-inputs",
+        ])
+
+
+def test_yearly_backtest_runs_single_year_ranges_without_frozen_input_bypass(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_portfolio_main(argv):
+        calls.append(list(argv))
+        start = argv[argv.index("--start-date") + 1]
+        end = argv[argv.index("--end-date") + 1]
+        output = Path(argv[argv.index("--output-directory") + 1])
+        output.mkdir(parents=True, exist_ok=True)
+        summary = {
+            "actual_start": start,
+            "end_date": end,
+            "final_return_pct": 1.23,
+            "realized_return_pct": 0.5,
+            "unrealized_return_pct": 0.73,
+            "maximum_drawdown_pct": -2.5,
+            "trade_summary": {"buy_count": 1, "sell_count": 1},
+            "r_multiple_summary": {
+                "average_realized_r": 0.8,
+                "median_realized_r": 0.8,
+                "profit_factor_r": 1.1,
+                "loss_beyond_one_r_count": 0,
+            },
+            "profit_concentration_summary": {
+                "top1_symbol": {"code": "A", "name": "Alpha"},
+                "top1_return_contribution_pct": 1.0,
+            },
+            "inputs_refreshed": True,
+        }
+        (output / f"portfolio_{start}_{end}_summary.json").write_text(
+            json.dumps(summary, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(portfolio_yearly_backtest.portfolio_backtest, "main", fake_portfolio_main)
+
+    assert portfolio_yearly_backtest.main([
+        "--start-year", "2024",
+        "--end-year", "2025",
+        "--through-date", "2025-06-30",
+        "--output-root", str(tmp_path),
+    ]) == 0
+
+    assert len(calls) == 2
+    assert calls[0][calls[0].index("--start-date") + 1] == "2024-01-01"
+    assert calls[0][calls[0].index("--end-date") + 1] == "2024-12-31"
+    assert calls[1][calls[1].index("--start-date") + 1] == "2025-01-01"
+    assert calls[1][calls[1].index("--end-date") + 1] == "2025-06-30"
+    assert all("--no-refresh-inputs" not in call for call in calls)
+    summary_csv = tmp_path / "yearly_summary.csv"
+    assert summary_csv.exists()
+    assert "final_return_pct" in summary_csv.read_text(encoding="utf-8-sig")
 
 
 def test_parameter_sweep_no_refresh_inputs_is_blocked_for_strict_backtests():

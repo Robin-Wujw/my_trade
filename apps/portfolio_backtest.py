@@ -31,6 +31,14 @@ DEFAULT_FINANCIAL_TIMEOUT = 60
 DEFAULT_MINIQMT_KLINE_CHUNK_SIZE = 50
 DEFAULT_INDUSTRY_TARGET_COVERAGE = 0.95
 FORMULA33_STATE_ANCHOR_DATE = pd.Timestamp("2023-01-03")
+POST_EXCLUSION_QUOTA_REASON = (
+    "not_selected_for_trading: post_exclusion_recomputed_rank_not_in_observation_pool"
+)
+QUOTA_DIAGNOSTIC_PREFIXES = (
+    "not_selected_for_trading: factor_rank_not_in_observation_pool",
+    "not_selected_for_trading: daily_top10_quota_or_core_reservation",
+    POST_EXCLUSION_QUOTA_REASON,
+)
 
 
 def log_refresh_step(message):
@@ -68,13 +76,136 @@ def candidate_history_price_source(price_source):
 
 
 def infer_price_frame_source(kline_directory):
-    parts = {str(part).lower() for part in Path(kline_directory).parts}
-    return "miniqmt" if "miniqmt_kline" in parts else "akshare"
+    parts = [str(part).lower() for part in Path(kline_directory).parts]
+    if "miniqmt_kline" in parts:
+        return "miniqmt"
+    if len(parts) >= 2 and parts[-2:] == ["formula33_kline", "miniqmt"]:
+        return "miniqmt"
+    return "akshare"
 
 
 def _chunks(values, size):
     for index in range(0, len(values), size):
         yield values[index:index + size]
+
+
+def _truthy_flag(value):
+    if value is None:
+        return False
+    if isinstance(value, float) and pd.isna(value):
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
+def _failure_parts(value):
+    if value is None:
+        return []
+    if isinstance(value, float) and pd.isna(value):
+        return []
+    return [
+        item.strip()
+        for item in str(value).split(";")
+        if item and item.strip() and item.strip().lower() not in {"nan", "none"}
+    ]
+
+
+def _is_quota_diagnostic_reason(reason):
+    return any(str(reason).startswith(prefix) for prefix in QUOTA_DIAGNOSTIC_PREFIXES)
+
+
+def _quota_only_failure(candidate):
+    parts = _failure_parts(candidate.get("candidate_failure_reason"))
+    return bool(parts) and all(_is_quota_diagnostic_reason(part) for part in parts)
+
+
+def _candidate_can_reenter_after_exclusion(candidate):
+    if _truthy_flag(candidate.get("selected_for_trading")) and _truthy_flag(
+        candidate.get("signal_eligible")
+    ):
+        return True
+    if not _quota_only_failure(candidate):
+        return False
+    if not _truthy_flag(candidate.get("allow_right")):
+        return False
+    for field, floor in (
+        ("quality_score", 70.0),
+        ("earnings_yoy", 0.10),
+        ("mktcap", 100.0),
+    ):
+        value = pd.to_numeric(candidate.get(field), errors="coerce")
+        if pd.isna(value) or float(value) < floor:
+            return False
+    return True
+
+
+def _candidate_sort_score(candidate):
+    value = pd.to_numeric(candidate.get("candidate_score"), errors="coerce")
+    return float(value) if pd.notna(value) else 0.0
+
+
+def apply_candidate_exclusions(snapshots, exclude_codes):
+    """Remove codes and rerank the remaining daily executable candidate pool."""
+    excluded = {str(code).strip() for code in exclude_codes if str(code).strip()}
+    if not excluded:
+        return snapshots
+    reranked = {}
+    for date, rows in snapshots.items():
+        source_rows = [dict(row) for row in rows]
+        target_count = sum(
+            1
+            for row in source_rows
+            if _truthy_flag(row.get("selected_for_trading"))
+            and _truthy_flag(row.get("signal_eligible"))
+        )
+        remaining = [
+            row for row in source_rows
+            if str(row.get("code") or "").strip() not in excluded
+        ]
+        executable = [
+            row for row in remaining
+            if _candidate_can_reenter_after_exclusion(row)
+        ]
+        executable.sort(
+            key=lambda row: (
+                -_candidate_sort_score(row),
+                str(row.get("code") or ""),
+            )
+        )
+        selected_codes = {
+            str(row.get("code") or "").strip()
+            for row in executable[:target_count]
+        }
+        rank_by_code = {
+            str(row.get("code") or "").strip(): rank
+            for rank, row in enumerate(executable[:target_count], 1)
+        }
+        normalized_rows = []
+        for row in remaining:
+            code = str(row.get("code") or "").strip()
+            if code in selected_codes:
+                row["selected_for_trading"] = True
+                row["signal_eligible"] = True
+                row["selection_rank"] = rank_by_code[code]
+                non_quota_reasons = [
+                    part for part in _failure_parts(row.get("candidate_failure_reason"))
+                    if not _is_quota_diagnostic_reason(part)
+                ]
+                row["candidate_failure_reason"] = ";".join(non_quota_reasons)
+            elif _candidate_can_reenter_after_exclusion(row):
+                row["selected_for_trading"] = False
+                row["signal_eligible"] = False
+                row["selection_rank"] = None
+                non_quota_reasons = [
+                    part for part in _failure_parts(row.get("candidate_failure_reason"))
+                    if not _is_quota_diagnostic_reason(part)
+                ]
+                non_quota_reasons.append(POST_EXCLUSION_QUOTA_REASON)
+                row["candidate_failure_reason"] = ";".join(non_quota_reasons)
+            normalized_rows.append(row)
+        reranked[date] = normalized_rows
+    return reranked
 
 
 def run_logged_refresh_step(name, func, argv):
@@ -1509,6 +1640,14 @@ def main(argv=None):
         help="comma-separated explicit candidate universe; overrides snapshot members",
     )
     parser.add_argument(
+        "--exclude-codes",
+        default="",
+        help=(
+            "comma-separated codes to remove from candidate snapshots for "
+            "robustness review; daily executable ranks are recomputed after removal"
+        ),
+    )
+    parser.add_argument(
         "--exit-tail-on-candidate-removal", action="store_true",
         help="exit right-side tails below 10%% at the next open after candidate removal",
     )
@@ -1555,8 +1694,14 @@ def main(argv=None):
     parser.add_argument(
         "--no-refresh-inputs", action="store_true",
         help=(
-            "skip automatic input refresh after validating strict local manifests; "
-            "unsafe manifests still require both allow-unsafe switches"
+            "research only: skip automatic input refresh; requires --allow-frozen-inputs"
+        ),
+    )
+    parser.add_argument(
+        "--allow-frozen-inputs", action="store_true",
+        help=(
+            "explicitly acknowledge that this run uses already-frozen local inputs "
+            "instead of first refreshing and completing source data"
         ),
     )
     parser.add_argument(
@@ -1639,6 +1784,12 @@ def main(argv=None):
     if not args.end_date:
         args.end_date = default_data_end_date()
     requested_end_date = args.end_date
+    if args.no_refresh_inputs and not args.allow_frozen_inputs:
+        raise RuntimeError(
+            "--no-refresh-inputs is research-only; production backtests must refresh "
+            "and complete inputs first. Add --allow-frozen-inputs only for explicit "
+            "frozen-cache diagnostics."
+        )
     if args.no_refresh_inputs and not (
         args.allow_unsafe_financial and args.allow_unsafe_industry
     ):
@@ -1655,11 +1806,18 @@ def main(argv=None):
     else:
         print(
             "[portfolio_backtest][WARNING] input refresh explicitly disabled; "
-            "results use frozen local data"
+            "results use frozen local data by explicit --allow-frozen-inputs"
         )
     snapshots = load_candidate_snapshots(
         args.candidate_directory, args.start_date, args.end_date,
     )
+    excluded_codes = [
+        item.strip()
+        for item in str(args.exclude_codes or "").split(",")
+        if item.strip()
+    ]
+    if excluded_codes:
+        snapshots = apply_candidate_exclusions(snapshots, excluded_codes)
     coverage_snapshots = dict(snapshots)
     explicit_items = [item.strip() for item in (args.codes or "").split(",") if item.strip()]
     explicit_pairs = [item.split("=", 1) for item in explicit_items]
@@ -1840,6 +1998,8 @@ def main(argv=None):
     if explicit_codes:
         summary["candidate_mode"] = "explicit_codes"
         summary["explicit_codes"] = explicit_codes
+    if excluded_codes:
+        summary["excluded_codes"] = excluded_codes
     summary["candidate_snapshot_dates"] = sorted(snapshots)
     candidate_manifest_path = Path(args.candidate_directory) / "manifest.json"
     summary["input_fingerprints"] = {
@@ -1853,6 +2013,7 @@ def main(argv=None):
         "price_kline_directory": str(price_kline_directory),
     }
     summary["inputs_refreshed"] = not args.no_refresh_inputs
+    summary["frozen_inputs_allowed"] = bool(args.allow_frozen_inputs)
     summary["input_coverage_end"] = input_coverage_end
     summary["requested_end_date"] = requested_end_date
     summary["effective_end_date"] = args.end_date

@@ -110,6 +110,11 @@ def normalize_tushare_code(code: str) -> str:
     return f"{symbol}.{suffix}"
 
 
+def _chunks(values: list[str], size: int):
+    for index in range(0, len(values), size):
+        yield values[index:index + size]
+
+
 class TushareRepository:
     """Persist arbitrary Tushare tables with searchable point-in-time columns."""
 
@@ -249,39 +254,46 @@ class TushareRepository:
         if pd.isna(start) or pd.isna(end) or start > end:
             raise ValueError(f"invalid Tushare K-line date range: {start_date}..{end_date}")
 
-        placeholders = ", ".join("?" for _ in ts_to_requested)
-        params = [
-            str(dataset),
-            start.strftime("%Y-%m-%d"),
-            end.strftime("%Y-%m-%d"),
-            *sorted(ts_to_requested),
-        ]
         connection = self.database.connect(read_only=True)
         try:
-            rows = connection.execute(
-                f"""
-                SELECT ts_code, trade_date, payload_json
-                FROM raw.tushare_dataset_rows
-                WHERE dataset = ?
-                  AND trade_date >= ?
-                  AND trade_date <= ?
-                  AND ts_code IN ({placeholders})
-                ORDER BY ts_code, trade_date
-                """,
-                params,
-            ).fetchall()
-            factor_rows = connection.execute(
-                f"""
-                SELECT ts_code, trade_date, payload_json
-                FROM raw.tushare_dataset_rows
-                WHERE dataset = ?
-                  AND trade_date >= ?
-                  AND trade_date <= ?
-                  AND ts_code IN ({placeholders})
-                ORDER BY ts_code, trade_date
-                """,
-                ["adj_factor", start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"), *sorted(ts_to_requested)],
-            ).fetchall()
+            rows = []
+            factor_rows = []
+            for chunk in _chunks(sorted(ts_to_requested), 80):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows.extend(connection.execute(
+                    f"""
+                    SELECT ts_code, trade_date, payload_json
+                    FROM raw.tushare_dataset_rows INDEXED BY idx_tushare_dataset_ts_code
+                    WHERE dataset = ?
+                      AND ts_code IN ({placeholders})
+                      AND trade_date >= ?
+                      AND trade_date <= ?
+                    ORDER BY ts_code, trade_date
+                    """,
+                    [
+                        str(dataset),
+                        *chunk,
+                        start.strftime("%Y-%m-%d"),
+                        end.strftime("%Y-%m-%d"),
+                    ],
+                ).fetchall())
+                factor_rows.extend(connection.execute(
+                    f"""
+                    SELECT ts_code, trade_date, payload_json
+                    FROM raw.tushare_dataset_rows INDEXED BY idx_tushare_dataset_ts_code
+                    WHERE dataset = ?
+                      AND ts_code IN ({placeholders})
+                      AND trade_date >= ?
+                      AND trade_date <= ?
+                    ORDER BY ts_code, trade_date
+                    """,
+                    [
+                        "adj_factor",
+                        *chunk,
+                        start.strftime("%Y-%m-%d"),
+                        end.strftime("%Y-%m-%d"),
+                    ],
+                ).fetchall())
         finally:
             connection.close()
 

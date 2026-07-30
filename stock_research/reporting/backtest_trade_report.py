@@ -127,20 +127,29 @@ def _trade_result(side: str, event: dict) -> str:
     if side == "买入":
         cost = _entry_cost_per_share(event)
         fee = _number(event.get("transaction_cost_amount"))
+        risk = _number(event.get("initial_risk_per_share_raw"), 3)
+        rr = _number(event.get("entry_reward_risk"), 3)
+        risk_text = ""
+        if risk is not None:
+            risk_text = f"；初始风险{risk:,.3f}元/股"
+        if rr is not None:
+            risk_text += f"；计划{rr:,.2f}R"
         if cost is None and fee is None:
-            return "建仓"
+            return "建仓" + risk_text
         if cost is None:
-            return f"建仓，费用{fee:,.2f}元"
+            return f"建仓，费用{fee:,.2f}元{risk_text}"
         if fee is None:
-            return f"成本价{cost:,.3f}元/股"
-        return f"成本价{cost:,.3f}元/股；费用{fee:,.2f}元"
+            return f"成本价{cost:,.3f}元/股{risk_text}"
+        return f"成本价{cost:,.3f}元/股；费用{fee:,.2f}元{risk_text}"
     pnl = _number(event.get("profit_loss_amount"))
     pct = _number(event.get("profit_loss_pct"), 4)
     if pnl is None:
         return "平仓"
     label = "盈利" if pnl >= 0 else "亏损"
     pct_text = "" if pct is None else f" ({pct:+.2f}%)"
-    return f"{label}{pnl:,.2f}元{pct_text}"
+    realized_r = _number(event.get("realized_r_multiple"), 3)
+    r_text = "" if realized_r is None else f"；实现{realized_r:+.2f}R"
+    return f"{label}{pnl:,.2f}元{pct_text}{r_text}"
 
 
 def build_readable_trade_frame(trade_ledger) -> pd.DataFrame:
@@ -170,6 +179,10 @@ def build_readable_trade_frame(trade_ledger) -> pd.DataFrame:
             "买卖理由": readable_reason(event.get("reason"), event),
             "本次已实现盈亏(元)": pnl,
             "本次收益率(%)": _number(event.get("profit_loss_pct"), 4) if side == "卖出" else None,
+            "实现R": _number(event.get("realized_r_multiple"), 3) if side == "卖出" else None,
+            "计划R": _number(event.get("entry_reward_risk"), 3),
+            "初始风险(元/股)": _number(event.get("initial_risk_per_share_raw"), 6),
+            "初始风险金额(元)": _number(event.get("initial_risk_amount")),
             "交易后持股(股)": holdings_after,
             "持仓状态": "清仓" if holdings_after <= 0 else f"持有{holdings_after}股",
             "现金变化(元)": _number(event.get("cash_change_amount")),
@@ -224,6 +237,99 @@ def _block_reason_text(value) -> str:
 def _signal_type_text(value) -> str:
     raw = str(value or "")
     return _SIGNAL_TYPE_REPLACEMENTS.get(raw, raw or "—")
+
+
+def _render_profit_concentration(result: dict) -> list[str]:
+    summary = result.get("profit_concentration_summary") or {}
+    if not summary:
+        return []
+    top1 = summary.get("top1_symbol") or {}
+    lines = [
+        "",
+        "## 收益集中度诊断",
+        "",
+        f"- 贡献股票数：{summary.get('symbol_count', 0)}；盈利股票数：{summary.get('positive_symbol_count', 0)}；亏损股票数：{summary.get('negative_symbol_count', 0)}",
+        f"- Top1 正贡献占比：{_pct(summary.get('top1_positive_profit_share_pct'))}；Top3 正贡献占比：{_pct(summary.get('top3_positive_profit_share_pct'))}",
+        f"- Top1 收益贡献：{_pct(summary.get('top1_return_contribution_pct'))}；Top3 收益贡献：{_pct(summary.get('top3_return_contribution_pct'))}",
+        f"- 剔除 Top1 后近似收益：{_pct(summary.get('exclude_top1_approx_final_return_pct'))}；剔除 Top3 后近似收益：{_pct(summary.get('exclude_top3_approx_final_return_pct'))}",
+    ]
+    if top1:
+        lines.append(
+            f"- 第一贡献：{top1.get('name') or top1.get('code')}({top1.get('code')})，"
+            f"合计贡献{_money(top1.get('total_pnl_amount'))}，"
+            f"正贡献占比{_pct(top1.get('positive_profit_share_pct'))}"
+        )
+    if summary.get("concentration_warning"):
+        lines.append("- 集中度警告：收益明显依赖少数股票，必须做剔除头部贡献后的稳健性复核。")
+    lines.extend([
+        "",
+        "| 股票 | 行业/主题 | 已实现 | 期末浮盈 | 合计贡献 | 正贡献占比 |",
+        "|---|---|---:|---:|---:|---:|",
+    ])
+    for row in (summary.get("top_symbols") or [])[:10]:
+        tags = "、".join(row.get("industry_tags") or []) or "未分类"
+        lines.append(
+            f"| {row.get('name') or row.get('code')}({row.get('code')}) | {tags} | "
+            f"{_money(row.get('realized_pnl_amount'))} | "
+            f"{_money(row.get('unrealized_pnl_amount'))} | "
+            f"{_money(row.get('total_pnl_amount'))} | "
+            f"{_pct(row.get('positive_profit_share_pct'))} |"
+        )
+    industries = summary.get("industry_contribution_top") or []
+    if industries:
+        lines.extend([
+            "",
+            "| 行业/主题 | 合计贡献 | 收益贡献 | 净利润占比 |",
+            "|---|---:|---:|---:|",
+        ])
+        for row in industries[:10]:
+            lines.append(
+                f"| {row.get('industry_tag')} | {_money(row.get('total_pnl_amount'))} | "
+                f"{_pct(row.get('total_return_contribution_pct'))} | "
+                f"{_pct(row.get('net_profit_share_pct'))} |"
+            )
+    note = summary.get("note")
+    if note:
+        lines.extend(["", f"> {note}"])
+    return lines
+
+
+def _render_r_multiple_audit(result: dict) -> list[str]:
+    summary = result.get("r_multiple_summary") or {}
+    if not summary:
+        return []
+    lines = [
+        "",
+        "## R 倍数审计",
+        "",
+        f"- 计划入场盈亏比：均值{_number(summary.get('average_entry_reward_risk'), 2) or '—'}R；中位数{_number(summary.get('median_entry_reward_risk'), 2) or '—'}R",
+        f"- 实际卖出 R：均值{_number(summary.get('average_realized_r'), 2) or '—'}R；中位数{_number(summary.get('median_realized_r'), 2) or '—'}R",
+        f"- 胜率：{_pct(summary.get('sell_win_rate_pct'))}；赢家均值{_number(summary.get('average_win_r'), 2) or '—'}R；输家均值{_number(summary.get('average_loss_r'), 2) or '—'}R",
+        f"- R 盈亏比：{_number(summary.get('payoff_r'), 2) or '—'}；R Profit Factor：{_number(summary.get('profit_factor_r'), 2) or '—'}",
+        f"- 亏损超过 1R：{summary.get('loss_beyond_one_r_count', 0)} 次，占全部可审计卖出 {_pct(summary.get('loss_beyond_one_r_pct'))}",
+    ]
+    realized_to_planned = summary.get("average_realized_to_planned_rr_pct")
+    if realized_to_planned is not None:
+        lines.append(f"- 实际/计划 R 均值：{_pct(realized_to_planned)}")
+    rows = summary.get("exit_reason_r_top") or []
+    if rows:
+        lines.extend([
+            "",
+            "| 退出原因 | 次数 | 平均R | 中位R | 净R | 超过1R亏损 |",
+            "|---|---:|---:|---:|---:|---:|",
+        ])
+        for row in rows:
+            lines.append(
+                f"| {row.get('exit_reason')} | {row.get('sell_count', 0)} | "
+                f"{_number(row.get('average_realized_r'), 2) or '—'} | "
+                f"{_number(row.get('median_realized_r'), 2) or '—'} | "
+                f"{_number(row.get('net_realized_r'), 2) or '—'} | "
+                f"{row.get('loss_beyond_one_r_count', 0)} |"
+            )
+    note = summary.get("note")
+    if note:
+        lines.extend(["", f"> {note}"])
+    return lines
 
 
 def _render_relevant_entry_blocks(result: dict, *, max_rows_per_code: int = 20) -> list[str]:
@@ -317,10 +423,14 @@ def render_trade_report_markdown(result: dict) -> str:
         f"- 买入/卖出次数：{trade_summary.get('buy_count', 0)} / {trade_summary.get('sell_count', 0)}",
         f"- 已平仓净盈亏：{_money(trade_summary.get('closed_trade_net_pnl_amount'))}",
         f"- 全部交易成本：{_money(trade_summary.get('transaction_cost_amount'))}",
+    ]
+    lines.extend(_render_profit_concentration(result))
+    lines.extend(_render_r_multiple_audit(result))
+    lines.extend([
         "",
         "## 每次买卖流水（按时间顺序）",
         "",
-    ]
+    ])
     if ledger.empty:
         lines.append("本区间没有成交。")
     else:

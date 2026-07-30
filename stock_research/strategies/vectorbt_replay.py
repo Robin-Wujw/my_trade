@@ -51,6 +51,15 @@ def _corporate_action_quantity_delta(event):
     return float(value)
 
 
+def _corporate_action_cash_amount(event):
+    if str(event.get("account_mode") or "") != "corporate_action":
+        return 0.0
+    value = pd.to_numeric(event.get("corporate_action_cash_amount"), errors="coerce")
+    if pd.isna(value):
+        return 0.0
+    return float(value)
+
+
 def _replay_events(events):
     replay = []
     for event in events:
@@ -64,6 +73,11 @@ def _replay_events(events):
         if abs(quantity_delta) > 1e-12:
             row["execution_quantity"] = quantity_delta
             row["vectorbt_event_type"] = "corporate_action"
+            replay.append(row)
+            continue
+        cash_amount = _corporate_action_cash_amount(row)
+        if abs(cash_amount) > 1e-12:
+            row["vectorbt_event_type"] = "cash_dividend"
             replay.append(row)
     return replay
 
@@ -154,6 +168,8 @@ def run_vectorbt_cross_check(
         if event.get("vectorbt_event_type") == "corporate_action"
     }
     for timestamp, event in event_at.items():
+        if event.get("vectorbt_event_type") == "cash_dividend":
+            continue
         code = str(event["code"])
         quantity = float(event["execution_quantity"])
         if event.get("vectorbt_event_type") == "corporate_action":
@@ -195,8 +211,14 @@ def run_vectorbt_cross_check(
         freq="1D",
     )
 
-    value = portfolio.value().reindex(eod_rows)
-    cash = portfolio.cash().reindex(eod_rows)
+    external_cash = pd.Series(0.0, index=close.index)
+    for timestamp, event in event_at.items():
+        cash_amount = _corporate_action_cash_amount(event)
+        if abs(cash_amount) > 1e-12:
+            external_cash.loc[timestamp] += cash_amount
+    external_cash = external_cash.cumsum()
+    value = portfolio.value().reindex(eod_rows) + external_cash.reindex(eod_rows)
+    cash = portfolio.cash().reindex(eod_rows) + external_cash.reindex(eod_rows)
     vector_equity = value / float(initial_capital)
     vector_drawdown = vector_equity / vector_equity.cummax() - 1.0
     current = pd.Series(

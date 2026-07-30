@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+import math
 import re
 
 import pandas as pd
@@ -23,7 +24,19 @@ from stock_research.indicators.technical_entries import (
     apply_entry_confluence,
     infer_technical_entry,
 )
-from stock_research.strategies.ohlc_execution import fill_buy_stop, fill_limit_order, fill_sell_stop
+from stock_research.strategies.ohlc_execution import (
+    fill_buy_stop,
+    fill_limit_order,
+    fill_sell_stop,
+    locked_limit_direction,
+)
+
+
+MIN_DAILY_RIGHT_RISK_PCT = 0.01
+MIN_CLOSE_CONFIRMED_RIGHT_RISK_PCT = 0.018
+LARGE_LIQUID_TREND_PILOT_SIZE = 0.06
+PULLBACK_PILOT_BASE_SIZE = 0.08
+PULLBACK_PILOT_STRONG_SIZE = 0.10
 
 
 def _technical_rsv(price: pd.Series, low: pd.Series, high: pd.Series, period: int = 9) -> pd.Series:
@@ -271,6 +284,22 @@ def _capped_entry_size(current_exposure, planned_size, max_symbol_exposure=0.70)
     return max(0.0, min(float(planned_size), available))
 
 
+def _minimum_trimmed_entry_size(
+    planned_size,
+    *,
+    starting_new_right_campaign,
+    pullback_pilot,
+):
+    planned_size = max(0.0, float(planned_size))
+    if pullback_pilot:
+        minimum = PULLBACK_PILOT_BASE_SIZE
+    elif starting_new_right_campaign:
+        minimum = 0.20
+    else:
+        minimum = 0.10
+    return min(planned_size, minimum)
+
+
 def _affordable_buy_notional(
     cash, requested_notional, *, commission_rate, minimum_commission, slippage_rate,
 ):
@@ -334,6 +363,16 @@ def _action_share_multiplier(action):
     return None
 
 
+def _action_cash_dividend(action):
+    if action is None or not isinstance(action, dict):
+        return None
+    for key in ("cash_div", "cash_div_tax"):
+        value = pd.to_numeric(action.get(key), errors="coerce")
+        if pd.notna(value) and float(value) > 0:
+            return float(value)
+    return None
+
+
 def _normalize_corporate_actions(corporate_actions):
     lookup = {}
     if hasattr(corporate_actions, "to_dict"):
@@ -359,7 +398,8 @@ def _normalize_corporate_actions(corporate_actions):
             if action_date is None:
                 continue
             multiplier = _action_share_multiplier(row)
-            if multiplier is None:
+            cash_dividend = _action_cash_dividend(row)
+            if multiplier is None and cash_dividend is None:
                 continue
             by_date.setdefault(action_date, []).append(row)
     return lookup
@@ -375,6 +415,346 @@ def _corporate_action_quantity_multiplier(actions, factor_multiplier):
     if abs(raw_multiplier - tenth) / raw_multiplier <= 0.015:
         return tenth
     return raw_multiplier
+
+
+def _corporate_action_cash_dividend(actions):
+    total = 0.0
+    for action in actions or []:
+        cash_dividend = _action_cash_dividend(action)
+        if cash_dividend is not None:
+            total += float(cash_dividend)
+    return total
+
+
+def _corporate_action_adjusted_quantities(quantities, multiplier) -> list[int]:
+    originals = [max(0.0, float(quantity)) for quantity in quantities]
+    if not originals:
+        return []
+    multiplier = max(0.0, float(multiplier))
+    expected = [quantity * multiplier for quantity in originals]
+    adjusted = [int(math.floor(value)) for value in expected]
+    positive_count = sum(1 for quantity in originals if quantity > 0)
+    target_total = max(positive_count, int(math.floor(sum(expected) + 0.5)))
+    delta = target_total - sum(adjusted)
+    if delta > 0:
+        order = sorted(
+            range(len(expected)),
+            key=lambda index: (expected[index] - adjusted[index], originals[index]),
+            reverse=True,
+        )
+        for index in order[:delta]:
+            adjusted[index] += 1
+    elif delta < 0:
+        order = sorted(
+            range(len(expected)),
+            key=lambda index: (expected[index] - adjusted[index], originals[index]),
+        )
+        for index in order[:abs(delta)]:
+            if adjusted[index] > 1:
+                adjusted[index] -= 1
+    return adjusted
+
+
+def _split_industry_tags(value) -> list[str]:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_items = value
+    else:
+        raw_items = re.split(r"[、,，|/;；]+", str(value))
+    tags = []
+    for item in raw_items:
+        tag = str(item or "").strip()
+        if tag and tag.lower() != "nan" and tag not in tags:
+            tags.append(tag)
+    return tags
+
+
+def _finite_float(value):
+    number = pd.to_numeric(value, errors="coerce")
+    if pd.isna(number) or not math.isfinite(float(number)):
+        return None
+    return float(number)
+
+
+def _median(values):
+    clean = sorted(float(value) for value in values if value is not None)
+    if not clean:
+        return None
+    midpoint = len(clean) // 2
+    if len(clean) % 2:
+        return clean[midpoint]
+    return (clean[midpoint - 1] + clean[midpoint]) / 2.0
+
+
+def _exit_reason_bucket(reason) -> str:
+    text = str(reason or "")
+    if "hard space stop" in text:
+        return "hard_space_stop"
+    if "condition stop" in text:
+        return "condition_stop"
+    if "entry time condition" in text:
+        return "entry_time_condition"
+    if "profit_floor" in text:
+        return "profit_floor"
+    if "trailing_10" in text:
+        return "trailing_10"
+    if "maximum_profit_half" in text:
+        return "maximum_profit_half"
+    if "volume_node_break" in text:
+        return "volume_node_break"
+    if "candidate" in text or "落选" in text:
+        return "candidate_exit"
+    if "汰弱" in text:
+        return "weak_rotation"
+    return "other"
+
+
+def _portfolio_r_multiple_summary(events):
+    sells = []
+    for event in events or []:
+        quantity = _finite_float(event.get("execution_quantity"))
+        realized_r = _finite_float(event.get("realized_r_multiple"))
+        if quantity is None or quantity >= 0 or realized_r is None:
+            continue
+        sells.append(event)
+    realized_values = [_finite_float(event.get("realized_r_multiple")) for event in sells]
+    realized_values = [value for value in realized_values if value is not None]
+    wins = [value for value in realized_values if value > 0]
+    losses = [value for value in realized_values if value < 0]
+    planned_values = [
+        _finite_float(event.get("entry_reward_risk"))
+        for event in events or []
+        if (_finite_float(event.get("execution_quantity")) or 0.0) > 0
+        and _finite_float(event.get("entry_reward_risk")) is not None
+    ]
+    positive_r = sum(value for value in realized_values if value > 0)
+    negative_r = -sum(value for value in realized_values if value < 0)
+    exit_rows = []
+    by_reason = {}
+    for event in sells:
+        bucket = _exit_reason_bucket(event.get("reason"))
+        by_reason.setdefault(bucket, []).append(_finite_float(event.get("realized_r_multiple")))
+    for bucket, values in by_reason.items():
+        clean = [value for value in values if value is not None]
+        if not clean:
+            continue
+        exit_rows.append({
+            "exit_reason": bucket,
+            "sell_count": len(clean),
+            "average_realized_r": round(sum(clean) / len(clean), 3),
+            "median_realized_r": round(float(_median(clean)), 3),
+            "net_realized_r": round(sum(clean), 3),
+            "loss_beyond_one_r_count": sum(1 for value in clean if value <= -1.0),
+        })
+    exit_rows.sort(key=lambda item: item["net_realized_r"])
+    planned_to_realized = []
+    for event in sells:
+        planned = _finite_float(event.get("entry_reward_risk"))
+        realized = _finite_float(event.get("realized_r_multiple"))
+        if planned is not None and planned > 0 and realized is not None:
+            planned_to_realized.append(realized / planned * 100.0)
+    return {
+        "sell_count": len(realized_values),
+        "winning_sell_count": len(wins),
+        "losing_sell_count": len(losses),
+        "sell_win_rate_pct": round(len(wins) / len(realized_values) * 100.0, 3)
+        if realized_values else 0.0,
+        "average_realized_r": round(sum(realized_values) / len(realized_values), 3)
+        if realized_values else None,
+        "median_realized_r": (
+            round(float(_median(realized_values)), 3) if realized_values else None
+        ),
+        "average_win_r": round(sum(wins) / len(wins), 3) if wins else None,
+        "average_loss_r": round(sum(losses) / len(losses), 3) if losses else None,
+        "payoff_r": round((sum(wins) / len(wins)) / abs(sum(losses) / len(losses)), 3)
+        if wins and losses else None,
+        "profit_factor_r": round(positive_r / negative_r, 3) if negative_r > 0 else None,
+        "loss_beyond_one_r_count": sum(1 for value in losses if value <= -1.0),
+        "loss_beyond_one_r_pct": round(
+            sum(1 for value in losses if value <= -1.0) / len(realized_values) * 100.0,
+            3,
+        ) if realized_values else 0.0,
+        "average_entry_reward_risk": round(sum(planned_values) / len(planned_values), 3)
+        if planned_values else None,
+        "median_entry_reward_risk": (
+            round(float(_median(planned_values)), 3) if planned_values else None
+        ),
+        "average_realized_to_planned_rr_pct": round(
+            sum(planned_to_realized) / len(planned_to_realized),
+            3,
+        ) if planned_to_realized else None,
+        "exit_reason_r_top": exit_rows[:10],
+        "note": "R is measured from each fill's raw entry price to its initial raw stop.",
+    }
+
+
+def _portfolio_profit_concentration_summary(
+    events,
+    final_positions,
+    *,
+    initial_capital,
+    final_return_pct,
+):
+    initial_capital = float(initial_capital)
+    final_return_pct = float(final_return_pct or 0.0)
+    realized_by_code = Counter()
+    sell_count_by_code = Counter()
+    win_count_by_code = Counter()
+    names = {}
+    industry_tags_by_code = {}
+    for event in events or []:
+        code = str(event.get("code") or "").strip()
+        if not code:
+            continue
+        name = str(event.get("name") or "").strip()
+        if name:
+            names[code] = name
+        tags = _split_industry_tags(event.get("industry_tags"))
+        if tags:
+            industry_tags_by_code.setdefault(code, set()).update(tags)
+        pnl = pd.to_numeric(event.get("profit_loss_amount"), errors="coerce")
+        if pd.isna(pnl):
+            continue
+        quantity = pd.to_numeric(event.get("execution_quantity"), errors="coerce")
+        account_mode = str(event.get("account_mode") or "")
+        is_sell = pd.notna(quantity) and float(quantity) < 0
+        cash_amount = pd.to_numeric(
+            event.get("corporate_action_cash_amount"), errors="coerce",
+        )
+        is_cash_distribution = (
+            account_mode == "corporate_action"
+            and pd.notna(cash_amount)
+            and abs(float(cash_amount)) > 1e-12
+        )
+        if not is_sell and not is_cash_distribution:
+            continue
+        realized_by_code[code] += float(pnl)
+        if is_sell:
+            sell_count_by_code[code] += 1
+            if float(pnl) > 0:
+                win_count_by_code[code] += 1
+
+    unrealized_by_code = Counter()
+    market_value_by_code = Counter()
+    for position in final_positions or []:
+        code = str(position.get("code") or "").strip()
+        if not code:
+            continue
+        name = str(position.get("name") or "").strip()
+        if name:
+            names[code] = name
+        tags = _split_industry_tags(position.get("industry_tags"))
+        if tags:
+            industry_tags_by_code.setdefault(code, set()).update(tags)
+        unrealized = pd.to_numeric(position.get("unrealized_pnl_amount"), errors="coerce")
+        if pd.notna(unrealized):
+            unrealized_by_code[code] += float(unrealized)
+        market_value = pd.to_numeric(position.get("market_value"), errors="coerce")
+        if pd.notna(market_value):
+            market_value_by_code[code] += float(market_value)
+
+    codes = sorted(set(realized_by_code) | set(unrealized_by_code) | set(market_value_by_code))
+    rows = []
+    for code in codes:
+        realized_pnl = float(realized_by_code.get(code, 0.0))
+        unrealized_pnl = float(unrealized_by_code.get(code, 0.0))
+        total_pnl = realized_pnl + unrealized_pnl
+        tags = sorted(industry_tags_by_code.get(code, set()))
+        rows.append({
+            "code": code,
+            "name": names.get(code) or code,
+            "industry_tags": tags,
+            "realized_pnl_amount": round(realized_pnl, 2),
+            "unrealized_pnl_amount": round(unrealized_pnl, 2),
+            "total_pnl_amount": round(total_pnl, 2),
+            "total_return_contribution_pct": round(
+                total_pnl / initial_capital * 100.0, 3,
+            ) if initial_capital > 0 else 0.0,
+            "sell_count": int(sell_count_by_code.get(code, 0)),
+            "winning_sell_count": int(win_count_by_code.get(code, 0)),
+            "final_market_value": round(float(market_value_by_code.get(code, 0.0)), 2),
+        })
+    rows.sort(key=lambda item: item["total_pnl_amount"], reverse=True)
+
+    positive_total = sum(max(0.0, float(row["total_pnl_amount"])) for row in rows)
+    net_total = sum(float(row["total_pnl_amount"]) for row in rows)
+    for row in rows:
+        row["positive_profit_share_pct"] = (
+            round(max(0.0, float(row["total_pnl_amount"])) / positive_total * 100.0, 3)
+            if positive_total > 0 else 0.0
+        )
+        row["net_profit_share_pct"] = (
+            round(float(row["total_pnl_amount"]) / net_total * 100.0, 3)
+            if abs(net_total) > 1e-9 else 0.0
+        )
+
+    top1 = rows[:1]
+    top3 = rows[:3]
+    top5 = rows[:5]
+    top1_pnl = sum(float(row["total_pnl_amount"]) for row in top1)
+    top3_pnl = sum(float(row["total_pnl_amount"]) for row in top3)
+    top5_pnl = sum(float(row["total_pnl_amount"]) for row in top5)
+
+    industry_totals = Counter()
+    for row in rows:
+        tags = row.get("industry_tags") or ["未分类"]
+        share = float(row["total_pnl_amount"]) / max(1, len(tags))
+        for tag in tags:
+            industry_totals[tag] += share
+    industry_rows = [
+        {
+            "industry_tag": tag,
+            "total_pnl_amount": round(float(value), 2),
+            "total_return_contribution_pct": round(float(value) / initial_capital * 100.0, 3)
+            if initial_capital > 0 else 0.0,
+            "net_profit_share_pct": round(float(value) / net_total * 100.0, 3)
+            if abs(net_total) > 1e-9 else 0.0,
+        }
+        for tag, value in industry_totals.items()
+    ]
+    industry_rows.sort(key=lambda item: item["total_pnl_amount"], reverse=True)
+
+    def exclude_return(pnl):
+        if initial_capital <= 0:
+            return final_return_pct
+        return round(final_return_pct - float(pnl) / initial_capital * 100.0, 3)
+
+    top1_positive_share = (
+        max(0.0, top1_pnl) / positive_total * 100.0 if positive_total > 0 else 0.0
+    )
+    top3_positive_share = (
+        sum(max(0.0, float(row["total_pnl_amount"])) for row in top3) / positive_total * 100.0
+        if positive_total > 0 else 0.0
+    )
+    return {
+        "symbol_count": len(rows),
+        "positive_symbol_count": sum(1 for row in rows if float(row["total_pnl_amount"]) > 0),
+        "negative_symbol_count": sum(1 for row in rows if float(row["total_pnl_amount"]) < 0),
+        "net_total_pnl_amount": round(net_total, 2),
+        "positive_total_pnl_amount": round(positive_total, 2),
+        "top1_symbol": top1[0] if top1 else None,
+        "top1_positive_profit_share_pct": round(top1_positive_share, 3),
+        "top3_positive_profit_share_pct": round(top3_positive_share, 3),
+        "top1_return_contribution_pct": round(top1_pnl / initial_capital * 100.0, 3)
+        if initial_capital > 0 else 0.0,
+        "top3_return_contribution_pct": round(top3_pnl / initial_capital * 100.0, 3)
+        if initial_capital > 0 else 0.0,
+        "top5_return_contribution_pct": round(top5_pnl / initial_capital * 100.0, 3)
+        if initial_capital > 0 else 0.0,
+        "exclude_top1_approx_final_return_pct": exclude_return(top1_pnl),
+        "exclude_top3_approx_final_return_pct": exclude_return(top3_pnl),
+        "concentration_warning": bool(top1_positive_share >= 50.0 or top3_positive_share >= 80.0),
+        "concentration_warning_reason": (
+            "top1_or_top3_profit_concentration"
+            if top1_positive_share >= 50.0 or top3_positive_share >= 80.0 else ""
+        ),
+        "top_symbols": rows[:10],
+        "industry_contribution_top": industry_rows[:10],
+        "note": (
+            "exclude_topN is a contribution subtraction diagnostic, not a cash-rebalanced rerun."
+        ),
+    }
 
 
 def _effective_profit_tranches(code, quantity, configured_parts) -> int:
@@ -601,6 +981,7 @@ def _price_structure_signal(
                     "reason": f"上涨波段{ratio:.1%}拉回支撑5%区域; 共振={confluence}",
                     "known_volume_ratio": 1.0, "structure_ratio": ratio,
                     "signal_type": "uptrend_support_pullback",
+                    "support_confluence": list(structure["confluence"]),
                     "anchor_low": structure.get("uptrend_low"),
                     "anchor_high": structure.get("uptrend_high"),
                     "anchor_low_date": structure.get("uptrend_low_date"),
@@ -699,6 +1080,24 @@ def _signal_number(signal, key):
     return float(value) if pd.notna(value) else None
 
 
+def _signal_support_has_fast_ma_confluence(signal) -> bool:
+    if not signal:
+        return True
+    confluence = signal.get("support_confluence")
+    if confluence is None:
+        reason = str(signal.get("reason") or "")
+        if "共振=" not in reason:
+            return True
+        confluence_text = reason.split("共振=", 1)[1]
+        confluence = re.split(r"[,，、;；]+", confluence_text)
+    if isinstance(confluence, str):
+        items = re.split(r"[,，、;；]+", confluence)
+    else:
+        items = list(confluence)
+    fast_ma = {"MA5", "MA10", "MA20"}
+    return any(str(item).strip() in fast_ma for item in items)
+
+
 def _candidate_text(candidate, key) -> str:
     if not candidate:
         return ""
@@ -742,6 +1141,55 @@ def _compact_attack_core_profile(candidate) -> bool:
         and volume_confirm_rank is not None and volume_confirm_rank >= 60.0
         and ret60 is not None and ret60 >= 0.15
         and (drawdown_60 is None or drawdown_60 >= -0.08)
+    )
+
+
+def _large_liquid_trend_core_profile(candidate) -> bool:
+    """Broadens strong right-side candidates without relaxing structure quality."""
+    if not candidate:
+        return False
+    sources = set(str(candidate.get("candidate_source") or "").split("+"))
+    setup = _candidate_text(candidate, "right_quant_setup")
+    quality = _candidate_number(candidate, "quality_score")
+    growth = _candidate_number(candidate, "earnings_yoy")
+    market_cap = _candidate_number(candidate, "mktcap")
+    avg_amount = _candidate_number(candidate, "avg_amount_20")
+    trade_basis = _candidate_number(candidate, "trade_basis_score")
+    right_quant = _candidate_number(candidate, "right_quant_score")
+    ret20 = _candidate_number(candidate, "return_20d")
+    ret60 = _candidate_number(candidate, "return_60d")
+    drawdown_60 = _candidate_number(candidate, "drawdown_60")
+    alpha_rank = _candidate_first_number(candidate, "quant_alpha_rank", "alpha_rank")
+    trend_stability_rank = _candidate_first_number(
+        candidate, "quant_trend_stability_rank", "trend_stability_rank",
+    )
+    structure_rank = _candidate_first_number(
+        candidate, "quant_structure_rank", "right_structure_rank", "structure_rank",
+    )
+    volume_confirm_rank = _candidate_first_number(
+        candidate,
+        "quant_volume_confirm_rank", "right_volume_node_rank", "volume_confirm_rank",
+    )
+    low_risk_rank = _candidate_first_number(
+        candidate, "quant_low_risk_rank", "right_risk_rank", "low_risk_rank",
+    )
+    return bool(
+        sources & {"factor_quant", "quant_right"}
+        and setup in {"强趋势", "large_liquid_trend_core"}
+        and quality is not None and quality >= 75.0
+        and growth is not None and growth >= 0.20
+        and market_cap is not None and market_cap >= 3000.0
+        and avg_amount is not None and avg_amount >= 3_000_000_000.0
+        and trade_basis is not None and trade_basis >= 6.0
+        and right_quant is not None and right_quant >= 85.0
+        and ret20 is not None and 0.0 <= ret20 <= 0.40
+        and ret60 is not None and ret60 >= 0.25
+        and drawdown_60 is not None and drawdown_60 >= -0.16
+        and (alpha_rank is None or alpha_rank >= 55.0)
+        and (trend_stability_rank is None or trend_stability_rank >= 70.0)
+        and (structure_rank is None or structure_rank >= 35.0)
+        and (volume_confirm_rank is None or volume_confirm_rank >= 45.0)
+        and (low_risk_rank is None or low_risk_rank >= 25.0)
     )
 
 
@@ -830,7 +1278,9 @@ def _semantic_right_entry_gate(
     ret20 = _candidate_number(candidate, "return_20d")
     ret60 = _candidate_number(candidate, "return_60d")
     avg_amount = _candidate_number(candidate, "avg_amount_20")
-    if trade_basis is not None and trade_basis < 6.5:
+    large_liquid_trend_core = _large_liquid_trend_core_profile(candidate)
+    trade_basis_floor = 6.0 if large_liquid_trend_core else 6.5
+    if trade_basis is not None and trade_basis < trade_basis_floor:
         return False, enriched, "trade_basis_too_weak"
     liquidity_floor = 500_000_000.0
     liquidity_profile = "standard_500m"
@@ -838,6 +1288,9 @@ def _semantic_right_entry_gate(
     if compact_attack_liquidity_ok:
         liquidity_floor = 450_000_000.0
         liquidity_profile = "compact_attack_core_450m"
+    if large_liquid_trend_core:
+        liquidity_floor = 3_000_000_000.0
+        liquidity_profile = "large_liquid_trend_core_3b"
     if avg_amount is not None and avg_amount < liquidity_floor:
         enriched.update({
             "semantic_entry_ok": False,
@@ -859,6 +1312,27 @@ def _semantic_right_entry_gate(
         return False, enriched, "weak_relative_strength"
 
     signal_type = str(signal.get("signal_type") or "")
+    technical_alignment = _candidate_text(candidate, "technical_alignment")
+    if (
+        signal_type == "uptrend_support_pullback"
+        and large_liquid_trend_core
+        and technical_alignment
+        and technical_alignment != "trade_ready"
+    ):
+        enriched.update({
+            "semantic_entry_ok": False,
+            "entry_gate_reason": "large_liquid_trend_watch_only",
+        })
+        return False, enriched, "large_liquid_trend_watch_only"
+    if (
+        signal_type == "uptrend_support_pullback"
+        and not _signal_support_has_fast_ma_confluence(signal)
+    ):
+        enriched.update({
+            "semantic_entry_ok": False,
+            "entry_gate_reason": "support_pullback_without_fast_ma_confluence",
+        })
+        return False, enriched, "support_pullback_without_fast_ma_confluence"
     volume_ratio = float(signal.get("known_volume_ratio") or 0.0)
     breakout_types = {
         "uptrend_50_reclaim", "pullback_50_breakout", "gap_long_ma_breakout",
@@ -874,6 +1348,25 @@ def _semantic_right_entry_gate(
 
     risk_amount = entry_price - stop
     risk_pct = risk_amount / entry_price
+    if risk_pct < MIN_DAILY_RIGHT_RISK_PCT:
+        enriched.update({
+            "semantic_entry_ok": False,
+            "entry_risk_pct": round(risk_pct * 100, 3),
+            "entry_minimum_risk_pct": round(MIN_DAILY_RIGHT_RISK_PCT * 100, 3),
+            "entry_gate_reason": "risk_pct_too_tight",
+        })
+        return False, enriched, "risk_pct_too_tight"
+    if signal.get("order_type") == "close" and risk_pct < MIN_CLOSE_CONFIRMED_RIGHT_RISK_PCT:
+        enriched.update({
+            "semantic_entry_ok": False,
+            "entry_risk_pct": round(risk_pct * 100, 3),
+            "entry_minimum_close_confirmed_risk_pct": round(
+                MIN_CLOSE_CONFIRMED_RIGHT_RISK_PCT * 100,
+                3,
+            ),
+            "entry_gate_reason": "close_confirmed_risk_pct_too_tight",
+        })
+        return False, enriched, "close_confirmed_risk_pct_too_tight"
     risk_limit = 0.065 if signal_type == "uptrend_support_pullback" else 0.10
     if int(current_down_streak or 0) >= 3:
         risk_limit = min(risk_limit, 0.07)
@@ -890,6 +1383,8 @@ def _semantic_right_entry_gate(
     )
     reward_risk = (target - entry_price) / risk_amount if risk_amount > 0 else 0.0
     required_rr = 3.0 if signal_type == "uptrend_support_pullback" else 2.5
+    if signal_type == "uptrend_support_pullback" and large_liquid_trend_core:
+        required_rr = 3.5
     if int(current_down_streak or 0) >= 3:
         required_rr = max(required_rr, 3.0)
     if reward_risk < required_rr:
@@ -1038,6 +1533,13 @@ def run_portfolio_backtest(
                 item[column] = value
         return item
 
+    def close_proxy_sell_status(row, previous_close, code):
+        if locked_limit_direction(
+            execution_bar(row), previous_close, code, is_st=is_st(code),
+        ) == "down":
+            return "locked_limit_down"
+        return "close_proxy"
+
     def qfq_to_raw_price(row, price):
         factor = pd.to_numeric(row.get("qfq_to_raw_factor"), errors="coerce")
         factor = 1.0 if pd.isna(factor) or float(factor) <= 0 else float(factor)
@@ -1050,6 +1552,61 @@ def run_portfolio_backtest(
 
     def candidate_raw_price_to_signal(row, price):
         return raw_to_qfq_price(row, price)
+
+    def right_entry_risk_metadata(row, signal, entry_raw_price, quantity=None):
+        stop = pd.to_numeric(signal.get("stop"), errors="coerce")
+        if pd.isna(stop):
+            return {}
+        stop_raw = qfq_to_raw_price(row, float(stop))
+        risk_per_share = float(entry_raw_price) - float(stop_raw)
+        if risk_per_share <= 0:
+            return {}
+        target = pd.to_numeric(signal.get("entry_target_price"), errors="coerce")
+        target_raw = None
+        reward_per_share = None
+        if pd.notna(target):
+            target_raw = qfq_to_raw_price(row, float(target))
+            reward_per_share = float(target_raw) - float(entry_raw_price)
+        metadata = {
+            "initial_stop_raw_price": round(float(stop_raw), 3),
+            "initial_risk_per_share_raw": round(float(risk_per_share), 6),
+            "initial_entry_raw_price": round(float(entry_raw_price), 3),
+            "entry_reward_risk": signal.get("entry_reward_risk"),
+            "entry_risk_pct": signal.get("entry_risk_pct"),
+        }
+        if target_raw is not None:
+            metadata["initial_target_raw_price"] = round(float(target_raw), 3)
+        if reward_per_share is not None:
+            metadata["initial_reward_per_share_raw"] = round(float(reward_per_share), 6)
+            metadata["planned_reward_r_multiple"] = round(
+                float(reward_per_share) / float(risk_per_share),
+                3,
+            )
+        if quantity is not None:
+            metadata["initial_risk_amount"] = round(
+                abs(float(quantity)) * float(risk_per_share),
+                2,
+            )
+        return metadata
+
+    def lot_risk_metadata(lot, quantity=None):
+        risk_per_share = _finite_float(lot.get("initial_risk_per_share_raw"))
+        if risk_per_share is None or risk_per_share <= 0:
+            return {}
+        sold_quantity = abs(float(quantity if quantity is not None else lot.get("quantity") or 0.0))
+        metadata = {
+            "initial_risk_per_share_raw": round(risk_per_share, 6),
+            "initial_risk_amount": round(sold_quantity * risk_per_share, 2),
+            "initial_stop_raw_price": lot.get("initial_stop_raw_price"),
+            "initial_entry_raw_price": lot.get("initial_entry_raw_price"),
+            "initial_target_raw_price": lot.get("initial_target_raw_price"),
+            "initial_reward_per_share_raw": lot.get("initial_reward_per_share_raw"),
+            "planned_reward_r_multiple": lot.get("planned_reward_r_multiple"),
+            "entry_reward_risk": lot.get("entry_reward_risk"),
+            "entry_risk_pct": lot.get("entry_risk_pct"),
+            "r_multiple_source": "single_lot",
+        }
+        return {key: value for key, value in metadata.items() if value is not None}
 
     def lot_signal_cost(lot):
         return float(lot.get("signal_cost", lot.get("cost")))
@@ -1151,6 +1708,17 @@ def run_portfolio_backtest(
     configured_left_grid_max_exposure = min(
         0.30, max(0.0, float(left_grid_max_exposure)),
     )
+    if configured_left_grid_unit > 0 and configured_left_grid_max_exposure > 0:
+        configured_left_initial_slots = max(
+            1,
+            min(
+                5,
+                int(math.ceil(configured_left_grid_max_exposure / configured_left_grid_unit - 1e-9)),
+            ),
+        )
+    else:
+        configured_left_initial_slots = 0
+    configured_left_core_slots = min(3, configured_left_initial_slots)
     for state in states.values():
         state.right_parts = configured_profit_tranches
     concentration_blocks = []
@@ -1527,36 +2095,49 @@ def run_portfolio_backtest(
         ) or (
             pd.notna(trade_basis) and float(trade_basis) >= 7.5
         )
+        large_liquid_trend_core = _large_liquid_trend_core_profile(candidate)
         base_ok = (
-            known_volume_ratio >= 0.90
-            and support_distance <= 0.075
-        )
-        if base_ok and pd.notna(trade_basis):
-            base_ok = float(trade_basis) >= 6.5
-        if base_ok and pd.notna(return_20):
-            base_ok = -0.05 <= float(return_20) <= 0.55
-        if base_ok and pd.notna(return_60):
-            base_ok = float(return_60) >= 0.0
-        if base_ok and pd.notna(drawdown_60):
-            base_ok = float(drawdown_60) >= -0.25
-        if base_ok and pd.notna(avg_amount_20):
-            base_ok = float(avg_amount_20) >= 500_000_000.0
-        if not base_ok:
-            return 0.0
-        strong_ok = (
             strong_quant_profile
             and known_volume_ratio >= 1.0
             and support_distance <= 0.055
         )
+        if base_ok and pd.notna(trade_basis):
+            base_ok = float(trade_basis) >= 7.0
+        if base_ok and pd.notna(return_20):
+            base_ok = 0.0 <= float(return_20) <= 0.45
+        if base_ok and pd.notna(return_60):
+            base_ok = float(return_60) >= 0.10
+        if base_ok and pd.notna(drawdown_60):
+            base_ok = float(drawdown_60) >= -0.18
+        if base_ok and pd.notna(avg_amount_20):
+            base_ok = float(avg_amount_20) >= 800_000_000.0
+        large_liquid_ok = (
+            large_liquid_trend_core
+            and known_volume_ratio >= 1.0
+            and support_distance <= 0.055
+        )
+        if large_liquid_ok and pd.notna(return_20):
+            large_liquid_ok = 0.0 <= float(return_20) <= 0.40
+        if large_liquid_ok and pd.notna(return_60):
+            large_liquid_ok = float(return_60) >= 0.25
+        if large_liquid_ok and pd.notna(drawdown_60):
+            large_liquid_ok = float(drawdown_60) >= -0.16
+        if not base_ok:
+            return LARGE_LIQUID_TREND_PILOT_SIZE if large_liquid_ok else 0.0
+        strong_ok = (
+            strong_quant_profile
+            and known_volume_ratio >= 1.10
+            and support_distance <= 0.045
+        )
         if strong_ok and pd.notna(return_20):
             strong_ok = 0.0 <= float(return_20) <= 0.45
         if strong_ok and pd.notna(return_60):
-            strong_ok = float(return_60) >= 0.10
+            strong_ok = float(return_60) >= 0.20
         if strong_ok and pd.notna(drawdown_60):
-            strong_ok = float(drawdown_60) >= -0.18
+            strong_ok = float(drawdown_60) >= -0.12
         if strong_ok and pd.notna(avg_amount_20):
-            strong_ok = float(avg_amount_20) >= 800_000_000.0
-        return 0.20 if strong_ok else 0.15
+            strong_ok = float(avg_amount_20) >= 1_500_000_000.0
+        return PULLBACK_PILOT_STRONG_SIZE if strong_ok else PULLBACK_PILOT_BASE_SIZE
 
     def leading_pullback_pilot_starter(candidate, signal):
         return leading_pullback_pilot_size(candidate, signal) > 0.0
@@ -1623,6 +2204,7 @@ def run_portfolio_backtest(
         cost_basis=None, execution_quantity=None, entry_fee_cash=0.0, **metadata,
     ):
         nonlocal realized
+        metadata = dict(metadata)
         realized += pnl
         execution_basis = (
             float(price) if float(size) > 0
@@ -1670,6 +2252,39 @@ def run_portfolio_backtest(
             profit_loss_amount = None
             profit_loss_pct = None
             cash_change_amount = 0.0
+        risk_per_share = _finite_float(metadata.get("initial_risk_per_share_raw"))
+        initial_risk_amount = _finite_float(metadata.get("initial_risk_amount"))
+        if (
+            initial_risk_amount is None
+            and risk_per_share is not None
+            and risk_per_share > 0
+            and abs(execution_quantity) > 0
+        ):
+            initial_risk_amount = abs(execution_quantity) * risk_per_share
+        if initial_risk_amount is not None and initial_risk_amount > 0:
+            metadata["initial_risk_amount"] = round(initial_risk_amount, 2)
+            if execution_quantity < 0:
+                if profit_loss_amount is not None:
+                    metadata["realized_r_multiple"] = round(
+                        float(profit_loss_amount) / initial_risk_amount,
+                        3,
+                    )
+                if gross_pnl_amount is not None:
+                    metadata["gross_r_multiple"] = round(
+                        float(gross_pnl_amount) / initial_risk_amount,
+                        3,
+                    )
+                total_fees = fee_components["transaction_cost_amount"] + allocated_entry_fee
+                metadata["transaction_cost_r_multiple"] = round(
+                    total_fees / initial_risk_amount,
+                    3,
+                )
+                stop_raw = _finite_float(metadata.get("initial_stop_raw_price"))
+                if stop_raw is not None and risk_per_share is not None and risk_per_share > 0:
+                    metadata["exit_vs_initial_stop_r"] = round(
+                        (float(price) - stop_raw) / risk_per_share,
+                        3,
+                    )
         events.append({
             "date": date.strftime("%Y-%m-%d"), "code": code,
             "name": candidate_names.get(code) or str(plans.get(code, {}).get("name") or code),
@@ -1750,17 +2365,40 @@ def run_portfolio_backtest(
         return size, pnl
 
     def apply_corporate_action_adjustment(code, date):
+        nonlocal cash_balance
         state = states[code]
         if not state.left and not state.right:
             return
         data = frames[code]
-        if "raw_to_qfq_factor" not in data:
-            return
         indexes = data.index[data["date"].dt.normalize() == date]
         if indexes.empty:
             return
         index = int(indexes[0])
         if index <= 0:
+            return
+        actions_for_date = corporate_action_lookup.get(code, {}).get(date)
+        held_lots = list(state.left) + list(state.right)
+        adjusted_quantity_before = sum(float(lot["quantity"]) for lot in held_lots)
+        cash_dividend_per_share = _corporate_action_cash_dividend(actions_for_date)
+        if cash_dividend_per_share > 0 and adjusted_quantity_before > 0:
+            dividend_cash = adjusted_quantity_before * cash_dividend_per_share
+            cash_balance += dividend_cash
+            add_event(
+                date, code, "现金分红到账", raw_price(data.iloc[index], "close"), 0.0,
+                (
+                    f"每股现金分红={cash_dividend_per_share:.6f}; "
+                    f"除息前持仓={adjusted_quantity_before:.6f}; "
+                    f"到账现金={dividend_cash:.2f}"
+                ),
+                dividend_cash / float(initial_capital),
+                corporate_action_cash_dividend_per_share=float(cash_dividend_per_share),
+                corporate_action_cash_amount=float(dividend_cash),
+                corporate_action_quantity_before=float(adjusted_quantity_before),
+                cash_change_amount=round(float(dividend_cash), 2),
+                profit_loss_amount=round(float(dividend_cash), 2),
+                account_mode="corporate_action",
+            )
+        if "raw_to_qfq_factor" not in data:
             return
         previous_factor = pd.to_numeric(
             data.iloc[index - 1].get("raw_to_qfq_factor"), errors="coerce",
@@ -1807,25 +2445,24 @@ def run_portfolio_backtest(
         if quantity_multiplier <= 0:
             return
 
-        adjusted_quantity_before = sum(
-            float(lot["quantity"]) for lot in state.left + state.right
+        adjusted_quantities = _corporate_action_adjusted_quantities(
+            [lot["quantity"] for lot in held_lots],
+            quantity_multiplier,
         )
 
-        def adjust_lot(lot):
+        def adjust_lot(lot, adjusted_quantity):
             original_quantity = float(lot["quantity"])
             if original_quantity <= 0:
                 return 0.0
-            adjusted_quantity = max(1, int(round(original_quantity * quantity_multiplier)))
+            adjusted_quantity = max(1, int(adjusted_quantity))
             effective_multiplier = adjusted_quantity / original_quantity
             lot["quantity"] = float(adjusted_quantity)
             lot["cost"] = float(lot["cost"]) / multiplier
             lot["size"] = float(lot["size"]) * effective_multiplier / multiplier
             return effective_multiplier
 
-        for lot in state.left:
-            effective_multiplier = adjust_lot(lot)
-        for lot in state.right:
-            effective_multiplier = adjust_lot(lot)
+        for lot, adjusted_quantity in zip(held_lots, adjusted_quantities):
+            adjust_lot(lot, adjusted_quantity)
         adjustment_reason = (
             f"不复权成交价会计调整; 价格倍率={multiplier:.6f}; "
             f"股数倍率={quantity_multiplier:.6f}; "
@@ -1855,6 +2492,9 @@ def run_portfolio_backtest(
         sold_quantity = 0.0
         sold_cost_value = 0.0
         sold_entry_fee = 0.0
+        sold_risk_amount = 0.0
+        sold_reward_amount = 0.0
+        sold_entry_risk_pct_amount = 0.0
         for lot in list(lots):
             if remaining <= 0:
                 break
@@ -1866,6 +2506,15 @@ def run_portfolio_backtest(
             sold_quantity += take
             sold_cost_value += take * float(lot["cost"])
             sold_entry_fee += float(lot.get("entry_fee_cash") or 0.0) * ratio
+            risk_per_share = _finite_float(lot.get("initial_risk_per_share_raw"))
+            if risk_per_share is not None and risk_per_share > 0:
+                sold_risk_amount += take * risk_per_share
+                reward_per_share = _finite_float(lot.get("initial_reward_per_share_raw"))
+                if reward_per_share is not None:
+                    sold_reward_amount += take * reward_per_share
+                entry_risk_pct = _finite_float(lot.get("entry_risk_pct"))
+                if entry_risk_pct is not None:
+                    sold_entry_risk_pct_amount += take * entry_risk_pct
             lot["quantity"] = original_quantity - take
             lot["size"] *= 1.0 - ratio
             lot["entry_fee_cash"] = float(lot.get("entry_fee_cash") or 0.0) * (1.0 - ratio)
@@ -1873,7 +2522,29 @@ def run_portfolio_backtest(
             if lot["quantity"] <= 1e-9:
                 state.right.remove(lot)
         sold_cost = sold_cost_value / sold_quantity if sold_quantity else 0.0
-        return sold_quantity, sold_cost, sold_entry_fee
+        risk_metadata = {}
+        if sold_quantity > 0 and sold_risk_amount > 0:
+            risk_metadata = {
+                "initial_risk_amount": round(sold_risk_amount, 2),
+                "initial_risk_per_share_raw": round(sold_risk_amount / sold_quantity, 6),
+                "r_multiple_source": "merged_weighted",
+            }
+            if sold_reward_amount:
+                risk_metadata["initial_reward_per_share_raw"] = round(
+                    sold_reward_amount / sold_quantity,
+                    6,
+                )
+                risk_metadata["planned_reward_r_multiple"] = round(
+                    sold_reward_amount / sold_risk_amount,
+                    3,
+                )
+                risk_metadata["entry_reward_risk"] = risk_metadata["planned_reward_r_multiple"]
+            if sold_entry_risk_pct_amount:
+                risk_metadata["entry_risk_pct"] = round(
+                    sold_entry_risk_pct_amount / sold_quantity,
+                    3,
+                )
+        return sold_quantity, sold_cost, sold_entry_fee, risk_metadata
 
     def rotate_weak_right_symbols_for_entry(
         date,
@@ -1988,6 +2659,7 @@ def run_portfolio_backtest(
                     replacement_name=candidate.get("name") if candidate else None,
                     replacement_reward_risk=signal.get("entry_reward_risk"),
                     replacement_risk_pct=signal.get("entry_risk_pct"),
+                    **lot_risk_metadata(lot, quantity),
                 )
                 needed -= float(lot["size"])
             held_state.pending_lot_exits.clear()
@@ -2001,7 +2673,7 @@ def run_portfolio_backtest(
         return rotated
 
     def left_grid_plan(value_line):
-        """Ten-unit value grid: five initial units and five lower units."""
+        """Value grid: capped initial units at value line, then lower units."""
         anchor = float(value_line)
         plan = []
         for slot in range(10):
@@ -2019,9 +2691,12 @@ def run_portfolio_backtest(
                 "slot": slot,
                 "buy_price": buy_price,
                 "sell_price": sell_price,
-                "core": slot < 3,
+                "core": slot < configured_left_core_slots,
             })
         return plan
+
+    def left_initial_slot_set():
+        return set(range(configured_left_initial_slots))
 
     def promote_left_grid_to_right_campaign(code, state, row, signal, first_right_batch_id):
         if not state.left:
@@ -2203,6 +2878,7 @@ def run_portfolio_backtest(
                     f"{lot['batch']}; {reason}; {fill['status']}", pnl,
                     cost_basis=lot["cost"], execution_quantity=-quantity,
                     entry_fee_cash=entry_fee_cash,
+                    **lot_risk_metadata(lot, quantity),
                 )
                 exited_today.add(code)
 
@@ -2225,7 +2901,7 @@ def run_portfolio_backtest(
                 quantity = float(_board_lot_quantity(code, desired_quantity))
                 if quantity <= 0:
                     continue
-                quantity, sold_cost, entry_fee_cash = consume_merged_lots(
+                quantity, sold_cost, entry_fee_cash, risk_metadata = consume_merged_lots(
                     code, state, merged, quantity,
                 )
                 size, pnl = execute_sell(quantity, sell, sold_cost)
@@ -2244,6 +2920,7 @@ def run_portfolio_backtest(
                     f"止盈条件={','.join(executed_ids)}; 收盘确认; {fill['status']}", pnl,
                     cost_basis=sold_cost, execution_quantity=-quantity,
                     entry_fee_cash=entry_fee_cash,
+                    **risk_metadata,
                 )
                 exited_today.add(code)
             if not state.right:
@@ -2338,6 +3015,7 @@ def run_portfolio_backtest(
                     f"{lot['batch']}; 开盘未站上{level:.3f}; {fill['status']}", pnl,
                     cost_basis=lot["cost"], execution_quantity=-quantity,
                     entry_fee_cash=entry_fee_cash,
+                    **lot_risk_metadata(lot, quantity),
                 )
             if not state.right:
                 state.right_parts = configured_profit_tranches
@@ -2373,6 +3051,7 @@ def run_portfolio_backtest(
                     f"{lot['batch']}; 右侧总仓低于10%; 次日开盘退出", pnl,
                     cost_basis=lot["cost"], execution_quantity=-quantity,
                     entry_fee_cash=entry_fee_cash,
+                    **lot_risk_metadata(lot, quantity),
                 )
             state.right_parts = configured_profit_tranches
             state.right_sold.clear()
@@ -2408,6 +3087,7 @@ def run_portfolio_backtest(
                     f"{lot['batch']}; 低效率仓次日开盘退出", pnl,
                     cost_basis=lot["cost"], execution_quantity=-quantity,
                     entry_fee_cash=entry_fee_cash,
+                    **lot_risk_metadata(lot, quantity),
                 )
             state.right_parts = configured_profit_tranches
             state.right_sold.clear()
@@ -2631,11 +3311,14 @@ def run_portfolio_backtest(
                 slot = int(planned["slot"])
                 if slot in held_slots or slot in sold_slots:
                     continue
-                # The first order is five equal units at the value line.  The
-                # remaining units are pre-placed at successively lower grids.
-                if not state.left_grid_started and slot >= 5 and not {
-                    0, 1, 2, 3, 4,
-                }.issubset(held_slots):
+                # Initial slots are capped by left_grid_max_exposure.  Lower
+                # resting orders are only active once the capped initial grid
+                # has actually started.
+                if (
+                    not state.left_grid_started
+                    and slot >= 5
+                    and not left_initial_slot_set().issubset(held_slots)
+                ):
                     continue
                 current_left = sum(float(lot["size"]) for lot in state.left)
                 if (
@@ -2692,7 +3375,7 @@ def run_portfolio_backtest(
                     state.left_candidate_profile = dict(candidate)
                 state.left.append(lot)
                 held_slots.add(slot)
-                if {0, 1, 2, 3, 4}.issubset(held_slots):
+                if left_initial_slot_set().issubset(held_slots):
                     state.left_grid_started = True
                 add_event(
                     date, code, "左侧网格买入", fill["price"], size,
@@ -2768,6 +3451,7 @@ def run_portfolio_backtest(
                             -size, f"{lot['batch']}; {execution_reason}", pnl,
                             cost_basis=lot["cost"], execution_quantity=-quantity,
                             entry_fee_cash=entry_fee_cash,
+                            **lot_risk_metadata(lot, quantity),
                         )
                     elif risk.get("condition_stop_triggered") or risk.get("entry_time_stop"):
                         reason = "condition stop" if risk.get("condition_stop_triggered") else "entry time condition"
@@ -2778,6 +3462,15 @@ def run_portfolio_backtest(
                                     f"{reason}; 14:55/close proxy",
                                 )
                                 exited_today.add(code)
+                                continue
+                            previous_close_raw = (
+                                raw_price(data.iloc[index - 1], "close") if index > 0 else None
+                            )
+                            sell_status = close_proxy_sell_status(
+                                row, previous_close_raw, code,
+                            )
+                            if sell_status == "locked_limit_down":
+                                state.pending_lot_exits.setdefault(lot["batch"], reason)
                                 continue
                             quantity = float(lot["quantity"])
                             sell = raw_price(row, "close")
@@ -2790,6 +3483,7 @@ def run_portfolio_backtest(
                                 f"{lot['batch']}; {reason}; 14:55/close proxy", pnl,
                                 cost_basis=lot["cost"], execution_quantity=-quantity,
                                 entry_fee_cash=entry_fee_cash,
+                                **lot_risk_metadata(lot, quantity),
                             )
                             exited_today.add(code)
                         else:
@@ -2837,13 +3531,27 @@ def run_portfolio_backtest(
                                 parts = len(executed_ids)
                                 if not parts:
                                     continue
+                                previous_close_raw = (
+                                    raw_price(data.iloc[index - 1], "close") if index > 0 else None
+                                )
+                                sell_status = close_proxy_sell_status(
+                                    row, previous_close_raw, code,
+                                )
+                                if sell_status == "locked_limit_down":
+                                    state.pending_profit_ids.update(executed_ids)
+                                    state.pending_tail_capacity_free = _qualifies_profit_tail(
+                                        profit,
+                                        state.right_parts - parts,
+                                        configured_profit_tail_min_return,
+                                    )
+                                    continue
                                 sell = raw_price(row, "close")
                                 planned_ratio = parts / state.right_parts
                                 desired_quantity = merged_quantity * planned_ratio
                                 quantity = float(_board_lot_quantity(code, desired_quantity))
                                 if quantity <= 0:
                                     continue
-                                quantity, sold_cost, entry_fee_cash = consume_merged_lots(
+                                quantity, sold_cost, entry_fee_cash, risk_metadata = consume_merged_lots(
                                     code, state, merged, quantity,
                                 )
                                 size, pnl = execute_sell(quantity, sell, sold_cost)
@@ -2863,6 +3571,7 @@ def run_portfolio_backtest(
                                     f"止盈条件={','.join(executed_ids)}; 14:55/close proxy", pnl,
                                     cost_basis=sold_cost, execution_quantity=-quantity,
                                     entry_fee_cash=entry_fee_cash,
+                                    **risk_metadata,
                                 )
                                 if state.right_parts == 0:
                                     for lot in list(state.right):
@@ -3171,7 +3880,11 @@ def run_portfolio_backtest(
                         )
                 if gross_exposure() + size > 1.0 + 1e-9:
                     available_size = max(0.0, 1.0 - gross_exposure())
-                    minimum_trimmed_size = 0.20 if starting_new_right_campaign else 0.10
+                    minimum_trimmed_size = _minimum_trimmed_entry_size(
+                        size,
+                        starting_new_right_campaign=starting_new_right_campaign,
+                        pullback_pilot=pullback_pilot,
+                    )
                     if available_size + 1e-9 < minimum_trimmed_size:
                         record_entry_block(date, code, candidate, signal, "gross_exposure_cap")
                         continue
@@ -3237,7 +3950,13 @@ def run_portfolio_backtest(
                     )
                 batch = f"R{next_batch_id}"
                 next_batch_id += 1
-                states[code].right.append({
+                risk_metadata = right_entry_risk_metadata(
+                    row,
+                    signal,
+                    float(fill["price"]),
+                    quantity,
+                )
+                right_lot = {
                     "cost": float(fill["price"]), "date": row["date"],
                     "signal_cost": raw_to_qfq_price(row, float(fill["price"])),
                     "stop": float(signal["stop"]), "size": size,
@@ -3258,7 +3977,9 @@ def run_portfolio_backtest(
                             and float(row["close"]) < float(signal["trigger"])
                         )
                     ),
-                })
+                    **risk_metadata,
+                }
+                states[code].right.append(right_lot)
                 if starting_new_right_campaign:
                     states[code].right_parts = _effective_profit_tranches(
                         code,
@@ -3288,10 +4009,12 @@ def run_portfolio_backtest(
                         "anchor_high_date", "anchor_pullback_low_date",
                         "signal_type", "gap_up",
                         "entry_evidence_score", "entry_evidence",
+                        "support_confluence",
                         "semantic_entry_ok", "semantic_entry_setup",
                         "entry_gate_reason", "entry_risk_pct",
                         "entry_reward_risk", "entry_target_price",
-                        "entry_target_basis",
+                        "entry_target_basis", "entry_liquidity_floor",
+                        "entry_liquidity_profile",
                         "volume_node_date", "volume_node_confirmed_on",
                         "valid_volume_node_count",
                     )
@@ -3309,6 +4032,7 @@ def run_portfolio_backtest(
                 structure_metadata["industry_tags"] = "、".join(
                     sorted(candidate_industry_tags(candidate))
                 )
+                buy_metadata = {**risk_metadata, **structure_metadata}
                 add_event(
                     date, code, "右侧买入", fill["price"], size,
                     f"{batch}; {entry_kind}; {signal['reason']}; {fill['status']}",
@@ -3327,7 +4051,7 @@ def run_portfolio_backtest(
                     ),
                     technical_alignment=candidate.get("technical_alignment"),
                     ima_web_validation=candidate.get("ima_web_validation"),
-                    **structure_metadata,
+                    **buy_metadata,
                 )
 
         unrealized = 0.0
@@ -3429,9 +4153,15 @@ def run_portfolio_backtest(
         invested_amount = total_value + left_entry_fees + right_entry_fees
         market_value = None if close is None else total_quantity * close
         unrealized_pnl_amount = None if market_value is None else market_value - invested_amount
+        position_industry_tags = sorted({
+            tag
+            for lot in state.left + state.right
+            for tag in _split_industry_tags(lot.get("industry_tags"))
+        })
         final_position_details.append({
             "code": code,
             "name": candidate_names.get(code) or str(plans.get(code, {}).get("name") or code),
+            "industry_tags": position_industry_tags,
             "close": close,
             "position_pct": round((left_size + right_size) * 100, 2),
             "position_pct_basis": "initial_capital_cost_exposure",
@@ -3584,6 +4314,14 @@ def run_portfolio_backtest(
             right_buy_signal_type_counts.get("pullback_50_breakout", 0)
         ),
     }
+    final_return_pct = round((final_equity - 1) * 100, 3)
+    profit_concentration_summary = _portfolio_profit_concentration_summary(
+        events,
+        final_position_details,
+        initial_capital=initial_capital,
+        final_return_pct=final_return_pct,
+    )
+    r_multiple_summary = _portfolio_r_multiple_summary(events)
     return {
         "requested_start": requested.strftime("%Y-%m-%d"),
         "actual_start": start.strftime("%Y-%m-%d"),
@@ -3595,6 +4333,8 @@ def run_portfolio_backtest(
         "trade_ledger": trade_ledger,
         "trade_summary": trade_summary,
         "trade_mix_summary": trade_mix_summary,
+        "profit_concentration_summary": profit_concentration_summary,
+        "r_multiple_summary": r_multiple_summary,
         "equity_curve": equity_curve,
         "event_count": len(events),
         "cash_limited_order_count": sum(
@@ -3617,6 +4357,8 @@ def run_portfolio_backtest(
         "left_grid_max_exposure_pct": round(
             configured_left_grid_max_exposure * 100, 2,
         ),
+        "left_grid_initial_slots": configured_left_initial_slots,
+        "left_grid_core_slots": configured_left_core_slots,
         "maximum_total_held_symbols": max(
             (row["total_held_symbol_count"] for row in equity_curve), default=0,
         ),
@@ -3648,7 +4390,7 @@ def run_portfolio_backtest(
         "right_buy_signal_type_counts": dict(right_buy_signal_type_counts),
         "realized_return_pct": round(realized * 100, 3),
         "unrealized_return_pct": round((final_equity - 1 - realized) * 100, 3),
-        "final_return_pct": round((final_equity - 1) * 100, 3),
+        "final_return_pct": final_return_pct,
         "maximum_drawdown_pct": round(maximum_drawdown * 100, 3),
         "maximum_gross_exposure_pct": round(
             max((row["gross_exposure_pct"] for row in equity_curve), default=0.0), 2,
