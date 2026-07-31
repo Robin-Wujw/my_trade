@@ -1468,7 +1468,8 @@ def test_left_to_right_switch_without_current_candidate_only_manages_existing_le
                 "code": "A", "candidate_source": "value_model",
                 "value_line": 100.0, "industry": "汽车电子电气系统", "mktcap": 150,
                 "quality_score": 90, "earnings_yoy": 0.30, "price_to_value": 1.0,
-                "trade_basis_score": 8, "leadership_score": 18,
+                "trade_basis_score": 3, "leadership_score": 5,
+                "avg_amount_20": 419_000_000,
                 "value_industry_allowed": True,
                 "value_industry_allowlist_match": "汽车电子电气系统",
                 "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
@@ -2398,7 +2399,7 @@ def test_left_to_right_promotes_existing_lots_when_add_on_is_below_board_lot(mon
     )
 
 
-def test_left_origin_batches_demote_back_to_left_on_right_stop(monkeypatch):
+def test_left_origin_batches_exit_without_reopening_left_on_right_stop(monkeypatch):
     dates = pd.bdate_range("2026-01-01", periods=84)
     bars = pd.DataFrame({
         "date": dates,
@@ -2466,17 +2467,13 @@ def test_left_origin_batches_demote_back_to_left_on_right_stop(monkeypatch):
 
     actions = [event["action"] for event in result["events"]]
     assert "左转右接管左仓" in actions
-    assert "右转左接回左仓" in actions
+    assert "左转右批次退出" in actions
+    assert "右转左接回左仓" not in actions
     assert "收盘条件次日退出" in actions
-    position = result["final_positions"][0]
-    assert position["position_mode"] == "left"
-    assert {item["batch"] for item in position["left_batches"]} == {
-        "L1", "L2", "L3", "L4", "L5",
-    }
-    assert position["batches"] == []
+    assert result["final_positions"] == []
 
 
-def test_demoted_left_core_survives_left_quota_conflict(monkeypatch):
+def test_exited_promoted_left_does_not_displace_new_left_symbol(monkeypatch):
     dates = pd.bdate_range("2026-01-01", periods=85)
     a_bars = pd.DataFrame({
         "date": dates,
@@ -2573,8 +2570,8 @@ def test_demoted_left_core_survives_left_quota_conflict(monkeypatch):
         event for event in result["events"]
         if event["action"] == "左侧全行情限额清仓"
     ]
-    assert {event["code"] for event in quota_exits} == {"B"}
-    assert [item["code"] for item in result["final_positions"]] == ["A"]
+    assert quota_exits == []
+    assert [item["code"] for item in result["final_positions"]] == ["B"]
     assert result["final_positions"][0]["position_mode"] == "left"
 
 

@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from apps.portfolio_backtest import load_candidate_snapshots
+from apps.portfolio_backtest import (
+    load_candidate_snapshots,
+    validate_candidate_manifest_financial_point_in_time,
+    validate_candidate_manifest_industry_point_in_time,
+)
 from stock_research.core.paths import PATHS
 from stock_research.strategies.fundamental_selection import (
     VALUE_INDUSTRY_RULE_VERSION,
@@ -29,6 +33,18 @@ DEFAULT_OUTPUT_ROOT = (
     / "quantsplaybook_hybrid_low_corr_value_2021_to_20260721"
 )
 HYBRID_FACTOR = "hybrid_low_corr_value"
+INDUSTRY_MANIFEST_FIELDS = (
+    "industry_source_path",
+    "industry_source_sha256",
+    "industry_source_modified_at",
+    "industry_as_of_date",
+    "industry_data_source",
+    "industry_point_in_time_status",
+    "industry_mapping_count",
+    "industry_universe_count",
+    "industry_coverage_ratio",
+    "industry_point_in_time_note",
+)
 
 
 def _sha256(path: Path) -> str:
@@ -178,10 +194,8 @@ def build_hybrid_candidates(
     output = Path(output_directory)
     right_manifest = _read_manifest(right_directory, lane="right")
     left_manifest = _read_manifest(left_directory, lane="left")
-    if left_manifest.get("strict_financial_point_in_time") is not True:
-        raise RuntimeError("left candidates are not strict financial PIT")
-    if left_manifest.get("industry_point_in_time") is not True:
-        raise RuntimeError("left candidates are not industry PIT")
+    validate_candidate_manifest_financial_point_in_time(left_directory)
+    validate_candidate_manifest_industry_point_in_time(left_directory)
 
     right = load_candidate_snapshots(right_directory, start_date, end_date)
     left = load_candidate_snapshots(left_directory, start_date, end_date)
@@ -221,13 +235,18 @@ def build_hybrid_candidates(
         "version": SNAPSHOT_VERSION,
         "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
         "snapshot_count": len(snapshots),
+        "requested_start": start_date,
+        "requested_end": end_date,
         "start_date": dates[0],
         "end_date": dates[-1],
         "financial_point_in_time": True,
         "strict_financial_point_in_time": True,
         "unsafe_snapshot_count": 0,
         "industry_point_in_time": True,
-        "industry_point_in_time_status": "safe_for_left_lane",
+        **{
+            field: left_manifest.get(field)
+            for field in INDUSTRY_MANIFEST_FIELDS
+        },
         "selection_engine": "quantsplaybook_right_plus_value_left",
         "selection_profile": HYBRID_FACTOR,
         "signal_timing": "close_t_signal_earliest_execution_t_plus_1",

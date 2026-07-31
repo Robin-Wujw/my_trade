@@ -1274,6 +1274,7 @@ def _semantic_right_entry_gate(
     signal,
     *,
     current_down_streak=0,
+    management_transition=False,
 ):
     """Convert a technical signal into an auditable high R/R entry decision."""
     if not signal:
@@ -1301,7 +1302,7 @@ def _semantic_right_entry_gate(
     quality = _candidate_number(candidate, "quality_score")
     growth = _candidate_number(candidate, "earnings_yoy")
     market_cap = _candidate_number(candidate, "mktcap")
-    if not factor_only:
+    if not factor_only and not management_transition:
         if quality is None or quality < 70:
             return False, enriched, "quality_hard_gate_failed"
         if growth is None or growth < 0.10:
@@ -1309,13 +1310,34 @@ def _semantic_right_entry_gate(
         if market_cap is None or market_cap < 100:
             return False, enriched, "market_cap_hard_gate_failed"
 
-    trade_basis = _candidate_number(candidate, "trade_basis_score")
-    leadership = _candidate_number(candidate, "leadership_score")
-    right_quant = _candidate_number(candidate, "right_quant_score")
-    ret20 = _candidate_number(candidate, "return_20d")
-    ret60 = _candidate_number(candidate, "return_60d")
-    avg_amount = _candidate_number(candidate, "avg_amount_20")
-    large_liquid_trend_core = _large_liquid_trend_core_profile(candidate)
+    trade_basis = (
+        None if management_transition
+        else _candidate_number(candidate, "trade_basis_score")
+    )
+    leadership = (
+        None if management_transition
+        else _candidate_number(candidate, "leadership_score")
+    )
+    right_quant = (
+        None if management_transition
+        else _candidate_number(candidate, "right_quant_score")
+    )
+    ret20 = (
+        None if management_transition
+        else _candidate_number(candidate, "return_20d")
+    )
+    ret60 = (
+        None if management_transition
+        else _candidate_number(candidate, "return_60d")
+    )
+    avg_amount = (
+        None if management_transition
+        else _candidate_number(candidate, "avg_amount_20")
+    )
+    large_liquid_trend_core = (
+        False if management_transition
+        else _large_liquid_trend_core_profile(candidate)
+    )
     trade_basis_floor = 6.0 if large_liquid_trend_core else 6.5
     if trade_basis is not None and trade_basis < trade_basis_floor:
         return False, enriched, "trade_basis_too_weak"
@@ -1345,7 +1367,7 @@ def _semantic_right_entry_gate(
         ret60 is not None and ret60 >= 0.20,
         trade_basis is not None and trade_basis >= 8.0,
     ))
-    if not factor_only and not strong_profile:
+    if not factor_only and not management_transition and not strong_profile:
         return False, enriched, "weak_relative_strength"
 
     signal_type = str(signal.get("signal_type") or "")
@@ -1726,9 +1748,6 @@ def run_portfolio_backtest(
             for state in (states[code],)
             if state.left or state.left_grid_started
         }
-
-    def left_roundtrip_protected(state):
-        return any(bool(lot.get("right_cycle_demoted")) for lot in state.left)
 
     def left_unrealized_return_before(code, date):
         state = states[code]
@@ -2839,45 +2858,22 @@ def run_portfolio_backtest(
         state.left_candidate_profile = None
         return promoted, next_right_batch_id
 
-    def demote_origin_left_lot(code, state, lot, date, price, reason):
-        restored_lot = dict(lot)
-        restored_lot["batch"] = str(lot.get("origin_batch") or lot["batch"]).replace("R", "L", 1)
-        restored_lot["slot"] = int(lot.get("left_grid_slot") or lot.get("slot") or 0)
-        restored_lot["date"] = lot.get("origin_date", lot.get("date"))
-        origin_candidate_profile = restored_lot.pop("origin_left_candidate_profile", None)
-        for key in (
-            "stop", "merged", "proven", "max_return", "origin_account",
-            "origin_batch", "origin_left_value_line", "left_grid_slot",
-            "reconfirm_level", "reconfirm_on_next_day", "time_limit_days",
-            "space_stop_pct",
-        ):
-            restored_lot.pop(key, None)
+    def exit_promoted_left_lot(code, state, lot, date, price, reason):
+        quantity = float(lot["quantity"])
+        entry_fee_cash = float(lot.get("entry_fee_cash") or 0.0)
+        size, pnl = execute_sell(quantity, price, lot["cost"])
         state.right.remove(lot)
         state.pending_lot_exits.pop(lot["batch"], None)
-        restored_lot["right_cycle_demoted"] = True
-        restored_lot["right_cycle_demoted_date"] = pd.Timestamp(date).strftime("%Y-%m-%d")
-        state.left.append(restored_lot)
-        value_line = pd.to_numeric(lot.get("origin_left_value_line"), errors="coerce")
-        if pd.notna(value_line) and float(value_line) > 0:
-            state.left_value_line = float(value_line)
-        state.left_grid_started = True
-        if isinstance(origin_candidate_profile, dict) and origin_candidate_profile:
-            state.left_candidate_profile = dict(origin_candidate_profile)
-        if not state.right:
-            state.right_parts = configured_profit_tranches
-            state.right_sold.clear()
-            state.right_plan_date = None
-            state.pending_lot_exits.clear()
-            state.pending_profit_ids.clear()
-            state.pending_tail_capacity_free = False
-            state.right_tail_capacity_free = False
         add_event(
-            date, code, "右转左接回左仓", price, 0.0,
+            date, code, "左转右批次退出", price, -size,
             (
-                f"{lot['batch']}->{restored_lot['batch']}; {reason}; "
-                "仅降级原左侧接管批次，未卖出"
+                f"{lot['batch']}(原{lot.get('origin_batch', lot['batch'])}); "
+                f"{reason}; 左转右后不恢复左仓"
             ),
-            account_mode="left",
+            pnl,
+            cost_basis=lot["cost"], execution_quantity=-quantity,
+            entry_fee_cash=entry_fee_cash, account_mode="right",
+            **lot_risk_metadata(lot, quantity),
         )
 
     def left_position_detached_from_value(row, state):
@@ -2919,6 +2915,7 @@ def run_portfolio_backtest(
         ok, signal, _ = _semantic_right_entry_gate(
             data, index, candidate, signal,
             current_down_streak=current_down_streak,
+            management_transition=True,
         )
         if not ok:
             return None
@@ -3010,7 +3007,7 @@ def run_portfolio_backtest(
                 if not reason:
                     continue
                 if lot.get("origin_account") == "left":
-                    demote_origin_left_lot(
+                    exit_promoted_left_lot(
                         code, state, lot, date, sell,
                         f"{reason}; {fill['status']}",
                     )
@@ -3102,7 +3099,6 @@ def run_portfolio_backtest(
                 state = states[code]
                 score = float(last_candidate_scores.get(code, 0.0) or 0.0)
                 return (
-                    left_roundtrip_protected(state),
                     bool(state.right),
                     left_unrealized_return_before(code, date),
                     score,
@@ -3148,7 +3144,7 @@ def run_portfolio_backtest(
                 if not fill["filled"]:
                     continue
                 if lot.get("origin_account") == "left":
-                    demote_origin_left_lot(
+                    exit_promoted_left_lot(
                         code, state, lot, date, float(fill["price"]),
                         f"开盘未站上{level:.3f}; {fill['status']}",
                     )
@@ -3596,7 +3592,7 @@ def run_portfolio_backtest(
                         execution_price = float(fill["price"])
                         execution_reason = f"hard space stop {stop_price:.3f}; {fill['status']}"
                         if lot.get("origin_account") == "left":
-                            demote_origin_left_lot(
+                            exit_promoted_left_lot(
                                 code, state, lot, date, execution_price,
                                 execution_reason,
                             )
@@ -3618,7 +3614,7 @@ def run_portfolio_backtest(
                         reason = "condition stop" if risk.get("condition_stop_triggered") else "entry time condition"
                         if close_confirmed_execution == "close_proxy":
                             if lot.get("origin_account") == "left":
-                                demote_origin_left_lot(
+                                exit_promoted_left_lot(
                                     code, state, lot, date, raw_price(row, "close"),
                                     f"{reason}; 14:55/close proxy",
                                 )
@@ -3818,6 +3814,7 @@ def run_portfolio_backtest(
                 ok, signal, gate_reason = _semantic_right_entry_gate(
                     data, index, candidate, signal,
                     current_down_streak=current_down_streak,
+                    management_transition=code in left_right_switch_signals,
                 )
                 if not ok:
                     record_entry_block(date, code, candidate, signal, gate_reason)
