@@ -68,6 +68,7 @@ from stock_research.strategies.portfolio_backtest import (
     _affordable_buy_notional,
     _capped_entry_size,
     _corporate_action_adjusted_quantities,
+    _divergence_series,
     _entry_risk_still_controls_lot,
     _effective_profit_tranches,
     _portfolio_profit_concentration_summary,
@@ -84,6 +85,7 @@ from stock_research.strategies.portfolio_backtest import (
     _qualifies_profit_tail,
     board_lot_size,
     build_formula_phase_history,
+    prepare_portfolio_price_frames,
     run_portfolio_backtest,
 )
 from stock_research.storage import Database, TushareRepository
@@ -588,6 +590,26 @@ def test_price_frame_coverage_requires_all_candidate_codes_to_endpoint():
     )["code_count"] == 1
 
 
+def test_price_frame_coverage_uses_last_trading_day_before_period_end():
+    frames = {
+        "A": pd.DataFrame({"date": ["2023-12-28", "2023-12-29"]}),
+    }
+
+    coverage = validate_price_frame_coverage(
+        frames,
+        {"A"},
+        "2023-12-28",
+        "2023-12-31",
+        trade_calendar=[
+            pd.Timestamp("2023-12-28"),
+            pd.Timestamp("2023-12-29"),
+        ],
+    )
+
+    assert coverage["end_date"] == "2023-12-31"
+    assert coverage["required_end_date"] == "2023-12-29"
+
+
 def test_price_frame_coverage_uses_first_candidate_date():
     frames = {
         "A": pd.DataFrame({"date": ["2026-01-10", "2026-07-17"]}),
@@ -613,6 +635,100 @@ def test_price_frame_coverage_uses_first_candidate_date():
             "2026-01-01",
             "2026-07-17",
             code_start_dates={"B": pd.Timestamp("2026-01-10")},
+        )
+
+
+def test_price_frame_coverage_accepts_known_nearby_delisting():
+    frames = {
+        "A": pd.DataFrame({"date": ["2026-01-05", "2026-04-21"]}),
+    }
+
+    coverage = validate_price_frame_coverage(
+        frames,
+        {"A"},
+        "2026-01-05",
+        "2026-07-21",
+        security_end_dates={"A": "2026-04-22"},
+    )
+
+    assert coverage["accepted_security_ends"] == {"A": "2026-04-22"}
+
+
+def test_price_frame_coverage_accepts_long_suspension_until_delisting():
+    frames = {
+        "A": pd.DataFrame({"date": ["2026-04-03"]}),
+        "B": pd.DataFrame({
+            "date": [
+                "2026-04-03", "2026-04-07", "2026-04-08",
+                "2026-04-09", "2026-04-10", "2026-04-13",
+                "2026-04-14", "2026-04-15", "2026-04-16",
+                "2026-04-17", "2026-04-20", "2026-04-21",
+                "2026-04-22", "2026-04-23", "2026-04-24",
+                "2026-04-27", "2026-04-28",
+            ],
+        }),
+    }
+    suspended = set(pd.to_datetime(frames["B"]["date"].iloc[1:-1]))
+
+    coverage = validate_price_frame_coverage(
+        frames,
+        {"A"},
+        "2026-04-03",
+        "2026-04-28",
+        security_end_dates={"A": "2026-04-27"},
+        security_suspension_dates={"A": suspended},
+    )
+
+    assert coverage["accepted_security_ends"] == {"A": "2026-04-27"}
+
+
+def test_price_frame_coverage_rejects_unexplained_or_distant_early_end():
+    frames = {
+        "A": pd.DataFrame({"date": ["2026-01-05", "2026-04-21"]}),
+    }
+
+    with pytest.raises(RuntimeError, match="early_end"):
+        validate_price_frame_coverage(
+            frames,
+            {"A"},
+            "2026-01-05",
+            "2026-07-21",
+            security_end_dates={"A": "2026-06-30"},
+        )
+
+
+def test_price_frame_coverage_accepts_only_fully_confirmed_suspension():
+    frames = {
+        "A": pd.DataFrame({"date": ["2026-07-15"]}),
+        "B": pd.DataFrame({
+            "date": [
+                "2026-07-15", "2026-07-16", "2026-07-17",
+                "2026-07-20", "2026-07-21",
+            ],
+        }),
+    }
+    confirmed = {
+        pd.Timestamp(value) for value in (
+            "2026-07-16", "2026-07-17", "2026-07-20", "2026-07-21",
+        )
+    }
+
+    coverage = validate_price_frame_coverage(
+        frames,
+        {"A"},
+        "2026-07-15",
+        "2026-07-21",
+        security_suspension_dates={"A": confirmed},
+    )
+    assert coverage["accepted_suspension_count"] == 1
+
+    with pytest.raises(RuntimeError, match="early_end"):
+        validate_price_frame_coverage(
+            frames,
+            {"A"},
+            "2026-07-15",
+            "2026-07-21",
+            security_suspension_dates={"A": confirmed - {pd.Timestamp("2026-07-20")}},
         )
 
 
@@ -1405,9 +1521,120 @@ def test_portfolio_result_does_not_depend_on_price_frame_insertion_order():
     assert forward["final_positions"] == reversed_input["final_positions"]
 
 
+def test_prepared_price_frames_match_normal_replay():
+    bars = breakout_bars()
+    date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
+    snapshots = {date: [{"code": "A"}]}
+    kwargs = {
+        "requested_start": date,
+        "end_date": date,
+        "initial_capital": 250_000,
+    }
+
+    normal = run_portfolio_backtest(
+        {"A": bars}, snapshots, {}, **kwargs,
+    )
+    prepared = run_portfolio_backtest(
+        prepare_portfolio_price_frames({"A": bars}),
+        snapshots,
+        {},
+        price_frames_prepared=True,
+        **kwargs,
+    )
+
+    assert prepared["trade_ledger"] == normal["trade_ledger"]
+    assert prepared["equity_curve"] == normal["equity_curve"]
+
+
+def test_divergence_state_machine_resets_without_looking_forward():
+    high = pd.Series([1, 2, 3, 4, 5, 6, 7, 6, 8, 9, 10, 11], dtype=float)
+    low = pd.Series([1, 1, 1, 1, 1, 2, 2, 1, 1, 1, 0, -1], dtype=float)
+    indicator = pd.Series(
+        [10, 20, 30, 40, 50, 45, 60, 35, 55, 70, 40, 45],
+        dtype=float,
+    )
+    reset = pd.Series([False] * 8 + [True] + [False] * 3)
+
+    result = _divergence_series(
+        high, low, indicator, reset=reset, lookback=60,
+    )
+
+    assert result.tolist() == [0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 0]
+
+
 def test_portfolio_rejects_missing_candidate_history():
     with pytest.raises(ValueError, match="candidate snapshot history is empty"):
         run_portfolio_backtest({}, {}, {}, requested_start="2026-01-01", end_date="2026-01-02")
+
+
+def test_delisted_position_is_written_off_at_zero(monkeypatch):
+    bars = breakout_bars()
+    entry_date = pd.Timestamp(bars.iloc[-1]["date"]).normalize()
+    delist_date = entry_date + pd.offsets.BDay(1)
+    calendar_frame = pd.concat([
+        bars.tail(1),
+        pd.DataFrame([{
+            "date": delist_date,
+            "open": 10.0,
+            "high": 10.0,
+            "low": 10.0,
+            "close": 10.0,
+            "volume": 1000.0,
+        }]),
+    ], ignore_index=True)
+    date_text = entry_date.strftime("%Y-%m-%d")
+
+    result = run_portfolio_backtest(
+        {"A": bars, "B": calendar_frame},
+        {date_text: [{"code": "A"}]},
+        {date_text: {"phase": "active", "window_up_streak": 5}},
+        requested_start=date_text,
+        end_date=delist_date.strftime("%Y-%m-%d"),
+        security_end_dates={"A": delist_date},
+    )
+
+    write_offs = [
+        event for event in result["events"]
+        if event["action"] == "退市持仓归零"
+    ]
+    assert len(write_offs) == 1
+    assert write_offs[0]["price"] == 0.0
+    assert write_offs[0]["terminal_write_off"] is True
+    assert write_offs[0]["profit_loss_pct"] == pytest.approx(-100.0)
+    assert result["final_positions"] == []
+
+
+def test_factor_only_profile_allows_technical_pullback_pilot():
+    data = _prepare_frame(pd.DataFrame({
+        "date": pd.bdate_range("2026-01-01", periods=30),
+        "open": [10.0] * 30,
+        "high": [10.2] * 30,
+        "low": [9.8] * 30,
+        "close": [10.0] * 30,
+        "volume": [1000.0] * 30,
+    }))
+    signal = {
+        "signal_type": "uptrend_support_pullback",
+        "order_type": "close",
+        "trigger": 10.0,
+        "stop": 9.5,
+        "target_price": 11.5,
+        "known_volume_ratio": 1.0,
+        "support_confluence": ["MA20"],
+    }
+
+    ok, enriched, reason = _semantic_right_entry_gate(
+        data,
+        len(data) - 1,
+        {"selection_profile": "quantsplaybook_factor_only"},
+        signal,
+    )
+
+    assert ok is True
+    assert reason == "ok"
+    assert enriched["semantic_entry_setup"] == (
+        "factor_only_high_rr_right_entry"
+    )
 
 
 def test_three_day_formula_decline_blocks_new_entry_without_profit_buffer():

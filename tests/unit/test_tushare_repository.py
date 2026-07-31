@@ -1,3 +1,5 @@
+import json
+
 import pandas as pd
 
 from stock_research.storage import Database, TushareRepository
@@ -100,6 +102,118 @@ def test_tushare_daily_kline_loader_normalizes_codes_and_filters_future_rows(tmp
             "raw_to_qfq_factor": 0.5,
         }
     ]
+
+
+def test_tushare_repository_loads_dataset_for_multiple_codes(tmp_path):
+    database = Database(tmp_path / "my_trade.sqlite3", code_version="test")
+    database.initialize()
+    repository = TushareRepository(database)
+    repository.upsert_dataset(
+        "daily_basic",
+        pd.DataFrame([
+            {
+                "ts_code": "600000.SH",
+                "trade_date": "20240102",
+                "turnover_rate": 1.2,
+            },
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": "20240102",
+                "turnover_rate": 2.3,
+            },
+        ]),
+    )
+
+    frame = repository.load_dataset_for_codes(
+        "daily_basic",
+        ["sh.600000", "sz.000001"],
+        start_date="2024-01-01",
+        end_date="2024-01-03",
+    )
+
+    assert set(frame["code"]) == {"sh.600000", "sz.000001"}
+    assert set(frame["turnover_rate"]) == {1.2, 2.3}
+
+
+def test_tushare_repository_loads_complete_full_market_daily_version(tmp_path):
+    database = Database(tmp_path / "my_trade.sqlite3", code_version="test")
+    database.initialize()
+    repository = TushareRepository(database)
+    repository.upsert_dataset(
+        "daily_kline",
+        pd.DataFrame([{
+            "ts_code": "600000.SH",
+            "trade_date": "20240102",
+            "open": 10.0,
+            "high": 10.5,
+            "low": 9.8,
+            "close": 10.2,
+            "vol": 1000,
+            "amount": 1020,
+        }]),
+    )
+    repository.upsert_dataset(
+        "adj_factor",
+        pd.DataFrame([{
+            "ts_code": "600000.SH",
+            "trade_date": "20240102",
+            "adj_factor": 2.0,
+        }]),
+    )
+    connection = database.connect()
+    try:
+        for row_key, payload in (
+            (
+                "daily_basic|short",
+                {
+                    "ts_code": "600000.SH",
+                    "trade_date": "20240102",
+                    "turnover_rate": 1.2,
+                },
+            ),
+            (
+                "daily_basic|complete",
+                {
+                    "ts_code": "600000.SH",
+                    "trade_date": "20240102",
+                    "turnover_rate": 1.3,
+                    "turnover_rate_f": 1.5,
+                    "total_mv": 100_000,
+                    "circ_mv": 80_000,
+                    "pe_ttm": 9.0,
+                    "pb": 1.1,
+                },
+            ),
+        ):
+            connection.execute(
+                """
+                INSERT INTO raw.tushare_dataset_rows (
+                    dataset, row_key, ts_code, trade_date, source, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    "daily_basic",
+                    row_key,
+                    "600000.SH",
+                    "2024-01-02",
+                    "test",
+                    json.dumps(payload),
+                ],
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    frame = repository.load_market_daily_frame(
+        start_date="2024-01-02",
+        end_date="2024-01-02",
+    )
+
+    row = frame.iloc[0]
+    assert row["code"] == "sh.600000"
+    assert row["turnover_rate"] == 1.3
+    assert row["total_mv"] == 100_000
+    assert row["raw_to_qfq_factor"] == 0.5
 
 
 def test_tushare_dividend_loader_filters_by_ex_date_and_project_code(tmp_path):

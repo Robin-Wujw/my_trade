@@ -110,6 +110,17 @@ def normalize_tushare_code(code: str) -> str:
     return f"{symbol}.{suffix}"
 
 
+def tushare_to_project_code(code: str) -> str:
+    """Convert a Tushare ts_code to the repository's exchange-first format."""
+    text = str(code or "").strip().upper()
+    if "." not in text:
+        return text
+    symbol, exchange = text.split(".", 1)
+    if exchange not in {"SH", "SZ", "BJ"}:
+        return text
+    return f"{exchange.lower()}.{symbol.zfill(6)}"
+
+
 def _chunks(values: list[str], size: int):
     for index in range(0, len(values), size):
         yield values[index:index + size]
@@ -228,6 +239,271 @@ class TushareRepository:
         finally:
             connection.close()
         return pd.DataFrame([json.loads(row[0]) for row in rows])
+
+    def load_dataset_for_codes(
+        self,
+        dataset: str,
+        codes,
+        *,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        """Load indexed Tushare rows for several symbols without a table scan."""
+        requested = [str(code) for code in codes if str(code).strip()]
+        ts_to_requested: dict[str, list[str]] = {}
+        for code in requested:
+            ts_code = normalize_tushare_code(code)
+            if ts_code:
+                ts_to_requested.setdefault(ts_code, []).append(code)
+        if not ts_to_requested:
+            return pd.DataFrame()
+        start = pd.to_datetime(start_date, errors="coerce")
+        end = pd.to_datetime(end_date, errors="coerce")
+        if pd.isna(start) or pd.isna(end) or start > end:
+            raise ValueError(f"invalid Tushare date range: {start_date}..{end_date}")
+
+        rows = []
+        connection = self.database.connect(read_only=True)
+        try:
+            for chunk in _chunks(sorted(ts_to_requested), 80):
+                placeholders = ", ".join("?" for _ in chunk)
+                rows.extend(connection.execute(
+                    f"""
+                    SELECT ts_code, trade_date, payload_json
+                    FROM raw.tushare_dataset_rows INDEXED BY idx_tushare_dataset_ts_code
+                    WHERE dataset = ?
+                      AND ts_code IN ({placeholders})
+                      AND trade_date >= ?
+                      AND trade_date <= ?
+                    ORDER BY ts_code, trade_date, row_key
+                    """,
+                    [
+                        str(dataset),
+                        *chunk,
+                        start.strftime("%Y-%m-%d"),
+                        end.strftime("%Y-%m-%d"),
+                    ],
+                ).fetchall())
+        finally:
+            connection.close()
+
+        records = []
+        for ts_code, trade_date, payload_json in rows:
+            payload = json.loads(payload_json)
+            for requested_code in ts_to_requested.get(str(ts_code), []):
+                record = dict(payload)
+                record["code"] = requested_code
+                record["date"] = pd.to_datetime(trade_date, errors="coerce")
+                records.append(record)
+        if not records:
+            return pd.DataFrame()
+        frame = pd.DataFrame(records)
+        return (
+            frame.dropna(subset=["date", "code"])
+            .drop_duplicates(["date", "code"], keep="last")
+            .sort_values(["date", "code"])
+            .reset_index(drop=True)
+        )
+
+    def load_market_daily_frame(
+        self,
+        *,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        """Load a full-market daily slice through the indexed trade-date path.
+
+        The generic payload table can contain more than one ``daily_basic`` row
+        for a symbol/date when a later sync requested a wider field list.  The
+        most complete row wins before it is joined to prices.
+        """
+        start = pd.to_datetime(start_date, errors="coerce")
+        end = pd.to_datetime(end_date, errors="coerce")
+        if pd.isna(start) or pd.isna(end) or start > end:
+            raise ValueError(f"invalid Tushare market date range: {start_date}..{end_date}")
+        start_text = start.strftime("%Y-%m-%d")
+        end_text = end.strftime("%Y-%m-%d")
+
+        connection = self.database.connect(read_only=True)
+        try:
+            prices = connection.execute(
+                """
+                SELECT
+                    ts_code,
+                    trade_date,
+                    json_extract(payload_json, '$.open'),
+                    json_extract(payload_json, '$.high'),
+                    json_extract(payload_json, '$.low'),
+                    json_extract(payload_json, '$.close'),
+                    COALESCE(
+                        json_extract(payload_json, '$.vol'),
+                        json_extract(payload_json, '$.volume')
+                    ),
+                    json_extract(payload_json, '$.amount')
+                FROM raw.tushare_dataset_rows
+                     INDEXED BY idx_tushare_dataset_trade_date
+                WHERE dataset = 'daily_kline'
+                  AND trade_date >= ?
+                  AND trade_date <= ?
+                ORDER BY trade_date, ts_code, row_key
+                """,
+                [start_text, end_text],
+            ).fetchall()
+            columns = [
+                "ts_code", "date", "open", "high", "low", "close", "volume", "amount",
+            ]
+            frame = pd.DataFrame(prices, columns=columns)
+            del prices
+            factors = connection.execute(
+                """
+                SELECT
+                    ts_code,
+                    trade_date,
+                    json_extract(payload_json, '$.adj_factor')
+                FROM raw.tushare_dataset_rows
+                     INDEXED BY idx_tushare_dataset_trade_date
+                WHERE dataset = 'adj_factor'
+                  AND trade_date >= ?
+                  AND trade_date <= ?
+                ORDER BY trade_date, ts_code, row_key
+                """,
+                [start_text, end_text],
+            ).fetchall()
+            adjustment = pd.DataFrame(
+                factors, columns=["ts_code", "date", "adj_factor"],
+            ).drop_duplicates(["ts_code", "date"], keep="last")
+            del factors
+            daily_basic = connection.execute(
+                """
+                SELECT
+                    ts_code,
+                    trade_date,
+                    json_extract(payload_json, '$.turnover_rate'),
+                    json_extract(payload_json, '$.turnover_rate_f'),
+                    json_extract(payload_json, '$.total_mv'),
+                    json_extract(payload_json, '$.circ_mv'),
+                    json_extract(payload_json, '$.pe_ttm'),
+                    json_extract(payload_json, '$.pb'),
+                    length(payload_json)
+                FROM raw.tushare_dataset_rows
+                     INDEXED BY idx_tushare_dataset_trade_date
+                WHERE dataset = 'daily_basic'
+                  AND trade_date >= ?
+                  AND trade_date <= ?
+                ORDER BY trade_date, ts_code, row_key
+                """,
+                [start_text, end_text],
+            ).fetchall()
+        finally:
+            connection.close()
+
+        if frame.empty:
+            return pd.DataFrame(columns=[
+                "date", "code", "open", "high", "low", "close", "volume",
+                "amount", "tradestatus", "raw_to_qfq_factor", "turnover_rate",
+                "turnover_rate_f", "total_mv", "circ_mv", "pe_ttm", "pb",
+            ])
+
+        basic = pd.DataFrame(
+            daily_basic,
+            columns=[
+                "ts_code", "date", "turnover_rate", "turnover_rate_f",
+                "total_mv", "circ_mv", "pe_ttm", "pb", "_payload_size",
+            ],
+        )
+        del daily_basic
+        if not basic.empty:
+            basic["_non_null_fields"] = basic[
+                [
+                    "turnover_rate", "turnover_rate_f", "total_mv",
+                    "circ_mv", "pe_ttm", "pb",
+                ]
+            ].notna().sum(axis=1)
+            basic = (
+                basic.sort_values(
+                    ["ts_code", "date", "_non_null_fields", "_payload_size"],
+                    kind="mergesort",
+                )
+                .drop_duplicates(["ts_code", "date"], keep="last")
+                .drop(columns=["_non_null_fields", "_payload_size"])
+            )
+
+        frame = frame.merge(adjustment, on=["ts_code", "date"], how="left")
+        if not basic.empty:
+            frame = frame.merge(basic, on=["ts_code", "date"], how="left")
+        else:
+            for column in (
+                "turnover_rate", "turnover_rate_f", "total_mv",
+                "circ_mv", "pe_ttm", "pb",
+            ):
+                frame[column] = pd.NA
+        frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+        frame["code"] = frame["ts_code"].map(tushare_to_project_code)
+        numeric = [
+            "open", "high", "low", "close", "volume", "amount", "adj_factor",
+            "turnover_rate", "turnover_rate_f", "total_mv", "circ_mv",
+            "pe_ttm", "pb",
+        ]
+        for column in numeric:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame["raw_to_qfq_factor"] = 1.0 / frame["adj_factor"].where(
+            frame["adj_factor"] > 0,
+        )
+        frame["tradestatus"] = (
+            frame["volume"].fillna(0).gt(0)
+            & frame["close"].fillna(0).gt(0)
+        ).astype(int).astype(str)
+        return (
+            frame.dropna(subset=["date", "code", "open", "high", "low", "close"])
+            .drop_duplicates(["date", "code"], keep="last")
+            .sort_values(["date", "code"])
+            .reset_index(drop=True)[[
+                "date", "code", "open", "high", "low", "close", "volume",
+                "amount", "tradestatus", "raw_to_qfq_factor", "turnover_rate",
+                "turnover_rate_f", "total_mv", "circ_mv", "pe_ttm", "pb",
+            ]]
+        )
+
+    def load_stock_basic_universe(self) -> pd.DataFrame:
+        """Load the broad A-share security master without current-status filters."""
+        connection = self.database.connect(read_only=True)
+        try:
+            rows = connection.execute(
+                """
+                SELECT payload_json
+                FROM raw.tushare_dataset_rows
+                WHERE dataset = 'basic'
+                ORDER BY ts_code, row_key
+                """
+            ).fetchall()
+        finally:
+            connection.close()
+        records = [json.loads(row[0]) for row in rows]
+        if not records:
+            return pd.DataFrame(columns=[
+                "code", "ts_code", "name", "industry", "list_date",
+                "delist_date", "list_status", "market",
+            ])
+        frame = pd.DataFrame(records)
+        frame["code"] = frame.get("ts_code", pd.Series(dtype=str)).map(
+            tushare_to_project_code,
+        )
+        for column in ("list_date", "delist_date"):
+            frame[column] = pd.to_datetime(frame.get(column), errors="coerce")
+        wanted = [
+            "code", "ts_code", "name", "industry", "list_date",
+            "delist_date", "list_status", "market",
+        ]
+        for column in wanted:
+            if column not in frame:
+                frame[column] = pd.NA
+        return (
+            frame[wanted]
+            .dropna(subset=["code", "list_date"])
+            .drop_duplicates("code", keep="last")
+            .sort_values("code")
+            .reset_index(drop=True)
+        )
 
     def load_daily_kline_frames(
         self,

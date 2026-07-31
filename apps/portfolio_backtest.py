@@ -19,7 +19,10 @@ from stock_research.reporting.backtest_trade_report import (
 from stock_research.reporting.trade_reminders import load_trade_plans
 from stock_research.storage import Database, KlineRepository, ResearchRepository, TushareRepository
 from stock_research.market.miniqmt_data import load_miniqmt_price_frames
-from stock_research.strategies.portfolio_backtest import run_portfolio_backtest
+from stock_research.strategies.portfolio_backtest import (
+    prepare_portfolio_price_frames,
+    run_portfolio_backtest,
+)
 from stock_research.strategies.historical_candidates import SNAPSHOT_VERSION
 from stock_research.strategies.fundamental_selection import VALUE_INDUSTRY_RULE_VERSION
 
@@ -455,7 +458,65 @@ def load_corporate_actions(codes, *, start_date, end_date):
         return {}
 
 
-def validate_price_frame_coverage(price_frames, codes, start_date, end_date, *, code_start_dates=None):
+def load_security_end_dates(codes):
+    """Load known delisting dates for lifecycle validation and terminal write-offs."""
+    if not PATHS.database.is_file():
+        return {}
+    database = Database(PATHS.database)
+    try:
+        stock_basic = TushareRepository(database).load_stock_basic_universe()
+    except Exception as exc:
+        print(f"[portfolio-backtest] skip local security end dates: {exc}")
+        return {}
+    requested = {str(code) for code in codes}
+    rows = stock_basic[
+        stock_basic["code"].astype(str).isin(requested)
+        & stock_basic["delist_date"].notna()
+    ]
+    return {
+        str(row["code"]): pd.Timestamp(row["delist_date"]).normalize()
+        for _, row in rows.iterrows()
+    }
+
+
+def load_security_suspension_dates(codes, *, start_date, end_date):
+    """Load explicit Tushare suspension dates; network failures are never inferred."""
+    if not PATHS.database.is_file():
+        return {}
+    database = Database(PATHS.database)
+    try:
+        frame = TushareRepository(database).load_dataset_for_codes(
+            "suspend_d",
+            codes,
+            start_date=str(start_date),
+            end_date=str(end_date),
+        )
+    except Exception as exc:
+        print(f"[portfolio-backtest] skip local suspension dates: {exc}")
+        return {}
+    if frame.empty:
+        return {}
+    return {
+        str(code): {
+            pd.Timestamp(value).normalize()
+            for value in group["date"].dropna()
+        }
+        for code, group in frame.groupby("code", sort=False)
+    }
+
+
+def validate_price_frame_coverage(
+    price_frames,
+    codes,
+    start_date,
+    end_date,
+    *,
+    code_start_dates=None,
+    security_end_dates=None,
+    security_suspension_dates=None,
+    delist_bar_tolerance_days=14,
+    trade_calendar=None,
+):
     """Require loaded execution/valuation bars through the backtest endpoint."""
     start = pd.Timestamp(start_date).normalize()
     end = pd.Timestamp(end_date).normalize()
@@ -486,13 +547,87 @@ def validate_price_frame_coverage(price_frames, codes, start_date, end_date, *, 
         last_by_code[code] = in_range.max().normalize()
     effective_start = min(first_by_code.values()) if first_by_code else start
     code_start_dates = code_start_dates or {}
+    security_end_dates = security_end_dates or {}
+    security_suspension_dates = security_suspension_dates or {}
+    accepted_security_ends = {}
+    accepted_suspensions = {}
+    market_dates = sorted({
+        pd.Timestamp(value).normalize()
+        for value in (
+            trade_calendar
+            if trade_calendar is not None
+            else (
+                item
+                for frame in price_frames.values()
+                if frame is not None and not frame.empty
+                for item in pd.to_datetime(
+                    frame.get("date"), errors="coerce",
+                ).dropna()
+            )
+        )
+        if pd.notna(pd.to_datetime(value, errors="coerce"))
+        and start <= pd.Timestamp(value).normalize() <= end
+    })
+    required_end = (
+        market_dates[-1]
+        if trade_calendar is not None and market_dates
+        else end
+    )
     for code, first in first_by_code.items():
         last = last_by_code[code]
         required_start = pd.Timestamp(code_start_dates.get(code, effective_start)).normalize()
         if first > required_start:
             late_start.append(f"{code}:{first:%Y-%m-%d}>{required_start:%Y-%m-%d}")
-        if last < end:
-            early_end.append(f"{code}:{last:%Y-%m-%d}")
+        if last < required_end:
+            security_end = pd.to_datetime(
+                security_end_dates.get(code), errors="coerce",
+            )
+            confirmed_suspensions = {
+                pd.Timestamp(value).normalize()
+                for value in security_suspension_dates.get(code, set())
+            }
+            suspension_until_delisting = set()
+            if pd.notna(security_end):
+                suspension_until_delisting = {
+                    value for value in market_dates
+                    if last < value < security_end.normalize()
+                }
+            known_delisting = (
+                pd.notna(security_end)
+                and last <= security_end.normalize() <= end
+                and (
+                    (
+                        security_end.normalize() - last
+                    ).days <= int(delist_bar_tolerance_days)
+                    or (
+                        suspension_until_delisting
+                        and suspension_until_delisting.issubset(
+                            confirmed_suspensions,
+                        )
+                    )
+                )
+            )
+            if known_delisting:
+                accepted_security_ends[code] = security_end.normalize().strftime(
+                    "%Y-%m-%d",
+                )
+            else:
+                required_after_last = {
+                    value for value in market_dates if last < value <= end
+                }
+                if (
+                    required_after_last
+                    and required_after_last.issubset(confirmed_suspensions)
+                ):
+                    accepted_suspensions[code] = {
+                        "last_trade_date": last.strftime("%Y-%m-%d"),
+                        "confirmed_dates": [
+                            value.strftime("%Y-%m-%d")
+                            for value in sorted(required_after_last)
+                        ],
+                    }
+                else:
+                    early_end.append(f"{code}:{last:%Y-%m-%d}")
     problems = {
         "missing": missing,
         "empty": empty,
@@ -505,12 +640,17 @@ def validate_price_frame_coverage(price_frames, codes, start_date, end_date, *, 
         preview = {key: value[:10] for key, value in failed.items()}
         raise RuntimeError(
             "price K-line frames do not cover all backtest candidate codes "
-            f"through {end:%Y-%m-%d}: {preview}"
+            f"through {required_end:%Y-%m-%d}: {preview}"
         )
     return {
         "code_count": len({str(item) for item in codes if str(item).strip()}),
         "start_date": effective_start.strftime("%Y-%m-%d"),
         "end_date": end.strftime("%Y-%m-%d"),
+        "required_end_date": required_end.strftime("%Y-%m-%d"),
+        "accepted_security_end_count": len(accepted_security_ends),
+        "accepted_security_ends": accepted_security_ends,
+        "accepted_suspension_count": len(accepted_suspensions),
+        "accepted_suspensions": accepted_suspensions,
     }
 
 
@@ -1847,6 +1987,12 @@ def main(argv=None):
         for row in rows
     }
     code_start_dates = first_candidate_dates(snapshots)
+    security_end_dates = load_security_end_dates(codes)
+    security_suspension_dates = load_security_suspension_dates(
+        codes,
+        start_date=args.start_date,
+        end_date=args.end_date,
+    )
     trade_plans = load_trade_plans(args.trade_plans)
     price_kline_directory = Path(args.price_kline_directory)
     if (
@@ -1880,6 +2026,8 @@ def main(argv=None):
         args.start_date,
         args.end_date,
         code_start_dates=code_start_dates,
+        security_end_dates=security_end_dates,
+        security_suspension_dates=security_suspension_dates,
     )
     formula = pd.read_csv(args.formula_history)
     input_coverage_end = validate_backtest_input_coverage(
@@ -1934,6 +2082,7 @@ def main(argv=None):
         sell_stamp_duty_rate=args.sell_stamp_duty_rate,
         estimated_slippage_rate=args.estimated_slippage_rate,
         corporate_actions=corporate_actions,
+        security_end_dates=security_end_dates,
     )
     result["price_source"] = {
         "kline_directory": str(price_kline_directory),

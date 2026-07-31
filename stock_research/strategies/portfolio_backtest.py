@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import math
 import re
 
+import numpy as np
 import pandas as pd
 
 from stock_research.indicators.technical_quant import _sma_cn
@@ -54,32 +55,39 @@ def _divergence_series(
     *,
     lookback: int = 60,
 ) -> pd.Series:
-    work = pd.DataFrame({
-        "price_high": pd.to_numeric(price_high, errors="coerce"),
-        "price_low": pd.to_numeric(price_low, errors="coerce"),
-        "indicator": pd.to_numeric(indicator, errors="coerce"),
-    }, index=indicator.index)
+    high_values = pd.to_numeric(
+        price_high.reindex(indicator.index), errors="coerce",
+    ).to_numpy(dtype=float)
+    low_values = pd.to_numeric(
+        price_low.reindex(indicator.index), errors="coerce",
+    ).to_numpy(dtype=float)
+    indicator_values = pd.to_numeric(
+        indicator, errors="coerce",
+    ).to_numpy(dtype=float)
     reset_flags = (
-        reset.reindex(work.index).fillna(False).astype(bool)
-        if reset is not None else pd.Series(False, index=work.index)
+        reset.reindex(indicator.index).fillna(False).astype(bool).to_numpy()
+        if reset is not None else None
     )
-    values = []
+    values = [0] * len(indicator_values)
     active_rows = 0
     highest_price = highest_indicator = None
     lowest_price = lowest_indicator = None
-    for position, (_, row) in enumerate(work.iterrows()):
-        if bool(reset_flags.iloc[position]):
+    lookback = int(lookback)
+    for position in range(len(indicator_values)):
+        if reset_flags is not None and bool(reset_flags[position]):
             active_rows = 0
             highest_price = highest_indicator = None
             lowest_price = lowest_indicator = None
-            values.append(0)
             continue
-        if row.isna().any():
-            values.append(0)
+        current_high = high_values[position]
+        current_low = low_values[position]
+        current_indicator = indicator_values[position]
+        if not (
+            math.isfinite(current_high)
+            and math.isfinite(current_low)
+            and math.isfinite(current_indicator)
+        ):
             continue
-        current_high = float(row["price_high"])
-        current_low = float(row["price_low"])
-        current_indicator = float(row["indicator"])
         signal = 0
         if active_rows >= 4:
             if (
@@ -94,24 +102,37 @@ def _divergence_series(
                 and current_indicator > lowest_indicator
             ):
                 signal = 1
-        values.append(signal)
+        values[position] = signal
         if highest_price is None or current_high >= highest_price:
             highest_price = current_high
             highest_indicator = current_indicator
         if lowest_price is None or current_low <= lowest_price:
             lowest_price = current_low
             lowest_indicator = current_indicator
-        active_rows = min(int(lookback), active_rows + 1)
-        if active_rows >= int(lookback):
-            active = work.iloc[max(0, position - int(lookback) + 2):position + 1].dropna()
-            if not active.empty:
-                high_index = active["price_high"].idxmax()
-                low_index = active["price_low"].idxmin()
-                highest_price = float(active.loc[high_index, "price_high"])
-                highest_indicator = float(active.loc[high_index, "indicator"])
-                lowest_price = float(active.loc[low_index, "price_low"])
-                lowest_indicator = float(active.loc[low_index, "indicator"])
-    return pd.Series(values, index=work.index)
+        active_rows = min(lookback, active_rows + 1)
+        if active_rows >= lookback:
+            window_start = max(0, position - lookback + 2)
+            window_high = high_values[window_start:position + 1]
+            window_low = low_values[window_start:position + 1]
+            window_indicator = indicator_values[window_start:position + 1]
+            valid = (
+                pd.notna(window_high)
+                & pd.notna(window_low)
+                & pd.notna(window_indicator)
+            )
+            if valid.any():
+                valid_positions = valid.nonzero()[0]
+                high_position = valid_positions[
+                    window_high[valid].argmax()
+                ]
+                low_position = valid_positions[
+                    window_low[valid].argmin()
+                ]
+                highest_price = float(window_high[high_position])
+                highest_indicator = float(window_indicator[high_position])
+                lowest_price = float(window_low[low_position])
+                lowest_indicator = float(window_indicator[low_position])
+    return pd.Series(values, index=indicator.index)
 
 
 @dataclass
@@ -259,6 +280,14 @@ def _prepare_frame(frame):
         + wr_divergence.eq(-1).astype(int)
     )
     return data
+
+
+def prepare_portfolio_price_frames(price_frames):
+    """Prepare signal frames once for repeated portfolio comparisons."""
+    return {
+        code: _prepare_frame(price_frames[code])
+        for code in sorted(price_frames)
+    }
 
 
 def _enabled(value, *, default=True):
@@ -1118,6 +1147,12 @@ def _has_semantic_candidate_profile(candidate) -> bool:
     return any(candidate.get(field) not in (None, "") for field in fields)
 
 
+def _factor_only_selection_profile(candidate) -> bool:
+    return _candidate_text(candidate, "selection_profile") == (
+        "quantsplaybook_factor_only"
+    )
+
+
 def _compact_attack_core_profile(candidate) -> bool:
     setup = _candidate_text(candidate, "right_quant_setup")
     right_quant = _candidate_number(candidate, "right_quant_score")
@@ -1244,7 +1279,8 @@ def _semantic_right_entry_gate(
     if not signal:
         return False, signal, "missing_signal"
     enriched = dict(signal)
-    if not _has_semantic_candidate_profile(candidate):
+    factor_only = _factor_only_selection_profile(candidate)
+    if not factor_only and not _has_semantic_candidate_profile(candidate):
         enriched.update({
             "semantic_entry_ok": True,
             "semantic_entry_setup": "legacy_minimal_candidate_profile",
@@ -1265,12 +1301,13 @@ def _semantic_right_entry_gate(
     quality = _candidate_number(candidate, "quality_score")
     growth = _candidate_number(candidate, "earnings_yoy")
     market_cap = _candidate_number(candidate, "mktcap")
-    if quality is None or quality < 70:
-        return False, enriched, "quality_hard_gate_failed"
-    if growth is None or growth < 0.10:
-        return False, enriched, "growth_hard_gate_failed"
-    if market_cap is None or market_cap < 100:
-        return False, enriched, "market_cap_hard_gate_failed"
+    if not factor_only:
+        if quality is None or quality < 70:
+            return False, enriched, "quality_hard_gate_failed"
+        if growth is None or growth < 0.10:
+            return False, enriched, "growth_hard_gate_failed"
+        if market_cap is None or market_cap < 100:
+            return False, enriched, "market_cap_hard_gate_failed"
 
     trade_basis = _candidate_number(candidate, "trade_basis_score")
     leadership = _candidate_number(candidate, "leadership_score")
@@ -1308,7 +1345,7 @@ def _semantic_right_entry_gate(
         ret60 is not None and ret60 >= 0.20,
         trade_basis is not None and trade_basis >= 8.0,
     ))
-    if not strong_profile:
+    if not factor_only and not strong_profile:
         return False, enriched, "weak_relative_strength"
 
     signal_type = str(signal.get("signal_type") or "")
@@ -1400,7 +1437,10 @@ def _semantic_right_entry_gate(
 
     enriched.update({
         "semantic_entry_ok": True,
-        "semantic_entry_setup": "high_rr_right_entry",
+        "semantic_entry_setup": (
+            "factor_only_high_rr_right_entry"
+            if factor_only else "high_rr_right_entry"
+        ),
         "entry_gate_reason": "ok",
         "entry_risk_pct": round(risk_pct * 100, 3),
         "entry_reward_risk": round(reward_risk, 3),
@@ -1444,6 +1484,8 @@ def run_portfolio_backtest(
     sell_stamp_duty_rate=0.0,
     estimated_slippage_rate=0.0,
     corporate_actions=None,
+    security_end_dates=None,
+    price_frames_prepared=False,
 ):
     """Replay a portfolio without filling dates before candidate coverage."""
     if close_confirmed_execution not in {"next_open", "close_proxy"}:
@@ -1466,10 +1508,46 @@ def run_portfolio_backtest(
     # Cash is shared, so same-day processing order can affect which order gets
     # the remaining balance.  Sort symbols to keep reruns independent of file
     # discovery/dictionary insertion order.
-    frames = {code: _prepare_frame(price_frames[code]) for code in sorted(price_frames)}
+    frames = (
+        {code: price_frames[code] for code in sorted(price_frames)}
+        if price_frames_prepared
+        else prepare_portfolio_price_frames(price_frames)
+    )
+    frame_date_values = {
+        code: frame["date"].to_numpy(dtype="datetime64[ns]")
+        for code, frame in frames.items()
+    }
+
+    def frame_index_on_date(code, date):
+        values = frame_date_values.get(code)
+        if values is None or not len(values):
+            return None
+        target = np.datetime64(pd.Timestamp(date).normalize())
+        position = int(np.searchsorted(values, target, side="left"))
+        if position >= len(values) or values[position] != target:
+            return None
+        return position
+
+    def latest_frame_index(code, date, *, inclusive=True):
+        values = frame_date_values.get(code)
+        if values is None or not len(values):
+            return None
+        side = "right" if inclusive else "left"
+        position = int(np.searchsorted(
+            values,
+            np.datetime64(pd.Timestamp(date).normalize()),
+            side=side,
+        )) - 1
+        return position if position >= 0 else None
     corporate_action_lookup = _normalize_corporate_actions(corporate_actions or {})
+    normalized_security_end_dates = {
+        str(code): pd.Timestamp(value).normalize()
+        for code, value in dict(security_end_dates or {}).items()
+        if pd.notna(pd.to_datetime(value, errors="coerce"))
+    }
     plans = dict((trade_plans or {}).get("plans") or {})
     states = {code: PositionState() for code in frames}
+    active_position_codes = set()
     events = []
     realized = 0.0
     transaction_costs = 0.0
@@ -1635,14 +1713,17 @@ def run_portfolio_backtest(
         return enriched
 
     def occupied_codes():
-        return {
-            code for code, state in states.items()
-            if state.left or state.right
+        stale = {
+            code for code in active_position_codes
+            if not states[code].left and not states[code].right
         }
+        active_position_codes.difference_update(stale)
+        return set(active_position_codes)
 
     def left_side_codes():
         return {
-            code for code, state in states.items()
+            code for code in occupied_codes()
+            for state in (states[code],)
             if state.left or state.left_grid_started
         }
 
@@ -1672,7 +1753,8 @@ def run_portfolio_backtest(
 
     def capacity_codes():
         return {
-            code for code, state in states.items()
+            code for code in occupied_codes()
+            for state in (states[code],)
             if left_position_counts_capacity(state)
             or (state.right and not _is_profit_tail(state))
         }
@@ -1680,7 +1762,8 @@ def run_portfolio_backtest(
     def gross_exposure():
         return sum(
             sum(float(lot["size"]) for lot in state.left + state.right)
-            for state in states.values()
+            for code in occupied_codes()
+            for state in (states[code],)
         )
 
     def symbol_exposure(code):
@@ -1744,7 +1827,10 @@ def run_portfolio_backtest(
         return len(left_codes) >= configured_left_positions
 
     def right_codes():
-        return {code for code, state in states.items() if state.right}
+        return {
+            code for code in occupied_codes()
+            if states[code].right
+        }
 
     def candidate_industry_tags(candidate):
         raw = candidate.get("industry") or candidate.get("mainline_boards") or ""
@@ -1892,7 +1978,8 @@ def run_portfolio_backtest(
 
     def held_industry_counts():
         counts = {}
-        for state in states.values():
+        for code in occupied_codes():
+            state = states[code]
             if _is_profit_tail(state) and not state.left:
                 continue
             tags = {
@@ -2065,7 +2152,8 @@ def run_portfolio_backtest(
         if not right_market_active() or current_down_streak >= 3:
             return 0.0
         sources = set(str(candidate.get("candidate_source") or "").split("+"))
-        if not sources & {
+        factor_only = _factor_only_selection_profile(candidate)
+        if not factor_only and not sources & {
             "factor_quant", "standard_mainline", "growth_leadership",
             "quant_right",
         }:
@@ -2088,6 +2176,12 @@ def run_portfolio_backtest(
         ):
             support_distance = max(0.0, float(trigger) / float(stop) - 1.0)
         known_volume_ratio = float(signal.get("known_volume_ratio") or 0.0)
+        if factor_only:
+            return (
+                PULLBACK_PILOT_BASE_SIZE
+                if known_volume_ratio >= 1.0 and support_distance <= 0.055
+                else 0.0
+            )
         strong_quant_profile = (
             pd.notna(leadership) and float(leadership) >= 25.0
         ) or (
@@ -2315,6 +2409,14 @@ def run_portfolio_backtest(
             "cash_change_amount": round(cash_change_amount, 2),
             **metadata,
         })
+        if execution_quantity > 0:
+            active_position_codes.add(code)
+        elif (
+            execution_quantity < 0
+            and not states[code].left
+            and not states[code].right
+        ):
+            active_position_codes.discard(code)
 
     def trade_fee(turnover, *, sell=False):
         return trade_fee_components(turnover, sell=sell)["transaction_cost_amount"]
@@ -2370,10 +2472,9 @@ def run_portfolio_backtest(
         if not state.left and not state.right:
             return
         data = frames[code]
-        indexes = data.index[data["date"].dt.normalize() == date]
-        if indexes.empty:
+        index = frame_index_on_date(code, date)
+        if index is None:
             return
-        index = int(indexes[0])
         if index <= 0:
             return
         actions_for_date = corporate_action_lookup.get(code, {}).get(date)
@@ -2794,10 +2895,9 @@ def run_portfolio_backtest(
         if not candidate:
             return None
         data = frames[code]
-        indexes = data.index[data["date"].dt.normalize() == date]
-        if indexes.empty:
+        index = frame_index_on_date(code, date)
+        if index is None:
             return None
-        index = int(indexes[0])
         row = data.iloc[index]
         if not left_position_detached_from_value(row, state):
             return None
@@ -2837,17 +2937,65 @@ def run_portfolio_backtest(
     formula_dates = sorted(formula_by_date)
     for date in calendar:
         exited_today = set()
-        for code in list(states):
+        for code in sorted(occupied_codes()):
+            state = states[code]
+            security_end = normalized_security_end_dates.get(code)
+            if security_end is None or date < security_end:
+                continue
+            held_lots = list(state.left) + list(state.right)
+            if not held_lots:
+                continue
+            for lot in held_lots:
+                quantity = float(lot["quantity"])
+                entry_fee_cash = float(lot.get("entry_fee_cash") or 0.0)
+                size, pnl = execute_sell(quantity, 0.0, lot["cost"])
+                add_event(
+                    date,
+                    code,
+                    "退市持仓归零",
+                    0.0,
+                    -size,
+                    (
+                        f"{lot['batch']}; 已到退市日"
+                        f"{security_end:%Y-%m-%d}; 无可交易价格，保守按零核销"
+                    ),
+                    pnl,
+                    cost_basis=lot["cost"],
+                    execution_quantity=-quantity,
+                    entry_fee_cash=entry_fee_cash,
+                    security_end_date=security_end.strftime("%Y-%m-%d"),
+                    terminal_write_off=True,
+                    **lot_risk_metadata(lot, quantity),
+                )
+            state.left.clear()
+            state.right.clear()
+            state.left_value_line = None
+            state.left_grid_started = False
+            state.left_candidate_profile = None
+            state.right_parts = configured_profit_tranches
+            state.right_sold.clear()
+            state.right_plan_date = None
+            state.pending_lot_exits.clear()
+            state.pending_profit_ids.clear()
+            state.pending_tail_capacity_free = False
+            state.right_tail_capacity_free = False
+            pending_candidate_exits.discard(code)
+            pending_weak_exits.discard(code)
+            pending_left_exits.pop(code, None)
+            pending_left_quota_exits.pop(code, None)
+            active_position_codes.discard(code)
+            exited_today.add(code)
+        for code in sorted(occupied_codes()):
             apply_corporate_action_adjustment(code, date)
         # Close-confirmed exits become market-at-open orders on the next bar.
-        for code, state in states.items():
+        for code in sorted(occupied_codes()):
+            state = states[code]
             if not state.pending_lot_exits and not state.pending_profit_ids:
                 continue
             data = frames[code]
-            indexes = data.index[data["date"].dt.normalize() == date]
-            if indexes.empty:
+            index = frame_index_on_date(code, date)
+            if index is None:
                 continue
-            index = int(indexes[0])
             row = data.iloc[index]
             previous_close = raw_price(data.iloc[index - 1], "close") if index > 0 else None
             fill = fill_sell_stop(
@@ -2973,7 +3121,8 @@ def run_portfolio_backtest(
                     f"全行情左侧标的限额; 保留={keep_label}"
                 )
 
-        for code, state in states.items():
+        for code in sorted(occupied_codes()):
+            state = states[code]
             pending_lots = [
                 lot for lot in state.right
                 if lot.get("reconfirm_on_next_day") and pd.Timestamp(lot["date"]).normalize() < date
@@ -2981,10 +3130,9 @@ def run_portfolio_backtest(
             if not pending_lots:
                 continue
             data = frames[code]
-            indexes = data.index[data["date"].dt.normalize() == date]
-            if indexes.empty:
+            index = frame_index_on_date(code, date)
+            if index is None:
                 continue
-            index = int(indexes[0])
             row = data.iloc[index]
             previous_close = raw_price(data.iloc[index - 1], "close") if index > 0 else None
             for lot in pending_lots:
@@ -3028,10 +3176,9 @@ def run_portfolio_backtest(
                 pending_candidate_exits.discard(code)
                 continue
             data = frames[code]
-            indexes = data.index[data["date"].dt.normalize() == date]
-            if indexes.empty:
+            index = frame_index_on_date(code, date)
+            if index is None:
                 continue
-            index = int(indexes[0])
             row = data.iloc[index]
             previous_close = raw_price(data.iloc[index - 1], "close") if index > 0 else None
             fill = fill_sell_stop(
@@ -3064,10 +3211,9 @@ def run_portfolio_backtest(
                 pending_weak_exits.discard(code)
                 continue
             data = frames[code]
-            indexes = data.index[data["date"].dt.normalize() == date]
-            if indexes.empty:
+            index = frame_index_on_date(code, date)
+            if index is None:
                 continue
-            index = int(indexes[0])
             row = data.iloc[index]
             previous_close = raw_price(data.iloc[index - 1], "close") if index > 0 else None
             fill = fill_sell_stop(
@@ -3100,10 +3246,9 @@ def run_portfolio_backtest(
                 pending_left_exits.pop(code, None)
                 continue
             data = frames[code]
-            indexes = data.index[data["date"].dt.normalize() == date]
-            if indexes.empty:
+            index = frame_index_on_date(code, date)
+            if index is None:
                 continue
-            index = int(indexes[0])
             row = data.iloc[index]
             previous_close = raw_price(data.iloc[index - 1], "close") if index > 0 else None
             fill = fill_sell_stop(
@@ -3140,10 +3285,9 @@ def run_portfolio_backtest(
                 pending_left_quota_exits.pop(code, None)
                 continue
             data = frames[code]
-            indexes = data.index[data["date"].dt.normalize() == date]
-            if indexes.empty:
+            index = frame_index_on_date(code, date)
+            if index is None:
                 continue
-            index = int(indexes[0])
             row = data.iloc[index]
             previous_close = raw_price(data.iloc[index - 1], "close") if index > 0 else None
             fill = fill_sell_stop(
@@ -3175,7 +3319,16 @@ def run_portfolio_backtest(
             if item < date or (not signals_effective_next_day and item <= date)
         ]
         if eligible_snapshots:
-            current_candidates = snapshots[eligible_snapshots[-1]]
+            candidate_snapshot_date = eligible_snapshots[-1]
+            current_candidates = {
+                code: {
+                    **candidate,
+                    "candidate_snapshot_date": candidate_snapshot_date.strftime(
+                        "%Y-%m-%d",
+                    ),
+                }
+                for code, candidate in snapshots[candidate_snapshot_date].items()
+            }
             for candidate_code, candidate in current_candidates.items():
                 last_candidate_scores[candidate_code] = float(candidate.get("candidate_score") or 0.0)
                 last_candidates[candidate_code] = dict(candidate)
@@ -3186,7 +3339,8 @@ def run_portfolio_backtest(
                 if state and state.right and sum(lot["size"] for lot in state.right) < 0.10 - 1e-9:
                     pending_candidate_exits.add(code)
         previous_candidate_codes = current_candidate_codes
-        for code, state in states.items():
+        for code in sorted(left_side_codes()):
+            state = states[code]
             if not state.left or code in pending_left_exits:
                 continue
             reason = left_value_falsification_reason(current_candidates.get(code))
@@ -3195,7 +3349,8 @@ def run_portfolio_backtest(
         left_right_switch_signals = {}
         left_right_switch_candidates = {}
         left_right_switch_candidate_current = {}
-        for code, state in states.items():
+        for code in sorted(left_side_codes()):
+            state = states[code]
             if not state.left or state.right:
                 continue
             current_candidate = current_candidates.get(code)
@@ -3211,7 +3366,8 @@ def run_portfolio_backtest(
         # top ten. New campaigns, however, compete by candidate score so file
         # or ticker ordering can never decide which four symbols get capital.
         active_left_codes = [
-            code for code, state in states.items()
+            code for code in left_side_codes()
+            for state in (states[code],)
             if state.left_value_line is not None and (state.left or state.left_grid_started)
         ]
         new_left_candidates = []
@@ -3247,10 +3403,9 @@ def run_portfolio_backtest(
             if code in left_right_switch_signals:
                 continue
             data = frames[code]
-            indexes = data.index[data["date"].dt.normalize() == date]
-            if indexes.empty:
+            index = frame_index_on_date(code, date)
+            if index is None:
                 continue
-            index = int(indexes[0])
             row = data.iloc[index]
             if anchor_is_candidate_raw:
                 grid_anchor = candidate_raw_price_to_signal(row, grid_anchor)
@@ -3391,12 +3546,12 @@ def run_portfolio_backtest(
                     }),
                 )
 
-        for code, state in states.items():
+        for code in sorted(occupied_codes()):
+            state = states[code]
             data = frames[code]
-            indexes = data.index[data["date"].dt.normalize() == date]
-            if indexes.empty:
+            index = frame_index_on_date(code, date)
+            if index is None:
                 continue
-            index = int(indexes[0])
             row = data.iloc[index]
             history = data.iloc[: index + 1]
             if state.right:
@@ -3628,10 +3783,9 @@ def run_portfolio_backtest(
                 if states[code].left and code not in left_right_switch_signals:
                     continue
                 data = frames[code]
-                indexes = data.index[data["date"].dt.normalize() == date]
-                if indexes.empty:
+                index = frame_index_on_date(code, date)
+                if index is None:
                     continue
-                index = int(indexes[0])
                 signal = left_right_switch_signals.get(code) or _right_signal(
                     data, index, plans.get(code),
                     auto_price_structure=auto_price_structure,
@@ -4033,6 +4187,17 @@ def run_portfolio_backtest(
                     sorted(candidate_industry_tags(candidate))
                 )
                 buy_metadata = {**risk_metadata, **structure_metadata}
+                buy_metadata.update({
+                    "candidate_snapshot_date": candidate.get(
+                        "candidate_snapshot_date",
+                    ),
+                    "technical_signal_date": date.strftime("%Y-%m-%d"),
+                    "technical_signal_timing": (
+                        "same_day_close_confirmed_close_proxy"
+                        if close_confirmed_execution == "close_proxy"
+                        else "close_confirmed_next_open"
+                    ),
+                })
                 add_event(
                     date, code, "右侧买入", fill["price"], size,
                     f"{batch}; {entry_kind}; {signal['reason']}; {fill['status']}",
@@ -4056,12 +4221,13 @@ def run_portfolio_backtest(
 
         unrealized = 0.0
         market_value = float(cash_balance)
-        for code, state in states.items():
+        for code in sorted(occupied_codes()):
+            state = states[code]
             data = frames[code]
-            visible = data[data["date"] <= date]
-            if visible.empty:
+            latest_index = latest_frame_index(code, date)
+            if latest_index is None:
                 continue
-            close = raw_price(visible.iloc[-1], "close")
+            close = raw_price(data.iloc[latest_index], "close")
             if state.left or state.right:
                 unrealized += sum(
                     float(lot["quantity"]) * (close - float(lot["cost"]))

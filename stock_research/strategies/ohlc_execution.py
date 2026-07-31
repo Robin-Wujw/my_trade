@@ -36,6 +36,17 @@ def locked_limit_direction(row, previous_close, code: str, *, is_st: bool = Fals
         return None
     if max(prices) - min(prices) > max(prices) * 1e-6:
         return None
+    one_price = prices[0]
+    up_limit = _number(row.get("up_limit"))
+    down_limit = _number(row.get("down_limit"))
+    if up_limit is not None and math.isclose(
+        one_price, up_limit, rel_tol=1e-6, abs_tol=1e-4,
+    ):
+        return "up"
+    if down_limit is not None and math.isclose(
+        one_price, down_limit, rel_tol=1e-6, abs_tol=1e-4,
+    ):
+        return "down"
     change = prices[0] / previous - 1
     threshold = daily_limit_pct(
         code, trade_date=row.get("date"), is_st=is_st,

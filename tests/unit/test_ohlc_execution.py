@@ -43,6 +43,24 @@ def test_old_five_percent_st_one_price_limit_up_blocks_buy():
     assert result["status"] == "locked_limit_up"
 
 
+def test_explicit_daily_limit_takes_precedence_over_board_rule():
+    row = {
+        "date": "2026-07-03",
+        "up_limit": 10.5,
+        "down_limit": 9.5,
+        **bar(10.5, 10.5, 10.5, 10.5),
+    }
+    result = fill_limit_order(
+        row,
+        side="buy",
+        limit_price=11,
+        previous_close=10,
+        code="sh.600000",
+        is_st=False,
+    )
+    assert result["status"] == "locked_limit_up"
+
+
 def test_breakout_stop_fills_at_trigger_or_small_gap_but_rejects_large_gap():
     intraday = fill_buy_stop(bar(9.8, 10.2, 9.7, 10.1), trigger_price=10, previous_close=9.8, code="sh.600000")
     small_gap = fill_buy_stop(bar(10.2, 10.4, 10.1, 10.3), trigger_price=10, previous_close=9.8, code="sh.600000")
