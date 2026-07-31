@@ -763,6 +763,66 @@ def audit_portfolio_trades(
     return audit, summary
 
 
+def apply_stock_basic_display_names(
+    result: dict,
+    stock_basic: pd.DataFrame,
+) -> dict:
+    """Add current security names to saved artifacts without changing decisions."""
+    def display_text(value) -> str:
+        if value is None or pd.isna(value):
+            return ""
+        text = str(value).strip()
+        return "" if text.lower() in {"nan", "none", "<na>"} else text
+
+    names = {}
+    if stock_basic is not None and not stock_basic.empty:
+        for _, row in stock_basic.iterrows():
+            code = display_text(row.get("code"))
+            name = display_text(row.get("name"))
+            if code and name and name != code:
+                names[code] = name
+
+    def update_item(item):
+        if not isinstance(item, dict):
+            return
+        code = display_text(item.get("code"))
+        if code in names:
+            item["name"] = names[code]
+        replacement_code = display_text(item.get("replacement_code"))
+        if replacement_code in names:
+            item["replacement_name"] = names[replacement_code]
+
+    for key in (
+        "events", "trade_ledger", "final_positions", "concentration_blocks",
+        "entry_blocks",
+    ):
+        for item in result.get(key) or []:
+            update_item(item)
+
+    concentration = result.get("profit_concentration_summary") or {}
+    update_item(concentration.get("top1_symbol"))
+    for item in concentration.get("top_symbols") or []:
+        update_item(item)
+
+    traded_codes = {
+        display_text(item.get("code"))
+        for item in result.get("trade_ledger") or []
+        if display_text(item.get("code"))
+    }
+    result["display_name_source"] = {
+        "source": "local_tushare_stock_basic_current_snapshot",
+        "decision_input": False,
+        "scope": "artifact_display_only",
+        "resolved_traded_symbol_count": len(traded_codes & set(names)),
+        "unresolved_traded_codes": sorted(traded_codes - set(names)),
+        "note": (
+            "Current security names are attached only after the backtest; "
+            "historical selection and ST filters remain point-in-time inputs."
+        ),
+    }
+    return result
+
+
 def _save_shared_portfolio_result(
     result: dict,
     *,
@@ -842,6 +902,7 @@ def run_portfolio_comparison(
     start_date: str,
     end_date: str,
     prepared_price_frames: dict[str, pd.DataFrame] | None = None,
+    max_left_positions: int = 2,
 ) -> pd.DataFrame:
     snapshots_by_factor = {}
     all_codes = set()
@@ -1006,7 +1067,7 @@ def run_portfolio_comparison(
             end_date=end_date,
             max_positions=5,
             max_total_held_symbols=5,
-            max_left_positions=1,
+            max_left_positions=max_left_positions,
             max_same_industry=2,
             same_theme_correlation=0.60,
             min_entry_evidence_score=0.0,
@@ -1043,6 +1104,7 @@ def run_portfolio_comparison(
                 len(action_rows) for action_rows in corporate_actions.values()
             ),
         }
+        apply_stock_basic_display_names(result, stock_basic)
         trade_audit, trade_audit_summary = audit_portfolio_trades(
             result,
             {
@@ -1212,6 +1274,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--holding-days", type=int, default=20)
     parser.add_argument("--minimum-history", type=int, default=60)
     parser.add_argument("--top-n", type=int, default=50)
+    parser.add_argument(
+        "--max-left-positions", type=int, default=2,
+        help="maximum simultaneous left-side symbols inside the five-symbol cap",
+    )
     parser.add_argument("--database-path", default=str(PATHS.database))
     parser.add_argument("--price-directory", default=str(DEFAULT_PRICE_DIRECTORY))
     parser.add_argument("--formula-history", default=str(DEFAULT_FORMULA_HISTORY))
@@ -1512,6 +1578,7 @@ def main(argv=None) -> int:
             start_date=args.start_date,
             end_date=args.end_date,
             prepared_price_frames=prepared_price_frames,
+            max_left_positions=args.max_left_positions,
         )
         metrics_path = Path(args.portfolio_metrics_file)
         if not metrics_path.is_absolute():

@@ -30,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-positions", type=int, default=5)
     parser.add_argument("--max-total-held-symbols", type=int, default=5)
-    parser.add_argument("--max-left-positions", type=int, default=1)
+    parser.add_argument("--max-left-positions", type=int, default=2)
     parser.add_argument("--max-same-industry", type=int, default=2)
     parser.add_argument("--profit-tranches", type=int, choices=(2, 3, 4, 5), default=5)
     parser.add_argument("--profit-tail-min-return", type=float, default=0.50)

@@ -1484,7 +1484,7 @@ def run_portfolio_backtest(
     trade_plans=None,
     max_positions=5,
     max_total_held_symbols=5,
-    max_left_positions=1,
+    max_left_positions=2,
     max_same_industry=2,
     same_theme_correlation=0.60,
     min_entry_evidence_score=0,

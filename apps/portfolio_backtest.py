@@ -1740,8 +1740,8 @@ def main(argv=None):
         help="hard cap for all held symbols, including left cores and profit tails",
     )
     parser.add_argument(
-        "--max-left-positions", type=int, default=1,
-        help="maximum simultaneous left-side symbols; default 1, use 2 only for sensitivity research",
+        "--max-left-positions", type=int, default=2,
+        help="maximum simultaneous left-side symbols inside the five-symbol cap",
     )
     parser.add_argument(
         "--max-same-industry", type=int, default=2,

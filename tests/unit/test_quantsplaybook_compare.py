@@ -4,7 +4,9 @@ import pandas as pd
 
 from apps.quantsplaybook_compare import (
     aggregate_portfolio_summaries,
+    apply_stock_basic_display_names,
     audit_portfolio_trades,
+    build_parser,
     evaluate_factor_panel,
     factor_candidate_snapshots,
     load_prepared_price_cache,
@@ -76,6 +78,42 @@ def test_point_in_time_universe_applies_only_validity_rules():
         (pd.Timestamp("2024-01-02"), "sz.000003"),
         (pd.Timestamp("2024-01-03"), "sz.000003"),
     }
+
+
+def test_stock_basic_names_are_added_for_display_only():
+    trade = {
+        "code": "sh.600001",
+        "name": "sh.600001",
+        "execution_price": 10.5,
+        "candidate_snapshot_date": "2024-01-02",
+    }
+    result = {
+        "events": [trade],
+        "trade_ledger": [trade],
+        "final_positions": [{"code": "sh.600001", "name": "sh.600001"}],
+        "profit_concentration_summary": {
+            "top1_symbol": {"code": "sh.600001", "name": "sh.600001"},
+            "top_symbols": [{"code": "sh.600001", "name": "sh.600001"}],
+        },
+    }
+    basic = pd.DataFrame([{
+        "code": "sh.600001",
+        "name": "浦发银行",
+    }])
+
+    apply_stock_basic_display_names(result, basic)
+
+    assert trade["name"] == "浦发银行"
+    assert trade["execution_price"] == 10.5
+    assert trade["candidate_snapshot_date"] == "2024-01-02"
+    assert result["final_positions"][0]["name"] == "浦发银行"
+    assert result["profit_concentration_summary"]["top1_symbol"]["name"] == "浦发银行"
+    assert result["display_name_source"]["decision_input"] is False
+    assert result["display_name_source"]["unresolved_traded_codes"] == []
+
+
+def test_quantsplaybook_portfolio_defaults_to_two_left_symbols():
+    assert build_parser().parse_args([]).max_left_positions == 2
 
 
 def test_point_in_time_universe_excludes_dated_st_rows_only():
