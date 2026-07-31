@@ -39,7 +39,34 @@ COMBINATION_FACTORS = (
     "playbook_ensemble",
     "playbook_positive_ic_top5",
     "playbook_train_ic_weighted",
+    "playbook_category_balanced",
+    "playbook_capped_ic_weighted",
+    "playbook_low_corr",
+    "playbook_factor_quota",
 )
+FACTOR_CATEGORIES = {
+    "price_structure": (
+        "shadow_reversal",
+        "salience_str",
+        "ma_convergence",
+        "amplitude_structure",
+    ),
+    "behavior_and_flow": (
+        "coin_team",
+        "buying_pressure",
+        "disposition_reversal",
+        "chip_loss_overhang",
+    ),
+    "risk_and_momentum": (
+        "low_idiosyncratic_volatility",
+        "high_quality_momentum",
+    ),
+    "network": (
+        "network_cc",
+        "network_scc",
+        "network_tcc",
+    ),
+}
 
 
 def _year_periods(start_date: str, end_date: str) -> list[tuple[int, str, str]]:
@@ -150,6 +177,7 @@ def _declared_combination_specs(
     training: pd.DataFrame,
     *,
     positive_ic_top_n: int,
+    training_rank_correlation: pd.DataFrame | None = None,
 ) -> dict[str, dict]:
     source_factors = [
         factor for factor in executable_factor_columns()
@@ -168,7 +196,58 @@ def _declared_combination_specs(
     positive_ic = pd.to_numeric(
         positive["mean_rank_ic"], errors="coerce",
     ).clip(lower=0)
-    return {
+    available_categories = {
+        category: [factor for factor in factors if factor in source_factors]
+        for category, factors in FACTOR_CATEGORIES.items()
+    }
+    available_categories = {
+        category: factors
+        for category, factors in available_categories.items()
+        if factors
+    }
+    category_balanced = {
+        factor: 1.0 / len(available_categories) / len(factors)
+        for factors in available_categories.values()
+        for factor in factors
+    }
+    positive_categories = {
+        category: [factor for factor in factors if factor in positive_ic.index]
+        for category, factors in available_categories.items()
+    }
+    positive_categories = {
+        category: factors
+        for category, factors in positive_categories.items()
+        if factors
+    }
+    category_ic = {
+        category: float(positive_ic.reindex(factors).sum())
+        for category, factors in positive_categories.items()
+    }
+    category_weights = _capped_normalized_weights(
+        category_ic,
+        cap=max(0.30, 1.0 / len(positive_categories)),
+    )
+    capped_ic = {}
+    for category, factors in positive_categories.items():
+        within = _capped_normalized_weights(
+            positive_ic.reindex(factors).fillna(0).to_dict(),
+            cap=1.0,
+        )
+        for factor, weight in within.items():
+            capped_ic[factor] = category_weights[category] * weight
+    capped_ic = _capped_normalized_weights(capped_ic, cap=0.15)
+
+    low_corr_factors = _select_low_correlation_factors(
+        positive,
+        training_rank_correlation,
+        target_count=min(6, len(positive)),
+    )
+    low_corr_weights = {
+        factor: 1.0 / len(low_corr_factors)
+        for factor in low_corr_factors
+    }
+    quota_factors = positive.index.tolist()
+    specs = {
         "playbook_ensemble": {
             "method": "equal_weight_all_source_factor_streams",
             "weights": equal,
@@ -181,7 +260,254 @@ def _declared_combination_specs(
             "method": "positive_training_rank_ic_weighted",
             "weights": (positive_ic / positive_ic.sum()).to_dict(),
         },
+        "playbook_category_balanced": {
+            "method": "equal_weight_factor_categories_then_factors",
+            "weights": category_balanced,
+            "factor_categories": available_categories,
+        },
+        "playbook_capped_ic_weighted": {
+            "method": "positive_training_ic_with_30pct_category_and_15pct_factor_caps",
+            "weights": capped_ic,
+            "factor_categories": available_categories,
+        },
+        "playbook_low_corr": {
+            "method": "equal_weight_training_positive_ic_low_correlation_subset",
+            "weights": low_corr_weights,
+            "selected_factors": low_corr_factors,
+            "factor_categories": available_categories,
+        },
+        "playbook_factor_quota": {
+            "method": "round_robin_quota_across_positive_training_ic_factors",
+            "combination_type": "round_robin_factor_quota",
+            "weights": {
+                factor: 1.0 / len(quota_factors)
+                for factor in quota_factors
+            },
+            "selected_factors": quota_factors,
+        },
     }
+    return specs
+
+
+def _capped_normalized_weights(
+    raw_weights: dict[str, float],
+    *,
+    cap: float,
+) -> dict[str, float]:
+    clean = {
+        str(key): max(0.0, float(value))
+        for key, value in raw_weights.items()
+        if np.isfinite(float(value)) and float(value) > 0
+    }
+    if not clean:
+        clean = {str(key): 1.0 for key in raw_weights}
+    if not clean:
+        raise ValueError("cannot normalize empty weights")
+    effective_cap = max(float(cap), 1.0 / len(clean))
+    remaining = list(clean)
+    result: dict[str, float] = {}
+    remaining_mass = 1.0
+    while remaining:
+        raw_total = sum(clean[key] for key in remaining)
+        if raw_total <= 0:
+            proposal = {
+                key: remaining_mass / len(remaining) for key in remaining
+            }
+        else:
+            proposal = {
+                key: remaining_mass * clean[key] / raw_total
+                for key in remaining
+            }
+        capped = [
+            key for key, value in proposal.items()
+            if value > effective_cap + 1e-12
+        ]
+        if not capped:
+            result.update(proposal)
+            break
+        for key in capped:
+            result[key] = effective_cap
+            remaining.remove(key)
+            remaining_mass -= effective_cap
+    total = sum(result.values())
+    return {key: value / total for key, value in result.items()}
+
+
+def _factor_category(factor: str) -> str:
+    for category, factors in FACTOR_CATEGORIES.items():
+        if factor in factors:
+            return category
+    return factor
+
+
+def _select_low_correlation_factors(
+    positive_training: pd.DataFrame,
+    training_rank_correlation: pd.DataFrame | None,
+    *,
+    target_count: int,
+) -> list[str]:
+    ordered = positive_training.sort_values(
+        ["mean_rank_ic", "top20_excess_forward_return"],
+        ascending=False,
+    ).index.tolist()
+    if not ordered or target_count <= 0:
+        raise RuntimeError("no positive training factor is available")
+    if training_rank_correlation is None or training_rank_correlation.empty:
+        return ordered[:target_count]
+    correlation = training_rank_correlation.reindex(
+        index=ordered, columns=ordered,
+    ).abs().fillna(1.0)
+    maximum_ic = max(
+        float(
+            pd.to_numeric(
+                positive_training["mean_rank_ic"], errors="coerce",
+            ).max()
+        ),
+        1e-12,
+    )
+    selected = [ordered[0]]
+    while len(selected) < min(int(target_count), len(ordered)):
+        candidates = [
+            factor for factor in ordered
+            if factor not in selected
+            and sum(
+                _factor_category(item) == _factor_category(factor)
+                for item in selected
+            ) < 2
+        ]
+        if not candidates:
+            candidates = [factor for factor in ordered if factor not in selected]
+        scored = []
+        for factor in candidates:
+            mean_correlation = float(
+                correlation.loc[factor, selected].mean()
+            )
+            normalized_ic = (
+                float(positive_training.loc[factor, "mean_rank_ic"])
+                / maximum_ic
+            )
+            scored.append((
+                normalized_ic - mean_correlation,
+                -mean_correlation,
+                normalized_ic,
+                factor,
+            ))
+        selected.append(max(scored)[-1])
+    return selected
+
+
+def _training_rank_correlation(
+    *,
+    periods: list[tuple[int, str, str]],
+    output_root: Path,
+    train_start_date: str,
+    train_end_date: str,
+    factors: list[str],
+) -> pd.DataFrame:
+    start = pd.Timestamp(train_start_date)
+    end = pd.Timestamp(train_end_date)
+    weighted_sum = None
+    total_rows = 0
+    for year, _, _ in periods:
+        if year < start.year or year > end.year:
+            continue
+        panel = _load_cached_panel(
+            output_root / "research_panels" / f"factor_panel_{year}.pkl",
+        )
+        dates = panel.index.get_level_values("date")
+        mask = (dates >= start) & (dates <= end)
+        values = panel.loc[mask, factors].groupby(
+            level="date", sort=False,
+        ).rank(method="average", pct=True)
+        current = values.corr(min_periods=100)
+        rows = len(values)
+        weighted_sum = (
+            current.mul(rows)
+            if weighted_sum is None
+            else weighted_sum.add(current.mul(rows), fill_value=0)
+        )
+        total_rows += rows
+        del panel, values
+        gc.collect()
+    if weighted_sum is None or total_rows <= 0:
+        raise RuntimeError("training rank correlation is empty")
+    return weighted_sum.div(total_rows)
+
+
+def round_robin_factor_combination(
+    factor_panel: pd.DataFrame,
+    factors: list[str],
+) -> pd.Series:
+    """Create a full ranking by rotating candidate rights across factors."""
+    available = [
+        factor for factor in factors
+        if factor in factor_panel and factor_panel[factor].notna().any()
+    ]
+    if not available:
+        raise ValueError("factor quota combination has no available factors")
+    ranked = factor_panel[available].groupby(
+        level="date", sort=False,
+    ).rank(method="first", ascending=False)
+    parts = []
+    for date, group in ranked.groupby(level="date", sort=True):
+        codes = group.index.get_level_values("code")
+        queues = {
+            factor: (
+                pd.DataFrame({
+                    "code": codes.to_numpy(),
+                    "rank": pd.to_numeric(
+                        group[factor], errors="coerce",
+                    ).to_numpy(),
+                })
+                .dropna()
+                .sort_values(["rank", "code"], kind="mergesort")
+                ["code"]
+                .tolist()
+            )
+            for factor in available
+        }
+        cursors = {factor: 0 for factor in available}
+        selected: list[str] = []
+        seen = set()
+        while len(selected) < len(group):
+            added = False
+            for factor in available:
+                queue = queues[factor]
+                cursor = cursors[factor]
+                while cursor < len(queue) and queue[cursor] in seen:
+                    cursor += 1
+                cursors[factor] = cursor + 1
+                if cursor >= len(queue):
+                    continue
+                code = queue[cursor]
+                seen.add(code)
+                selected.append(code)
+                added = True
+            if not added:
+                break
+        score = pd.Series(
+            np.arange(len(selected), 0, -1, dtype=float) / max(len(selected), 1),
+            index=pd.MultiIndex.from_arrays(
+                [[date] * len(selected), selected],
+                names=["date", "code"],
+            ),
+        )
+        parts.append(score)
+    if not parts:
+        return pd.Series(dtype=float, name="factor_quota_score")
+    return pd.concat(parts).reindex(factor_panel.index)
+
+
+def _apply_combination(
+    panel: pd.DataFrame,
+    spec: dict,
+) -> pd.Series:
+    if spec.get("combination_type") == "round_robin_factor_quota":
+        return round_robin_factor_combination(
+            panel,
+            list(spec["weights"]),
+        )
+    return rank_weighted_factor_combination(panel, spec["weights"])
 
 
 def _load_cached_panel(path: Path) -> pd.DataFrame:
@@ -215,9 +541,21 @@ def _fit_and_generate_combinations(
         train_start_date=train_start_date,
         train_end_date=train_end_date,
     )
+    source_factors = [
+        factor for factor in executable_factor_columns()
+        if factor != "playbook_ensemble" and factor in training.index
+    ]
+    training_correlation = _training_rank_correlation(
+        periods=periods,
+        output_root=output_root,
+        train_start_date=train_start_date,
+        train_end_date=train_end_date,
+        factors=source_factors,
+    )
     specs = _declared_combination_specs(
         training,
         positive_ic_top_n=positive_ic_top_n,
+        training_rank_correlation=training_correlation,
     )
     validation_year = pd.Timestamp(validation_start_date).year
     validation_path = (
@@ -226,10 +564,7 @@ def _fit_and_generate_combinations(
     )
     validation_panel = _load_cached_panel(validation_path)
     for factor, spec in specs.items():
-        validation_panel[factor] = rank_weighted_factor_combination(
-            validation_panel,
-            spec["weights"],
-        )
+        validation_panel[factor] = _apply_combination(validation_panel, spec)
     validation_metrics = evaluate_labeled_factor_sample(
         validation_panel,
         factor_columns=list(specs),
@@ -278,15 +613,8 @@ def _fit_and_generate_combinations(
         panel = _load_cached_panel(
             output_root / "research_panels" / f"factor_panel_{year}.pkl",
         )
-        panel["playbook_ensemble"] = rank_weighted_factor_combination(
-            panel,
-            specs["playbook_ensemble"]["weights"],
-        )
-        for factor in COMBINATION_FACTORS[1:]:
-            panel[factor] = rank_weighted_factor_combination(
-                panel,
-                specs[factor]["weights"],
-            )
+        for factor in COMBINATION_FACTORS:
+            panel[factor] = _apply_combination(panel, specs[factor])
         membership = panel.index.to_frame(index=False)
         snapshot_dates = _formula_snapshot_dates(
             formula_history,

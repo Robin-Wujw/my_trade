@@ -211,12 +211,11 @@ def strategy_comparison(
     result = pd.DataFrame(rows)
     result = result.sort_values(
         [
-            "validation_ex_top1_return_pct",
             "validation_return_pct",
             "validation_max_drawdown_pct",
             "validation_profit_loss_ratio",
         ],
-        ascending=[False, False, False, False],
+        ascending=[False, False, False],
         na_position="last",
     ).reset_index(drop=True)
     result.insert(0, "validation_rank", range(1, len(result) + 1))
@@ -224,10 +223,6 @@ def strategy_comparison(
     result["oos_robust"] = (
         pd.to_numeric(
             result["oos_compound_independent_period_return_pct"],
-            errors="coerce",
-        ).gt(0)
-        & pd.to_numeric(
-            result["oos_ex_top1_compound_independent_period_return_pct"],
             errors="coerce",
         ).gt(0)
     )
@@ -285,7 +280,10 @@ def render_markdown(
         "# QuantsPlaybook 因子组合回测比较",
         "",
         "所有策略使用相同买入、退出、仓位、T+1、整手、费用、涨跌停、分红送转和退市口径。",
-        "最终策略只按 2024 验证集选择；2025-2026 仅作样本外验收，不参与拟合或重新排名。",
+        (
+            "最终策略按 2024 原始收益、最大回撤和盈亏比依次选择；"
+            "2025-2026 仅作样本外验收，不参与拟合或重新排名。"
+        ),
         "",
         "## 验证集选择",
         "",
@@ -307,8 +305,11 @@ def render_markdown(
             "- 样本外剔除头部前三贡献后的复合近似收益："
             f"`{winner['oos_ex_top3_compound_independent_period_return_pct']:.3f}%`。"
         ),
-        f"- 样本外 Top1 稳健验收：`{bool(winner['oos_robust'])}`。",
-        f"- 样本外 Top3 稳健验收：`{bool(winner['oos_top3_robust'])}`。",
+        f"- 样本外原始收益验收：`{bool(winner['oos_robust'])}`。",
+        (
+            "- 样本外剔除 Top3 诊断（不参与选优）："
+            f"`{bool(winner['oos_top3_robust'])}`。"
+        ),
         "",
         "## 全策略排名",
         "",

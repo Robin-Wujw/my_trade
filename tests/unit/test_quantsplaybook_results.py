@@ -56,3 +56,39 @@ def test_strategy_selection_uses_validation_not_better_oos_return():
     assert not result.iloc[0]["oos_top3_robust"]
     assert result.iloc[1]["oos_robust"]
     assert result.iloc[1]["oos_top3_robust"]
+
+
+def test_strategy_selection_uses_raw_validation_return_not_top1_diagnostic():
+    rows = []
+    for factor, raw, exclude_top1 in (
+        ("raw_winner", 20.0, -5.0),
+        ("top1_diagnostic_winner", 10.0, 8.0),
+    ):
+        for year in (2024, 2025, 2026):
+            rows.append({
+                "factor": factor,
+                "period": str(year),
+                "final_return_pct": raw if year == 2024 else 1.0,
+                "exclude_top1_approx_final_return_pct": (
+                    exclude_top1 if year == 2024 else -1.0
+                ),
+                "exclude_top3_approx_final_return_pct": -2.0,
+                "maximum_drawdown_pct": -5.0,
+                "profit_loss_ratio": 1.2,
+            })
+        rows.append({
+            "factor": factor,
+            "period": "2024_to_date",
+            "final_return_pct": raw + 2.0,
+            "exclude_top1_approx_final_return_pct": exclude_top1,
+            "exclude_top3_approx_final_return_pct": -3.0,
+            "maximum_drawdown_pct": -8.0,
+            "profit_loss_ratio": 1.2,
+            "top1_positive_profit_share_pct": 50.0,
+            "top3_positive_profit_share_pct": 80.0,
+        })
+
+    result = strategy_comparison(pd.DataFrame(rows))
+
+    assert result.iloc[0]["factor"] == "raw_winner"
+    assert result.iloc[0]["oos_robust"]

@@ -12,6 +12,7 @@
 - [Tushare 数据清洗与差异复盘](tushare-data-cleaning-and-divergence-review-2026-07-16.md)：外部数据差异的处理记录。
 - [VectorBT 交叉验证](vectorbt-cross-validation.md)：组合回放和向量化验证边界。
 - [QuantsPlaybook 因子选股复现与组合回测](quantsplaybook-factor-selection-backtest-2026-07-31.md)：27 个研究入口盘点、13 条可执行源因子、3 条冻结组合、112 份回测和样本外集中度结论。
+- [QuantsPlaybook 分散组合回测](quantsplaybook-diversified-combinations-backtest-2026-07-31.md)：类别均衡、权重封顶、低相关和因子配额组合，以及按原始收益冻结的样本外结果。
 
 ## 本机与运维
 
