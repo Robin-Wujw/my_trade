@@ -277,6 +277,36 @@ def test_trade_audit_requires_prior_candidate_and_raw_bar_fill():
     assert summary["all_buy_candidates_strictly_before_execution"] is True
 
 
+def test_trade_audit_accepts_prior_planned_left_grid_without_technical_signal():
+    frame = pd.DataFrame([{
+        "date": pd.Timestamp("2024-01-03"),
+        "raw_low": 9.8,
+        "raw_high": 10.2,
+    }])
+    result = {"trade_ledger": [{
+        "date": "2024-01-03",
+        "code": "sh.600001",
+        "trade_side": "买入",
+        "execution_price": 10.0,
+        "candidate_snapshot_date": "2024-01-02",
+        "account_mode": "left",
+        "technical_signal_timing": (
+            "preplanned_value_grid_limit_no_technical_signal"
+        ),
+    }]}
+
+    audit, summary = audit_portfolio_trades(
+        result,
+        {"sh.600001": frame},
+    )
+
+    assert audit.iloc[0]["violations"] == ""
+    assert pd.isna(
+        audit.iloc[0]["technical_signal_no_later_than_execution"]
+    )
+    assert summary["violation_count"] == 0
+
+
 def test_aggregate_portfolio_summaries_reads_json_not_stale_csv(tmp_path):
     output = tmp_path / "portfolio" / "factor_a"
     output.mkdir(parents=True)

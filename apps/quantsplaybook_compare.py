@@ -687,8 +687,12 @@ def audit_portfolio_trades(
         technical_date = pd.to_datetime(
             trade.get("technical_signal_date"), errors="coerce",
         )
+        requires_technical_signal = (
+            side == "买入"
+            and str(trade.get("account_mode") or "").strip() != "left"
+        )
         technical_timing_ok = (
-            None if side != "买入"
+            None if not requires_technical_signal
             else bool(pd.notna(technical_date) and technical_date.normalize() <= date)
         )
         trigger = pd.to_numeric(trade.get("trigger"), errors="coerce")

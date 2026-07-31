@@ -3543,6 +3543,12 @@ def run_portfolio_backtest(
                     **with_raw_signal_price_metadata(row, {
                         "value_line": grid_anchor,
                         "account_mode": "left",
+                        "candidate_snapshot_date": candidate.get(
+                            "candidate_snapshot_date",
+                        ),
+                        "technical_signal_timing": (
+                            "preplanned_value_grid_limit_no_technical_signal"
+                        ),
                     }),
                 )
 

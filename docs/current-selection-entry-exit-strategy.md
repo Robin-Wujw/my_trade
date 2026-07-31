@@ -3,7 +3,7 @@
 本文是当前代码口径的总说明，优先级高于旧研究报告、参数扫表和临时诊断文档。当前最终链路是：
 
 ```text
-MiniQMT/本地行情与财务缓存 -> 候选快照 v5（价值线行业白名单） -> MiniQMT 回测执行画像 -> 组合买卖引擎
+MiniQMT/本地行情与财务缓存 -> low_corr右侧 + 基本价值线左侧 -> MiniQMT 回测执行画像 -> 组合买卖引擎
 ```
 
 ## 1. 不变量
@@ -16,15 +16,17 @@ MiniQMT/本地行情与财务缓存 -> 候选快照 v5（价值线行业白名�
 
 ## 2. 最终候选池
 
-候选快照由 `stock_research/strategies/historical_candidates.py` 生成，当前版本为 `unified-selection-v5-value-industry-allowlist`。旧 v4 快照不再允许复用为当前生产候选。
+当前候选由 `apps/quantsplaybook_hybrid.py` 合并两条已冻结输入。旧 v4 快照不再允许复用。
 
-- 当前 Tushare 候选池：`var/backtests/tushare_official_candidates_2021_to_20260721_merged/manifest.json`
-- 当前修正后回测摘要：`var/backtests/portfolio_tushare_official_2021_to_20260721_raw_qfq_split_dividend_exdate_sync_left_management_fix_vectorbt/portfolio_2021-01-01_2026-07-21_summary.json`
-- 当前口径：`financial_point_in_time=true`，`strict_financial_point_in_time=true`，`unsafe_snapshot_count=0`；`industry_point_in_time=true`，`industry_point_in_time_status=safe`，行业来源为 Tushare `sw_member` 按 `in_date/out_date` 重建的时点快照。
+- 当前双通道候选：`var/backtests/quantsplaybook_hybrid_low_corr_value_2021_to_20260721/candidates/hybrid_low_corr_value/manifest.json`
+- 右侧源：`var/backtests/quantsplaybook_factor_only_2021_to_20260721/candidates/playbook_low_corr/manifest.json`
+- 左侧源：`var/backtests/tushare_official_candidates_2021_to_20260721_merged/manifest.json`
+- 当前回测摘要：`var/backtests/quantsplaybook_hybrid_low_corr_value_2021_to_20260721/portfolio/hybrid_low_corr_value/portfolio_2021-01-01_2026-07-21_summary.json`
+- 当前口径：右侧行情因子时点有效；左侧 `financial_point_in_time=true`、`strict_financial_point_in_time=true`、`industry_point_in_time=true`，行业来源为 Tushare `sw_member` 按 `in_date/out_date` 重建的时点快照。
 
-### 2.1 硬门槛
+### 2.1 分通道硬门槛
 
-所有可交易候选先过同一组基本门槛：
+左侧价值候选继续执行基本门槛：
 
 - `quality_score >= 70`
 - `earnings_yoy >= 10%`
@@ -32,7 +34,7 @@ MiniQMT/本地行情与财务缓存 -> 候选快照 v5（价值线行业白名�
 - 观察日有有效价格、成交量和成交额
 - 停牌、无交易、缺关键财务或缺行情的股票不补假数据
 
-这组门槛是防止选股模型为了收益去“捡不该买的票”。右侧强势股也不能绕过质量、成长和市值底线。
+右侧 `playbook_low_corr` 不使用旧质量、成长和市值门槛，否则会把 QuantsPlaybook 因子再次变成旧候选池的二次排序。右侧只执行观察日上市/退市、有效成交、风险警示、北交所开市日和至少60日历史等时点可交易门槛，买入时再执行现有技术结构、止损距离和盈亏比门。
 
 ### 2.2 基本价值线行业白名单
 
@@ -55,43 +57,31 @@ MiniQMT/本地行情与财务缓存 -> 候选快照 v5（价值线行业白名�
 
 主线板块标签仍可用于同行业/同主题持仓约束，但不再给 `right_quant_score` 加分。价值线只有在精确行业白名单和全部财务、价格门槛同时通过后，才可作为左侧执行候选。
 
-### 2.4 多因子量化候选
+### 2.4 双通道候选
 
-右侧执行候选来自 `candidate_source=factor_quant`；左侧执行候选只来自通过行业白名单和全部价值门槛的 `value_model`。同一股票同时通过两套模型时合并为 `value_model+factor_quant`，分别保留左、右权限，再统一进入结构、仓位和退出引擎。
+右侧执行候选来自 `candidate_source=quantsplaybook_factor`，固定使用 `playbook_low_corr` 每日 Top50；左侧执行候选只来自通过行业白名单和全部价值门槛的 `value_model`。同一股票同时通过两套模型时合并为 `value_model+quantsplaybook_factor`，分别保留左、右权限，再统一进入结构、仓位和退出引擎。
 
-主要因子：
+`playbook_low_corr` 由 2021-2023 训练期冻结的六条等权因子构成：
 
-- 质量、成长、流动性：`quality_score`、`earnings_yoy`、市值、20 日均成交额
-- 动量与相对强度：5/20/60/120 日收益、距 120 日高点、60 日剔除近 5 日动量、120 日剔除近 20 日动量
-- 趋势效率：60 日收益与波动、下行波动、回撤之间的比值
-- 低风险：60 日回撤、20 日波动、60 日下行波动
-- 趋势稳定：60 日上涨天数比例、MA20/MA60 斜率
-- 结构位置：21 日区间收敛、收盘在区间上沿、有效量价节点数量、离量价节点距离
-- 量价确认：收益与量能相关、换手/成交扩张、有效节点、日内强弱
-- 过热控制：短期涨幅过快、跳空次数、回撤修复过急会扣分
-- 背离环境：KD/RSI/WR 顶背离扣分，底背离加观察价值
-- 市场状态：按横截面 20/60 日收益中位数和上涨比例分为进攻、防守、平衡，并给不同因子加权
+- `network_cc`
+- `ma_convergence`
+- `network_scc`
+- `disposition_reversal`
+- `high_quality_momentum`
+- `coin_team`
 
-入选路径：
-
-- `standard_quant`：排名、综合分、流动性、动量、结构、低风险、回撤全部达标
-- `strong_trend`：强趋势例外，要求排名更靠前、成交额更高，并限制短期追高
-- `high_payoff`：强调盈亏比代理，要求低风险、结构、量价和回撤更优
-- `asymmetric_pivot_watch`：适合刚从平台/枢轴启动的右侧股
-- `compact_attack_core`：最终模型最重要的核心攻击形态，要求排名前 50、`right_quant_score >= 85`、结构排名 >= 80、量价确认 >= 60、低风险 >= 60、60 日收益 >= 15%、60 日回撤不差于 -8%
-- `large_liquid_trend_core`：大市值高流动性趋势核心，要求质量、成长、市值、20 日成交额、60 日趋势、趋势稳定和回撤同时达标；用于覆盖工业、资源、制造等非单一高弹性成长风格，但不降低买点结构要求
-
-所有入选路径统一标记为 `candidate_source=factor_quant`。`right_quant_setup` 只解释形态类型，不决定候选配额。
+候选分数只负责右侧 Top50 排序，不直接买入。旧 `standard_quant`、`compact_attack_core`、`large_liquid_trend_core` 等路径只保留为历史对照，不参与双通道候选生成。
 
 ### 2.5 每日排序
 
-候选综合分不是买入分，而是候选排序分：
+左右候选分数保持独立，不建立跨通道加总分：
 
 ```text
-candidate_score = right_quant_score
+右侧 candidate_score = low_corr 截面百分位
+左侧 candidate_score = 基本价值线候选原有排序分
 ```
 
-候选按 `candidate_score` 统一排序，不再保留价值/主线核心名额。候选池上限只是观察宽度，避免买点出现时因为名单太窄而漏掉；是否买入仍交给买卖引擎的结构、盈亏比、止损距离、仓位和组合约束。
+每日合并后通常为50至53只，低于统一接口60只上限，不会发生左右候选互相挤出。是否买入仍交给买卖引擎的结构、盈亏比、止损距离、价值网格、仓位和组合约束。
 
 ## 3. 买入策略
 
@@ -117,7 +107,7 @@ candidate_score = right_quant_score
 
 候选有完整画像时，必须同时满足：
 
-- 质量、成长、市值硬门槛仍然成立
+- 左侧价值候选必须继续满足质量、成长、市值硬门槛；右侧 `playbook_low_corr` 不重复套用这些基本面门槛
 - `trade_basis_score >= 6.5`；弱量价基础不买
 - 20 日均成交额通常不低于 5 亿元；`compact_attack_core` 可放宽到 4.5 亿元
 - 突破类信号的观察日量能确认 `known_volume_ratio >= 1.0`
@@ -158,7 +148,7 @@ candidate_score = right_quant_score
 - 标准右侧首仓上限 30%
 - Formula33 未确认上行时，试错首仓优先 15% 到 20%
 - Formula33 连续下行达到 3 日时，首仓降到 20%
-- 支撑拉回首仓默认放宽并允许小仓试错：合格形态 15%，极强形态 20%；`factor_quant`、旧 `standard_mainline`、`growth_leadership` 和 `quant_right` 来源均可触发。底线不再使用旧证据分硬卡，而是右侧市场未进入连续 3 日下行、量能接近确认、支撑距离不太宽、交易基础/领导力/右侧量化强度不过弱，并配 7% 空间止损和 8 日时间止损；Formula33 连续下行达到 3 日时仍禁止拉回首仓
+- 支撑拉回首仓默认放宽并允许小仓试错：合格形态 15%，极强形态 20%；`quantsplaybook_factor`、旧 `factor_quant`、`standard_mainline`、`growth_leadership` 和 `quant_right` 来源均可触发。底线不再使用旧证据分硬卡，而是右侧市场未进入连续 3 日下行、量能接近确认、支撑距离不太宽、交易基础/领导力/右侧量化强度不过弱，并配 7% 空间止损和 8 日时间止损；Formula33 连续下行达到 3 日时仍禁止拉回首仓
 - 当前回测默认将支撑拉回试错仓收紧为 8%/10%；大市值高流动性趋势核心使用更小的 6% 首仓，且要求 `trade_ready`、快均线共振和更高支撑拉回盈亏比门槛
 - 已有右仓加仓前，旧批次必须已经证明过；拉回加仓最多按现有仓位 50%，其它加仓最多按 1/3
 - 左转右时，右侧新增仓不超过原左侧仓位的一半
@@ -260,15 +250,12 @@ MiniQMT 回测画像：
 - 买入 30 次，卖出 27 次
 - 主要利润来自 2025 年 6 月以后对核心右侧机会的持有和加仓
 
-当前已将默认首仓、单股暴露和止盈份数改回白大纪律，并完成 Tushare 时点候选、raw 成交/qfq 信号拆分、分红除权持仓调整和 VectorBT 独立复放后的 2021-01-04 至 2026-07-21 回测：
+当前双通道在 raw 成交/qfq 信号拆分、分红送转、T+1、整手、涨跌停和费用口径下完成 2021-01-01 至 2026-07-21 连续回放：
 
-- 总收益：`+159.502%`
-- 已实现收益：`+104.339%`
-- 持仓浮盈：`+55.163%`
-- 最大回撤：`-23.590%`
-- 买入 127 笔，卖出 213 笔；按前一交易日有效候选快照审计，非候选新增买入为 0
-- VectorBT 复放：340 笔订单全部成交复放，6 次公司行为调整，最终收益差 `0.000065` 个百分点，逐日权益最大差为 0
+- 总收益：`+327.635%`
+- 最大回撤：`-16.509%`
+- 盈亏比：`1.625`
+- 右侧买入63笔，左侧买入9笔；全部178笔成交审计违规为0
+- 纯 `playbook_low_corr` 同期为 `+60.962%`、最大回撤 `-20.052%`
 
-该结果的主要不稳定来源是少数强趋势尾仓，尤其是新易盛左侧价值核心在 2024-10-17 被右侧接管后保留尾仓；这属于当前规则允许的“左侧低成本核心 + 右侧接管 + 分仓止盈”路径，但不能简单外推为稳定年化能力。
-
-最新稳健性复核还会同时输出收益集中度和 R 倍数审计。2023-01-01 至 2026-07-21 的冻结输入诊断中，加入大市值趋势核心、快均线支撑门和 1.8% 收盘确认风险下限后，基础组合收益会被新易盛尾仓显著放大；剔除新易盛后收益约为 `+47.415%`、最大回撤约 `-9.487%`，再剔除中际旭创后收益约为 `+18.571%`、最大回撤约 `-9.487%`。因此基础回测的头部收益只能说明系统能拿住少数大趋势，真正评价系统本体时必须同步看剔除头部贡献后的结果、R 倍数和亏损超过 1R 的比例。
+左侧9笔全部来自新易盛在2023年的严格时点价值线候选。该左仓跨年持有，贡献267.825个初始资金百分点，结束时占组合市值63.727%。按当前规则不剔除 Top1，全部收益计入正式结果；集中度只作为风险披露，不参与选优。该结果证明双通道能够保留价值核心并让右侧独立选股，但不能把单一历史大趋势简单外推为未来稳定年化。

@@ -136,3 +136,77 @@ def test_mixed_value_factor_candidate_loses_only_left_permission():
     assert normalized["allow_left"] is False
     assert normalized["allow_right"] is True
     assert "value_industry_audit_conflict" in normalized["candidate_failure_reason"]
+
+
+def test_quantsplaybook_right_candidate_does_not_require_fundamentals():
+    normalized = normalize_candidate({
+        "code": "sz.300001",
+        "candidate_source": "quantsplaybook_factor",
+        "selection_profile": "quantsplaybook_factor_only",
+        "playbook_factor": "playbook_low_corr",
+        "playbook_factor_score": 0.8,
+        "candidate_score": 95.0,
+        "quality_score": 20.0,
+        "earnings_yoy": -0.30,
+        "mktcap": 20.0,
+        "selected_for_trading": True,
+        "signal_eligible": True,
+        "valid_price_bar": float("nan"),
+        "is_traded_bar": float("nan"),
+    })
+
+    assert normalized["allow_left"] is False
+    assert normalized["allow_right"] is True
+    assert normalized["signal_eligible"] is True
+    assert normalized["candidate_score"] == 95.0
+
+
+def test_invalid_value_lane_does_not_disable_quantsplaybook_right_lane():
+    normalized = normalize_candidate({
+        "code": "sz.300502",
+        "candidate_source": "value_model+quantsplaybook_factor",
+        "candidate_score": 97.0,
+        "industry": "通信网络设备及器件",
+        "value_industry_allowed": True,
+        "value_industry_allowlist_match": "通信网络设备及器件",
+        "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
+        "quality_score": 60.0,
+        "earnings_yoy": 0.05,
+        "mktcap": 80.0,
+        "price_to_value": 1.0,
+        "selected_for_trading": True,
+        "signal_eligible": True,
+    })
+
+    assert normalized["allow_left"] is False
+    assert normalized["allow_right"] is True
+    assert normalized["signal_eligible"] is True
+    assert "quality_score_below_70" in normalized["candidate_failure_reason"]
+    assert "earnings_yoy_below_10pct" in normalized["candidate_failure_reason"]
+    assert "mktcap_below_100" in normalized["candidate_failure_reason"]
+
+
+def test_value_and_quantsplaybook_overlap_keeps_both_lanes_and_right_score():
+    normalized = normalize_candidate({
+        "code": "sz.300502",
+        "candidate_source": "value_model+quantsplaybook_factor",
+        "selection_profile": "quantsplaybook_factor_only",
+        "playbook_factor": "playbook_low_corr",
+        "playbook_factor_score": 0.8,
+        "candidate_score": 97.0,
+        "industry": "通信网络设备及器件",
+        "value_industry_allowed": True,
+        "value_industry_allowlist_match": "通信网络设备及器件",
+        "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
+        "quality_score": 90,
+        "earnings_yoy": 0.30,
+        "mktcap": 200,
+        "price_to_value": 1.0,
+        "selected_for_trading": True,
+        "signal_eligible": True,
+    })
+
+    assert normalized["allow_left"] is True
+    assert normalized["allow_right"] is True
+    assert normalized["signal_eligible"] is True
+    assert normalized["candidate_score"] == 97.0
