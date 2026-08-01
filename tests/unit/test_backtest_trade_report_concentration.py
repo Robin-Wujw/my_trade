@@ -122,4 +122,5 @@ def test_trade_report_renders_profit_concentration_diagnostics():
     assert "30.35%" in markdown
     assert "R 倍数审计" in markdown
     assert "实现-2.00R" in markdown
-    assert "hard_space_stop" in markdown
+    assert "空间硬止损" in markdown
+    assert "hard_space_stop" not in markdown

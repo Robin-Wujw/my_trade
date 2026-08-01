@@ -1,5 +1,6 @@
 from stock_research.reporting.backtest_trade_report import (
     build_readable_trade_frame,
+    readable_reason,
     render_trade_report_markdown,
 )
 
@@ -95,3 +96,19 @@ def test_trade_report_labels_left_grid_prices_and_blocked_signals():
     assert "中际旭创（sz.300308） | 左侧" in markdown
     assert "连阳一半拉回" in markdown
     assert "价格未触发成交" in markdown
+
+
+def test_trade_report_translates_profit_and_stop_conditions():
+    assert readable_reason(
+        "止盈条件=profit_floor,trailing_10,volume_node_break:2025-05-14; "
+        "14:55/close proxy",
+    ) == (
+        "止盈条件：利润保护线、从阶段高点回撤10%、"
+        "跌破量价节点（节点日2025-05-14）；14:55收盘代理价成交"
+    )
+    assert readable_reason(
+        "R73; hard space stop 3.125; intraday_stop",
+    ) == "空间硬止损 3.125；盘中硬止损成交"
+    assert readable_reason(
+        "R10; entry time condition; 14:55/close proxy",
+    ) == "入场时间条件退出；14:55收盘代理价成交"

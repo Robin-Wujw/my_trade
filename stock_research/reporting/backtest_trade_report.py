@@ -8,6 +8,11 @@ import pandas as pd
 
 
 _REASON_REPLACEMENTS = {
+    "leader pivot close breakout": "龙头枢轴收盘突破",
+    "stop 5pct below breakout line": "突破线下方5%止损",
+    "entry time condition": "入场时间条件退出",
+    "hard space stop": "空间硬止损",
+    "close_confirmed": "收盘确认成交",
     "intraday_breakout": "盘中突破成交",
     "gap_breakout": "跳空越过触发价成交",
     "gap_or_open_fill": "开盘已触发成交",
@@ -18,23 +23,89 @@ _REASON_REPLACEMENTS = {
     "14:55/close proxy": "14:55收盘代理价成交",
 }
 
+_PROFIT_CONDITION_REPLACEMENTS = {
+    "profit_floor": "利润保护线",
+    "trailing_10": "从阶段高点回撤10%",
+    "rising_ma20_break_3pct": "跌破上行MA20 3%",
+}
+
+_EXIT_REASON_REPLACEMENTS = {
+    "condition_stop": "收盘条件止损",
+    "hard_space_stop": "空间硬止损",
+    "profit_floor": "利润保护线止盈",
+    "entry_time_condition": "入场时间条件退出",
+    "other": "其他退出",
+    "trailing_10": "从阶段高点回撤10%止盈",
+    "volume_node_break": "跌破量价节点止盈",
+}
+
 _BLOCK_REASON_REPLACEMENTS = {
+    "missing_signal": "没有有效技术信号",
+    "invalid_or_non_protective_stop": "止损价无效或不能保护本金",
+    "quality_hard_gate_failed": "质量硬门槛未通过",
+    "growth_hard_gate_failed": "增长硬门槛未通过",
+    "market_cap_hard_gate_failed": "市值硬门槛未通过",
+    "trade_basis_too_weak": "交易基础过弱",
+    "liquidity_too_thin": "流动性不足",
+    "weak_20d_relative_strength": "20日相对强度不足",
+    "weak_relative_strength": "相对强度不足",
+    "large_liquid_trend_watch_only": "大市值高流动性趋势核心仅观察",
+    "support_pullback_without_fast_ma_confluence": "支撑拉回缺少快速均线共振",
+    "volume_confirmation_missing": "缺少量能确认",
+    "late_acceleration_chase": "加速末段，不追高",
+    "risk_pct_too_tight": "止损距离过窄",
+    "close_confirmed_risk_pct_too_tight": "收盘确认买点的止损距离过窄",
+    "risk_pct_too_wide": "止损距离过宽",
+    "reward_risk_too_low": "计划盈亏比不足",
     "entry_evidence_below_min": "旧证据分低于历史参数（仅解释字段）",
     "order_not_filled": "价格未触发成交",
     "support_pullback_not_first_entry": "支撑拉回首仓放宽后仍未达量化底线，需等待量能/强度/支撑距离改善",
+    "add_current_profit_not_met": "现有仓位浮盈未达到加仓条件",
+    "total_symbol_limit": "全部持股已达5只上限",
+    "industry_or_correlation_limit": "同行业或高相关标的数量已达上限",
+    "new_symbol_unlock_not_met": "新标的开仓解锁条件未满足",
+    "weak_replacement_scheduled": "已安排下一交易日汰弱换强",
+    "symbol_limit_no_weak_replacement": "仓位已满且没有可替换弱仓",
+    "symbol_exposure_cap": "单股仓位已达上限",
+    "gross_exposure_cap": "组合总仓位已达上限",
+    "cash_or_board_lot_limit": "现金不足或不足一手",
+    "left_to_right_management_only_without_current_candidate": "非当日候选，仅执行左转右管理状态检查",
+    "left_to_right_add_on_cash_or_board_lot_limit": "左转右已完成，但现金不足或附加仓不足一手",
 }
 
 _SIGNAL_TYPE_REPLACEMENTS = {
     "bull_run_half_pullback": "连阳一半拉回",
+    "consolidation_breakout": "整理平台突破",
+    "gap_long_ma_breakout": "跳空长阳突破长期均线",
+    "leader_pivot_breakout": "龙头枢轴突破",
+    "leader_trend_add": "龙头趋势加仓",
     "uptrend_support_pullback": "上涨波段支撑拉回",
     "pullback_50_breakout": "回调50%放量突破",
     "uptrend_50_reclaim": "上涨50%收复",
+    "volume_price_node": "量价节点突破",
+}
+
+_NOTE_REPLACEMENTS = {
+    "exclude_topN is a contribution subtraction diagnostic, not a cash-rebalanced rerun.": (
+        "剔除头部贡献只是从收益贡献中做减法诊断，并非重新按现金再平衡回测。"
+    ),
+    "R is measured from each fill's raw entry price to its initial raw stop.": (
+        "R按每笔成交的原始入场价到初始原始止损价之间的风险距离计算。"
+    ),
 }
 
 
 def _fmt_number(value, digits=3) -> str:
     number = _number(value, digits)
     return "" if number is None else f"{number:,.{digits}f}"
+
+
+def _profit_condition_text(value) -> str:
+    raw = str(value or "").strip()
+    if raw.startswith("volume_node_break:"):
+        date = raw.split(":", 1)[1]
+        return f"跌破量价节点（节点日{date}）"
+    return _PROFIT_CONDITION_REPLACEMENTS.get(raw, raw)
 
 
 def readable_reason(value, event: dict | None = None) -> str:
@@ -45,6 +116,11 @@ def readable_reason(value, event: dict | None = None) -> str:
         part = raw.strip()
         if not part or re.fullmatch(r"[Rr]\d+", part):
             continue
+        if part.startswith("止盈条件="):
+            conditions = part.split("=", 1)[1].split(",")
+            part = "止盈条件：" + "、".join(
+                _profit_condition_text(condition) for condition in conditions
+            )
         if left_grid:
             part = part.replace("上一格卖出", "上一格网格卖价")
         for source, target in _REASON_REPLACEMENTS.items():
@@ -231,12 +307,31 @@ def _mode_text(value) -> str:
 
 def _block_reason_text(value) -> str:
     raw = str(value or "")
+    if ":" in raw:
+        prefix, detail = raw.split(":", 1)
+        if prefix in _BLOCK_REASON_REPLACEMENTS:
+            return f"{_BLOCK_REASON_REPLACEMENTS[prefix]}（{detail}）"
     return _BLOCK_REASON_REPLACEMENTS.get(raw, raw or "未成交")
 
 
 def _signal_type_text(value) -> str:
     raw = str(value or "")
     return _SIGNAL_TYPE_REPLACEMENTS.get(raw, raw or "—")
+
+
+def _exit_reason_text(value) -> str:
+    raw = str(value or "")
+    return _EXIT_REASON_REPLACEMENTS.get(raw, raw or "其他退出")
+
+
+def _note_text(value) -> str:
+    raw = str(value or "")
+    return _NOTE_REPLACEMENTS.get(raw, raw)
+
+
+def _table_number(value, digits=2):
+    number = _number(value, digits)
+    return "—" if number is None else number
 
 
 def _render_profit_concentration(result: dict) -> list[str]:
@@ -290,7 +385,7 @@ def _render_profit_concentration(result: dict) -> list[str]:
             )
     note = summary.get("note")
     if note:
-        lines.extend(["", f"> {note}"])
+        lines.extend(["", f"> {_note_text(note)}"])
     return lines
 
 
@@ -305,7 +400,7 @@ def _render_r_multiple_audit(result: dict) -> list[str]:
         f"- 计划入场盈亏比：均值{_number(summary.get('average_entry_reward_risk'), 2) or '—'}R；中位数{_number(summary.get('median_entry_reward_risk'), 2) or '—'}R",
         f"- 实际卖出 R：均值{_number(summary.get('average_realized_r'), 2) or '—'}R；中位数{_number(summary.get('median_realized_r'), 2) or '—'}R",
         f"- 胜率：{_pct(summary.get('sell_win_rate_pct'))}；赢家均值{_number(summary.get('average_win_r'), 2) or '—'}R；输家均值{_number(summary.get('average_loss_r'), 2) or '—'}R",
-        f"- R 盈亏比：{_number(summary.get('payoff_r'), 2) or '—'}；R Profit Factor：{_number(summary.get('profit_factor_r'), 2) or '—'}",
+        f"- R 盈亏比：{_number(summary.get('payoff_r'), 2) or '—'}；R 利润因子：{_number(summary.get('profit_factor_r'), 2) or '—'}",
         f"- 亏损超过 1R：{summary.get('loss_beyond_one_r_count', 0)} 次，占全部可审计卖出 {_pct(summary.get('loss_beyond_one_r_pct'))}",
     ]
     realized_to_planned = summary.get("average_realized_to_planned_rr_pct")
@@ -320,7 +415,7 @@ def _render_r_multiple_audit(result: dict) -> list[str]:
         ])
         for row in rows:
             lines.append(
-                f"| {row.get('exit_reason')} | {row.get('sell_count', 0)} | "
+                f"| {_exit_reason_text(row.get('exit_reason'))} | {row.get('sell_count', 0)} | "
                 f"{_number(row.get('average_realized_r'), 2) or '—'} | "
                 f"{_number(row.get('median_realized_r'), 2) or '—'} | "
                 f"{_number(row.get('net_realized_r'), 2) or '—'} | "
@@ -328,7 +423,7 @@ def _render_r_multiple_audit(result: dict) -> list[str]:
             )
     note = summary.get("note")
     if note:
-        lines.extend(["", f"> {note}"])
+        lines.extend(["", f"> {_note_text(note)}"])
     return lines
 
 
@@ -398,9 +493,9 @@ def _render_relevant_entry_blocks(result: dict, *, max_rows_per_code: int = 20) 
             lines.append(
                 f"| {names.get(code, code)}（{code}） | {item.get('date') or ''} | "
                 f"{_signal_type_text(item.get('signal_type'))} | "
-                f"{_number(item.get('entry_evidence_score'), 2)} | "
-                f"{_number(item.get('trade_basis_score'), 2)} | "
-                f"{_number(item.get('leadership_score'), 2)} | "
+                f"{_table_number(item.get('entry_evidence_score'), 2)} | "
+                f"{_table_number(item.get('trade_basis_score'), 2)} | "
+                f"{_table_number(item.get('leadership_score'), 2)} | "
                 f"{_block_reason_text(item.get('reason'))} |"
             )
     return lines
