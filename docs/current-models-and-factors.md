@@ -177,6 +177,7 @@ network_cc = (network_scc + network_tcc) / 2
 | `playbook_capped_ic_weighted` | 正 IC 加权，类别上限 30%、单因子上限 15% | 研究对照 |
 | `playbook_low_corr` | 正 IC 因子中贪心选 6 个低相关因子并等权 | **现行右侧模型** |
 | `playbook_factor_quota` | 正 IC 因子间轮流分配候选名额 | 研究对照 |
+| `playbook_strategy_aligned` | 动量、均线收敛、买压三因子等权 | 研究对照，回测未通过，不启用 |
 
 因子类别固定为：
 
@@ -184,6 +185,8 @@ network_cc = (network_scc + network_tcc) / 2
 - `behavior_and_flow`：`coin_team`、`buying_pressure`、`disposition_reversal`、`chip_loss_overhang`
 - `risk_and_momentum`：`low_idiosyncratic_volatility`、`high_quality_momentum`
 - `network`：`network_cc`、`network_scc`、`network_tcc`
+
+`playbook_strategy_aligned` 是在现行模型冻结后新增的交易语义对照，不参与原 2024 选优。其全周期收益和回撤均差于 `playbook_low_corr`，正式模型保持不变；结果见 `docs/strategy-aligned-selection-backtest-2026-08-02.md`。
 
 ## 5. 现行左侧模型：value_model
 

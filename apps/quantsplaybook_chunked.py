@@ -43,6 +43,12 @@ COMBINATION_FACTORS = (
     "playbook_capped_ic_weighted",
     "playbook_low_corr",
     "playbook_factor_quota",
+    "playbook_strategy_aligned",
+)
+STRATEGY_ALIGNED_FACTORS = (
+    "high_quality_momentum",
+    "ma_convergence",
+    "buying_pressure",
 )
 FACTOR_CATEGORIES = {
     "price_structure": (
@@ -247,6 +253,12 @@ def _declared_combination_specs(
         for factor in low_corr_factors
     }
     quota_factors = positive.index.tolist()
+    strategy_aligned_factors = [
+        factor for factor in STRATEGY_ALIGNED_FACTORS
+        if factor in source_factors
+    ]
+    if not strategy_aligned_factors:
+        raise RuntimeError("strategy-aligned factors are unavailable")
     specs = {
         "playbook_ensemble": {
             "method": "equal_weight_all_source_factor_streams",
@@ -284,6 +296,18 @@ def _declared_combination_specs(
                 for factor in quota_factors
             },
             "selected_factors": quota_factors,
+        },
+        "playbook_strategy_aligned": {
+            "method": "equal_weight_strategy_aligned_right_side_factors",
+            "weights": {
+                factor: 1.0 / len(strategy_aligned_factors)
+                for factor in strategy_aligned_factors
+            },
+            "selected_factors": strategy_aligned_factors,
+            "selection_rationale": (
+                "fixed before this comparison to align candidate ranking with "
+                "trend continuation, structure convergence, and buying pressure"
+            ),
         },
     }
     return specs

@@ -13,12 +13,12 @@ from stock_research.strategies.fundamental_selection import (
 from stock_research.strategies.historical_candidates import SNAPSHOT_VERSION
 
 
-def _right(code="A"):
+def _right(code="A", factor="playbook_low_corr"):
     return {
         "code": code,
         "name": code,
         "candidate_score": 99.0,
-        "playbook_factor": "playbook_low_corr",
+        "playbook_factor": factor,
         "playbook_factor_score": 0.9,
         "selected_for_trading": True,
         "signal_eligible": True,
@@ -134,3 +134,69 @@ def test_hybrid_builder_records_source_fingerprints(tmp_path):
     assert manifest["industry_source_path"] == str(industry_source)
     assert manifest["industry_point_in_time_status"] == "safe"
     assert manifest["industry_coverage_ratio"] == 1.0
+
+
+def test_hybrid_builder_records_non_default_right_factor(tmp_path):
+    right = tmp_path / "right"
+    left = tmp_path / "left"
+    output = tmp_path / "hybrid_strategy_aligned_value"
+    right.mkdir()
+    left.mkdir()
+    right_frame = pd.DataFrame([
+        _right(factor="playbook_strategy_aligned"),
+    ])
+    left_frame = pd.DataFrame([_left()])
+    right_frame.to_csv(right / "candidates_2024-01-02.csv", index=False)
+    left_frame.to_csv(left / "candidates_2024-01-02.csv", index=False)
+    industry_source = tmp_path / "industry.csv"
+    industry_source.write_text("code,industry\nA,test\n", encoding="utf-8")
+    common = {
+        "version": SNAPSHOT_VERSION,
+        "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
+        "financial_point_in_time": True,
+        "snapshots": [{
+            "date": "2024-01-02",
+            "file": "candidates_2024-01-02.csv",
+            "candidate_count": 1,
+            "industry_point_in_time": True,
+        }],
+    }
+    (right / "manifest.json").write_text(
+        json.dumps({
+            **common,
+            "factor": "playbook_strategy_aligned",
+        }),
+        encoding="utf-8",
+    )
+    (left / "manifest.json").write_text(
+        json.dumps({
+            **common,
+            "strict_financial_point_in_time": True,
+            "industry_point_in_time": True,
+            "industry_source_path": str(industry_source),
+            "industry_source_sha256": hashlib.sha256(
+                industry_source.read_bytes()
+            ).hexdigest(),
+            "industry_as_of_date": "2024-01-02",
+            "industry_data_source": "test:dated_membership",
+            "industry_point_in_time_status": "safe",
+            "industry_coverage_ratio": 1.0,
+        }),
+        encoding="utf-8",
+    )
+
+    build_hybrid_candidates(
+        right_directory=right,
+        left_directory=left,
+        output_directory=output,
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+    )
+
+    manifest = json.loads(
+        (output / "manifest.json").read_text(encoding="utf-8")
+    )
+    candidates = pd.read_csv(output / "candidates_2024-01-02.csv")
+    assert manifest["right_lane"]["factor"] == "playbook_strategy_aligned"
+    assert manifest["selection_profile"] == "hybrid_strategy_aligned_value"
+    assert candidates.iloc[0]["hybrid_lane"] == "right_strategy_aligned"

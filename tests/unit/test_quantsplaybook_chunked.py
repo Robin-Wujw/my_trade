@@ -58,6 +58,35 @@ def test_declared_combinations_use_training_metrics_only():
     assert specs["playbook_factor_quota"]["combination_type"] == (
         "round_robin_factor_quota"
     )
+    assert specs["playbook_strategy_aligned"]["weights"] == {
+        "high_quality_momentum": 1.0,
+    }
+
+
+def test_strategy_aligned_combination_uses_three_fixed_equal_weights():
+    training = pd.DataFrame([
+        {
+            "factor": factor,
+            "mean_rank_ic": 0.01,
+            "top20_excess_forward_return": 0.01,
+        }
+        for factor in (
+            "high_quality_momentum",
+            "ma_convergence",
+            "buying_pressure",
+        )
+    ]).set_index("factor")
+
+    specs = _declared_combination_specs(
+        training,
+        positive_ic_top_n=3,
+    )
+
+    assert specs["playbook_strategy_aligned"]["weights"] == {
+        "high_quality_momentum": 1.0 / 3.0,
+        "ma_convergence": 1.0 / 3.0,
+        "buying_pressure": 1.0 / 3.0,
+    }
 
 
 def test_capped_weights_sum_to_one_and_respect_cap():

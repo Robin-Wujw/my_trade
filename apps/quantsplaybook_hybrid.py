@@ -104,7 +104,12 @@ def _left_rows(rows: list[dict]) -> dict[str, dict]:
     return selected
 
 
-def _right_rows(rows: list[dict]) -> dict[str, dict]:
+def _right_rows(
+    rows: list[dict],
+    *,
+    right_factor: str,
+) -> dict[str, dict]:
+    lane = f"right_{right_factor.removeprefix('playbook_')}"
     selected = {}
     for source in rows:
         if not all(
@@ -118,7 +123,7 @@ def _right_rows(rows: list[dict]) -> dict[str, dict]:
         row.update({
             "candidate_source": "quantsplaybook_factor",
             "selection_profile": "quantsplaybook_factor_only",
-            "hybrid_lane": "right_low_corr",
+            "hybrid_lane": lane,
             "allow_left": False,
             "allow_right": True,
         })
@@ -134,9 +139,12 @@ def _candidate_score(row: dict) -> float:
 def merge_hybrid_rows(
     right_rows: list[dict],
     left_rows: list[dict],
+    *,
+    right_factor: str = "playbook_low_corr",
 ) -> list[dict]:
-    right = _right_rows(right_rows)
+    right = _right_rows(right_rows, right_factor=right_factor)
     left = _left_rows(left_rows)
+    right_lane = f"right_{right_factor.removeprefix('playbook_')}"
     result = []
     for code in sorted(set(right) | set(left)):
         if code in right and code in left:
@@ -151,7 +159,7 @@ def merge_hybrid_rows(
                     row[field] = factor[field]
             row.update({
                 "candidate_source": "value_model+quantsplaybook_factor",
-                "hybrid_lane": "left_value+right_low_corr",
+                "hybrid_lane": f"left_value+{right_lane}",
                 "allow_left": True,
                 "allow_right": True,
             })
@@ -194,6 +202,11 @@ def build_hybrid_candidates(
     output = Path(output_directory)
     right_manifest = _read_manifest(right_directory, lane="right")
     left_manifest = _read_manifest(left_directory, lane="left")
+    right_factor = str(
+        right_manifest.get("factor") or right_directory.name
+    ).strip()
+    if not right_factor:
+        raise RuntimeError(f"right factor is missing: {right_directory}")
     validate_candidate_manifest_financial_point_in_time(left_directory)
     validate_candidate_manifest_industry_point_in_time(left_directory)
 
@@ -208,13 +221,17 @@ def build_hybrid_candidates(
     total_right = 0
     total_overlap = 0
     for date in dates:
-        rows = merge_hybrid_rows(right.get(date, []), left.get(date, []))
+        rows = merge_hybrid_rows(
+            right.get(date, []),
+            left.get(date, []),
+            right_factor=right_factor,
+        )
         frame = pd.DataFrame(rows)
         path = output / f"candidates_{date}.csv"
         frame.to_csv(path, index=False, encoding="utf-8-sig")
         lanes = frame.get("hybrid_lane", pd.Series(dtype=str)).fillna("")
         left_count = int(lanes.str.contains("left_value", regex=False).sum())
-        right_count = int(lanes.str.contains("right_low_corr", regex=False).sum())
+        right_count = int(lanes.str.contains("right_", regex=False).sum())
         overlap_count = int(lanes.str.contains("+", regex=False).sum())
         total_left += left_count
         total_right += right_count
@@ -248,10 +265,10 @@ def build_hybrid_candidates(
             for field in INDUSTRY_MANIFEST_FIELDS
         },
         "selection_engine": "quantsplaybook_right_plus_value_left",
-        "selection_profile": HYBRID_FACTOR,
+        "selection_profile": output.name,
         "signal_timing": "close_t_signal_earliest_execution_t_plus_1",
         "right_lane": {
-            "factor": "playbook_low_corr",
+            "factor": right_factor,
             "candidate_directory": str(right_directory),
             "manifest_sha256": _sha256(right_directory / "manifest.json"),
             "industry_data_used": False,
@@ -264,7 +281,7 @@ def build_hybrid_candidates(
             "industry_point_in_time": True,
         },
         "lane_policy": (
-            "right candidates only from frozen playbook_low_corr; left candidates "
+            f"right candidates only from {right_factor}; left candidates "
             "only from executable value_model; scores are not added across lanes"
         ),
         "total_left_candidate_rows": total_left,
