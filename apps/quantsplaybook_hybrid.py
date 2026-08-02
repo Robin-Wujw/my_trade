@@ -202,6 +202,15 @@ def build_hybrid_candidates(
     output = Path(output_directory)
     right_manifest = _read_manifest(right_directory, lane="right")
     left_manifest = _read_manifest(left_directory, lane="left")
+    right_uses_financial = right_manifest.get("uses_financial_data") is True
+    right_strict_financial = (
+        right_manifest.get("strict_financial_point_in_time") is not False
+        if right_uses_financial else True
+    )
+    strict_financial = bool(
+        left_manifest.get("strict_financial_point_in_time") is True
+        and right_strict_financial
+    )
     right_factor = str(
         right_manifest.get("factor") or right_directory.name
     ).strip()
@@ -246,6 +255,7 @@ def build_hybrid_candidates(
             "right_candidate_count": right_count,
             "overlap_candidate_count": overlap_count,
             "financial_point_in_time": True,
+            "strict_financial_point_in_time": strict_financial,
             "industry_point_in_time": True,
         })
     manifest = {
@@ -257,7 +267,7 @@ def build_hybrid_candidates(
         "start_date": dates[0],
         "end_date": dates[-1],
         "financial_point_in_time": True,
-        "strict_financial_point_in_time": True,
+        "strict_financial_point_in_time": strict_financial,
         "unsafe_snapshot_count": 0,
         "industry_point_in_time": True,
         **{
@@ -272,6 +282,8 @@ def build_hybrid_candidates(
             "candidate_directory": str(right_directory),
             "manifest_sha256": _sha256(right_directory / "manifest.json"),
             "industry_data_used": False,
+            "uses_financial_data": right_uses_financial,
+            "strict_financial_point_in_time": right_strict_financial,
         },
         "left_lane": {
             "factor": "basic_value_line",
@@ -284,6 +296,7 @@ def build_hybrid_candidates(
             f"right candidates only from {right_factor}; left candidates "
             "only from executable value_model; scores are not added across lanes"
         ),
+        "research_only": not strict_financial,
         "total_left_candidate_rows": total_left,
         "total_right_candidate_rows": total_right,
         "total_overlap_candidate_rows": total_overlap,

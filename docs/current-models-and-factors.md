@@ -178,6 +178,8 @@ network_cc = (network_scc + network_tcc) / 2
 | `playbook_low_corr` | 正 IC 因子中贪心选 6 个低相关因子并等权 | **现行右侧模型** |
 | `playbook_factor_quota` | 正 IC 因子间轮流分配候选名额 | 研究对照 |
 | `playbook_strategy_aligned` | 动量、均线收敛、买压三因子等权 | 研究对照，回测未通过，不启用 |
+| `fundamental_smooth_high_stage2_vcp` | 基本面动量、平滑52周新高、Stage 2/VCP 三路配额 | 研究对照，回测未通过，不启用 |
+| `playbook_low_corr_plus_smooth5` | 保留 low_corr Top50，追加低优先级 smooth Top5 | 稳健性复核未通过，不启用 |
 
 因子类别固定为：
 
@@ -187,6 +189,8 @@ network_cc = (network_scc + network_tcc) / 2
 - `network`：`network_cc`、`network_scc`、`network_tcc`
 
 `playbook_strategy_aligned` 是在现行模型冻结后新增的交易语义对照，不参与原 2024 选优。其全周期收益和回撤均差于 `playbook_low_corr`，正式模型保持不变；结果见 `docs/strategy-aligned-selection-backtest-2026-08-02.md`。
+
+三路外部研究对照和 smooth 补位也均未通过。三路等配额全周期收益为 -41.921%，`low_corr Top50 + smooth Top5` 为 +45.346%，都显著落后现行 +90.015% 基线；两轮成交审计违规均为0，因此不以数据错位解释失败。详细公式、时点限制和结果见 `docs/three-lane-selection-backtest-2026-08-02.md`。
 
 ## 5. 现行左侧模型：value_model
 
@@ -267,6 +271,9 @@ QuantsPlaybook 盘点包含 27 个研究入口，但本项目只把数据条件�
 
 - 源因子定义与计算：`stock_research/strategies/quantsplaybook_selection.py`
 - 组合训练与冻结：`apps/quantsplaybook_chunked.py`
+- 三路研究模型：`stock_research/strategies/three_lane_selection.py`
+- 三路候选生成：`apps/three_lane_candidates.py`
+- 主流加低优先级补位：`apps/quantsplaybook_supplement.py`
 - 左右候选合并：`apps/quantsplaybook_hybrid.py`
 - 候选接口与价值门槛：`stock_research/strategies/candidate_interface.py`
 - 组合成交引擎：`stock_research/strategies/portfolio_backtest.py`
@@ -274,3 +281,4 @@ QuantsPlaybook 盘点包含 27 个研究入口，但本项目只把数据条件�
 - 因子复现记录：`docs/quantsplaybook-factor-selection-backtest-2026-07-31.md`
 - 组合比较记录：`docs/quantsplaybook-diversified-combinations-backtest-2026-07-31.md`
 - 双通道回测记录：`docs/quantsplaybook-hybrid-low-corr-value-backtest-2026-07-31.md`
+- 三路与 smooth 补位记录：`docs/three-lane-selection-backtest-2026-08-02.md`

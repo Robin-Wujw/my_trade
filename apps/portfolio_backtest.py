@@ -1308,6 +1308,10 @@ def candidate_manifest_financial_status(candidate_directory):
     return {
         "available": True,
         "financial_point_in_time": manifest.get("financial_point_in_time"),
+        "strict_financial_point_in_time": manifest.get(
+            "strict_financial_point_in_time"
+        ),
+        "uses_financial_data": manifest.get("uses_financial_data"),
         "unsafe_dates": unsafe_dates,
         "path": str(path),
     }
@@ -1327,7 +1331,11 @@ def validate_candidate_manifest_financial_point_in_time(
             "use --allow-unsafe-financial only for research backtests. "
             f"manifest={status['path']}"
         )
-    if status["financial_point_in_time"] is False or status["unsafe_dates"]:
+    if (
+        status["financial_point_in_time"] is False
+        or status["strict_financial_point_in_time"] is False
+        or status["unsafe_dates"]
+    ):
         preview = ", ".join(status["unsafe_dates"][:5])
         raise RuntimeError(
             "candidate manifest is not strict financial point-in-time; "

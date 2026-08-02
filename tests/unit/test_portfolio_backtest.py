@@ -5037,6 +5037,32 @@ def test_missing_candidate_manifest_financial_point_in_time_fails_closed(tmp_pat
     )["available"] is False
 
 
+def test_revision_incomplete_financial_manifest_requires_research_override(tmp_path):
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({
+            "financial_point_in_time": True,
+            "strict_financial_point_in_time": False,
+            "uses_financial_data": True,
+            "snapshots": [{
+                "date": "2024-09-24",
+                "candidate_count": 10,
+                "financial_point_in_time": True,
+            }],
+        }),
+        encoding="utf-8",
+    )
+
+    status = candidate_manifest_financial_status(tmp_path)
+
+    assert status["financial_point_in_time"] is True
+    assert status["strict_financial_point_in_time"] is False
+    with pytest.raises(RuntimeError, match="not strict financial point-in-time"):
+        validate_candidate_manifest_financial_point_in_time(tmp_path)
+    assert validate_candidate_manifest_financial_point_in_time(
+        tmp_path, allow_unsafe_financial=True,
+    )["strict_financial_point_in_time"] is False
+
+
 def test_backtest_input_coverage_rejects_non_pit_candidate_manifest(tmp_path):
     (tmp_path / "manifest.json").write_text(
         json.dumps({
