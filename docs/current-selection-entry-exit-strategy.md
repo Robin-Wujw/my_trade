@@ -1,5 +1,7 @@
 # 当前选股策略（完全版）与买卖策略（详细版）
 
+> 2026-09-21 审计提示：旧收益产物已发现成交时序及公司行动会计问题；同输入对照、独立账本验收和数据限制见[回测框架审计与基线重建](backtest-framework-audit-2026-09-21.md)。本页保留原基线引用，不据旧收益宣称新框架已验收。
+
 本文是当前代码口径的总说明，优先级高于旧研究报告、参数扫表和临时诊断文档。当前最终链路是：
 
 现行模型、源因子公式及组合模型清单统一见[当前模型与因子清单](current-models-and-factors.md)。本文继续负责候选接入后的建仓、加仓、止损、止盈和退出规则。
@@ -14,17 +16,19 @@ MiniQMT/本地行情与财务缓存 -> low_corr右侧 + 基本价值线左侧 ->
 - 所有候选只使用观察日当时可见的信息。行情切到观察日，财务使用逐公司公告日可见口径；不允许用回测结束后的财报、复权锚点或行业名单倒灌历史。
 - 候选池只负责“选哪只”；买卖引擎只负责“何时买、买多少、错了哪里止损、盈利怎么处理”。选股强不等于立刻买入。
 - 人工观察名单、持仓计划和历史牛股复盘不能直接注入候选池，只能作为显式计划或诊断。
-- 买入信号默认次日生效；MiniQMT 回测里用 `close_proxy` 近似 14:55/收盘确认执行。日 K 回测不能声称自己知道盘中真实排队成交。
+- 收盘确认买入默认使用 `next_open`，前收盘冻结后于次日开盘检查成交；预置 stop/limit 订单亦不得使用执行日收盘信息。`close_proxy` 是显式研究选项，近似收盘执行，不能声称掌握真实 14:55 成交或排队情况。
+- 组合回测默认统一使用佣金 `0.0085%`、最低佣金 `5` 元、卖出印花税 `0.05%`、2023-08-28 前印花税 `0.10%` 和估算滑点 `0.05%`。直接调用引擎、CLI、MiniQMT 画像和逐年回测入口共享同一组默认值；需要零成本或收盘代理时必须显式传参，并在结果摘要中核对执行参数。
+- 组合按公司行动、开盘、盘中、收盘和日终估值分阶段处理；每阶段的买入现金预算和持仓名额在阶段开始时固定，不用该阶段未知先后卖出的所得倒推买单。
 
 ## 2. 最终候选池
 
 当前候选由 `apps/quantsplaybook_hybrid.py` 合并两条已冻结输入。旧 v4 快照不再允许复用。
 
-- 当前双通道候选：`var/backtests/quantsplaybook_hybrid_low_corr_value_2021_to_20260721/candidates/hybrid_low_corr_value/manifest.json`
-- 右侧源：`var/backtests/quantsplaybook_factor_only_2021_to_20260721/candidates/playbook_low_corr/manifest.json`
+- 当前双通道候选：`var/backtests/one_network_price_only_low_residual_volatility_liquidity_30m_experiment/hybrid/candidates/hybrid_low_residual_volatility_liquidity_30m_top50/manifest.json`
+- 右侧源：`var/backtests/one_network_price_only_low_residual_volatility_liquidity_30m_experiment/candidates/playbook_low_corr_network_cap1_price_only_residual_volatility_liquidity_30m/manifest.json`
 - 左侧源：`var/backtests/tushare_official_candidates_2021_to_20260721_merged/manifest.json`
-- 当前回测摘要：`var/backtests/quantsplaybook_hybrid_low_corr_value_2021_to_20260721/portfolio/hybrid_low_corr_value/portfolio_2021-01-01_2026-07-21_summary.json`
-- 当前口径：右侧行情因子时点有效；左侧 `financial_point_in_time=true`、`strict_financial_point_in_time=true`、`industry_point_in_time=true`，行业来源为 Tushare `sw_member` 按 `in_date/out_date` 重建的时点快照。
+- 当前回测摘要：`var/backtests/one_network_price_only_low_residual_volatility_liquidity_30m_experiment/frozen_top50_size_3p0_true_next_open_10bp_full/portfolio_2021-01-01_2026-07-21_summary.json`
+- 当前口径：右侧行情因子时点有效；左侧manifest记录 `financial_point_in_time=true`、`strict_financial_point_in_time=true`、`industry_point_in_time=true`，行业来源为 Tushare `sw_member` 按 `in_date/out_date` 重建的时点快照，但本地财务缓存没有完整revision vintage，不能据此宣称完全严格PIT。完整历史已揭盲，全部结果为 `research_only`。
 
 ### 2.1 分通道硬门槛
 
@@ -36,7 +40,7 @@ MiniQMT/本地行情与财务缓存 -> low_corr右侧 + 基本价值线左侧 ->
 - 观察日有有效价格、成交量和成交额
 - 停牌、无交易、缺关键财务或缺行情的股票不补假数据
 
-右侧 `playbook_low_corr` 不使用旧质量、成长和市值门槛，否则会把 QuantsPlaybook 因子再次变成旧候选池的二次排序。右侧只执行观察日上市/退市、有效成交、风险警示、北交所开市日和至少60日历史等时点可交易门槛，买入时再执行现有技术结构、止损距离和盈亏比门。
+右侧价格型低残差波动率组合不使用旧质量、成长和市值门槛，否则会把 QuantsPlaybook 因子再次变成旧候选池的二次排序。右侧执行观察日上市/退市、有效成交、风险警示、北交所开市日、至少60日历史和 `ADV20 >= 3000万元` 等时点可交易门槛，买入时再执行现有技术结构、止损距离和盈亏比门。
 
 ### 2.2 基本价值线行业白名单
 
@@ -61,18 +65,18 @@ MiniQMT/本地行情与财务缓存 -> low_corr右侧 + 基本价值线左侧 ->
 
 ### 2.4 双通道候选
 
-右侧执行候选来自 `candidate_source=quantsplaybook_factor`，固定使用 `playbook_low_corr` 每日 Top50；左侧执行候选只来自通过行业白名单和全部价值门槛的 `value_model`。同一股票同时通过两套模型时合并为 `value_model+quantsplaybook_factor`，分别保留左、右权限，再统一进入结构、仓位和退出引擎。
+右侧执行候选来自 `candidate_source=quantsplaybook_factor`，固定使用 `playbook_low_corr_network_cap1_price_only_residual_volatility_liquidity_30m` 每日 Top50；左侧执行候选只来自通过行业白名单和全部价值门槛的 `value_model`。同一股票同时通过两套模型时合并为 `value_model+quantsplaybook_factor`，分别保留左、右权限，再统一进入结构、仓位和退出引擎。
 
-`playbook_low_corr` 由 2021-2023 训练期冻结的六条等权因子构成：
+当前价格型替换组合由六条等权因子构成：
 
 - `network_cc`
 - `ma_convergence`
-- `network_scc`
 - `disposition_reversal`
 - `high_quality_momentum`
 - `coin_team`
+- `low_market_residual_volatility_20`
 
-候选分数只负责右侧 Top50 排序，不直接买入。旧 `standard_quant`、`compact_attack_core`、`large_liquid_trend_core` 等路径只保留为历史对照，不参与双通道候选生成。
+观察日可见20日平均成交额必须不低于3000万元，流动性过滤后候选分数只负责右侧 Top50 排序，不直接买入。旧 `standard_quant`、`compact_attack_core`、`large_liquid_trend_core` 等路径只保留为历史对照，不参与双通道候选生成。该替换组合在完整历史已被观察后提出，全部历史回测均为 `research_only`。
 
 ### 2.5 每日排序
 
@@ -109,9 +113,9 @@ MiniQMT/本地行情与财务缓存 -> low_corr右侧 + 基本价值线左侧 ->
 
 候选有完整画像时，必须同时满足：
 
-- 左侧价值候选必须继续满足质量、成长、市值硬门槛；右侧 `playbook_low_corr` 不重复套用这些基本面门槛
+- 左侧价值候选必须继续满足质量、成长、市值硬门槛；右侧价格型组合不重复套用这些基本面门槛
 - `trade_basis_score >= 6.5`；弱量价基础不买
-- 20 日均成交额通常不低于 5 亿元；`compact_attack_core` 可放宽到 4.5 亿元
+- 当前纯因子右侧研究口径使用观察日可见20日均成交额3000万元下限，并同时执行信号日1%和20日均额5%的买单参与率上限；旧画像通道的5亿元门槛只保留为历史对照
 - 突破类信号的观察日量能确认 `known_volume_ratio >= 1.0`
 - 不追后段加速：20 日收益超过 70%，或 20 日收益超过 45% 且量能放大到 3 倍以上，拒绝
 - 止损必须有效：止损价必须低于入场价，且能解释失效位置
@@ -253,12 +257,13 @@ MiniQMT 回测画像：
 - 买入 30 次，卖出 27 次
 - 主要利润来自 2025 年 6 月以后对核心右侧机会的持有和加仓
 
-当前双通道在 raw 成交/qfq 信号拆分、分红送转、T+1、整手、涨跌停和费用口径下完成 2021-01-01 至 2026-07-21 连续回放：
+当前双通道在 raw 成交/qfq 信号拆分、分红送转、T+1、整手、涨跌停、历史印花税、次日开盘和10bp滑点口径下完成2021-01-01至2026-07-21连续回放：
 
-- 总收益：`+90.015%`
-- 最大回撤：`-13.328%`
-- 盈亏比：`1.346`
-- 右侧买入66笔，左侧买入40笔；全部252笔成交审计违规为0
-- 纯 `playbook_low_corr` 同期为 `+60.962%`、最大回撤 `-20.052%`
+- 总收益：`+117.381%`，终值 `2.174x`
+- 最大回撤：`-13.263%`
+- 最大总毛敞口：`99.99%`
+- 买入108笔、卖出142笔，卖出胜率 `61.268%`
+- 精确去Top1后为 `+72.059%`，精确去Top3后为 `+34.671%`
+- 133个继承状态的五年窗口均未达到 `3x`
 
-左侧实际交易新易盛、中兴通讯和中际旭创三只，同时持有峰值为2只，全部持股峰值为5只。新易盛贡献22.149个初始资金百分点，中际旭创贡献19.919个百分点，中兴通讯贡献2.257个百分点；全组合最大单股贡献为真爱美家 `sz.003041` 的35.179个百分点，Top1正利润占比27.572%，不触发集中度警告。该结果不剔除 Top1，但继续披露贡献集中度。报告中文简称由本地 Tushare `stock_basic` 在回测完成后补齐，只用于展示，不参与历史交易决策。
+结果仍有明显赢家依赖，且完整历史已经揭盲；当前不能宣称“五年三倍”或纯样本外稳健。详细口径和反事实结果见 `docs/right-selection-robustness-research-2026-08-11.md`。报告中文简称由本地 Tushare `stock_basic` 在回测完成后补齐，只用于展示，不参与历史交易决策。

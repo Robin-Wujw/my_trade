@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from apps.portfolio_backtest import (
+from stock_research.backtesting.workflow import (
     DEFAULT_FINANCIAL_CHUNK_SIZE,
     DEFAULT_FINANCIAL_TARGET_COVERAGE,
     DEFAULT_FINANCIAL_TIMEOUT,
@@ -28,7 +28,7 @@ from scripts.candidate_filter_experiments import compact, transform_snapshots
 from stock_research.core.paths import PATHS
 from stock_research.reporting.trade_reminders import load_trade_plans
 from stock_research.strategies.candidate_interface import normalize_candidate_snapshots
-from stock_research.strategies.portfolio_backtest import run_portfolio_backtest
+from stock_research.backtesting.engine import run_portfolio_backtest
 
 
 def load_inputs(
@@ -150,7 +150,7 @@ def main(argv=None) -> None:
     parser.add_argument(
         "--close-confirmed-execution",
         choices=("close_proxy", "next_open"),
-        default="close_proxy",
+        default="next_open",
     )
     parser.add_argument("--allow-pullback-pilot", action="store_true")
     parser.add_argument(

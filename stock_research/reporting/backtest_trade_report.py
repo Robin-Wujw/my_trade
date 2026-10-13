@@ -2,97 +2,16 @@
 from __future__ import annotations
 
 import math
-import re
+import json
 
 import pandas as pd
 
-
-_REASON_REPLACEMENTS = {
-    "leader pivot close breakout": "龙头枢轴收盘突破",
-    "stop 5pct below breakout line": "突破线下方5%止损",
-    "entry time condition": "入场时间条件退出",
-    "hard space stop": "空间硬止损",
-    "close_confirmed": "收盘确认成交",
-    "intraday_breakout": "盘中突破成交",
-    "gap_breakout": "跳空越过触发价成交",
-    "gap_or_open_fill": "开盘已触发成交",
-    "intraday_cross": "盘中触及结构位成交",
-    "intraday_stop": "盘中硬止损成交",
-    "gap_stop": "跳空止损成交",
-    "condition stop": "收盘条件止损",
-    "14:55/close proxy": "14:55收盘代理价成交",
-}
-
-_PROFIT_CONDITION_REPLACEMENTS = {
-    "profit_floor": "利润保护线",
-    "trailing_10": "从阶段高点回撤10%",
-    "rising_ma20_break_3pct": "跌破上行MA20 3%",
-}
-
-_EXIT_REASON_REPLACEMENTS = {
-    "condition_stop": "收盘条件止损",
-    "hard_space_stop": "空间硬止损",
-    "profit_floor": "利润保护线止盈",
-    "entry_time_condition": "入场时间条件退出",
-    "other": "其他退出",
-    "trailing_10": "从阶段高点回撤10%止盈",
-    "volume_node_break": "跌破量价节点止盈",
-}
-
-_BLOCK_REASON_REPLACEMENTS = {
-    "missing_signal": "没有有效技术信号",
-    "invalid_or_non_protective_stop": "止损价无效或不能保护本金",
-    "quality_hard_gate_failed": "质量硬门槛未通过",
-    "growth_hard_gate_failed": "增长硬门槛未通过",
-    "market_cap_hard_gate_failed": "市值硬门槛未通过",
-    "trade_basis_too_weak": "交易基础过弱",
-    "liquidity_too_thin": "流动性不足",
-    "weak_20d_relative_strength": "20日相对强度不足",
-    "weak_relative_strength": "相对强度不足",
-    "large_liquid_trend_watch_only": "大市值高流动性趋势核心仅观察",
-    "support_pullback_without_fast_ma_confluence": "支撑拉回缺少快速均线共振",
-    "volume_confirmation_missing": "缺少量能确认",
-    "late_acceleration_chase": "加速末段，不追高",
-    "risk_pct_too_tight": "止损距离过窄",
-    "close_confirmed_risk_pct_too_tight": "收盘确认买点的止损距离过窄",
-    "risk_pct_too_wide": "止损距离过宽",
-    "reward_risk_too_low": "计划盈亏比不足",
-    "entry_evidence_below_min": "旧证据分低于历史参数（仅解释字段）",
-    "order_not_filled": "价格未触发成交",
-    "support_pullback_not_first_entry": "支撑拉回首仓放宽后仍未达量化底线，需等待量能/强度/支撑距离改善",
-    "add_current_profit_not_met": "现有仓位浮盈未达到加仓条件",
-    "total_symbol_limit": "全部持股已达5只上限",
-    "industry_or_correlation_limit": "同行业或高相关标的数量已达上限",
-    "new_symbol_unlock_not_met": "新标的开仓解锁条件未满足",
-    "weak_replacement_scheduled": "已安排下一交易日汰弱换强",
-    "symbol_limit_no_weak_replacement": "仓位已满且没有可替换弱仓",
-    "symbol_exposure_cap": "单股仓位已达上限",
-    "gross_exposure_cap": "组合总仓位已达上限",
-    "cash_or_board_lot_limit": "现金不足或不足一手",
-    "left_to_right_management_only_without_current_candidate": "非当日候选，仅执行左转右管理状态检查",
-    "left_to_right_add_on_cash_or_board_lot_limit": "左转右已完成，但现金不足或附加仓不足一手",
-}
-
-_SIGNAL_TYPE_REPLACEMENTS = {
-    "bull_run_half_pullback": "连阳一半拉回",
-    "consolidation_breakout": "整理平台突破",
-    "gap_long_ma_breakout": "跳空长阳突破长期均线",
-    "leader_pivot_breakout": "龙头枢轴突破",
-    "leader_trend_add": "龙头趋势加仓",
-    "uptrend_support_pullback": "上涨波段支撑拉回",
-    "pullback_50_breakout": "回调50%放量突破",
-    "uptrend_50_reclaim": "上涨50%收复",
-    "volume_price_node": "量价节点突破",
-}
-
-_NOTE_REPLACEMENTS = {
-    "exclude_topN is a contribution subtraction diagnostic, not a cash-rebalanced rerun.": (
-        "剔除头部贡献只是从收益贡献中做减法诊断，并非重新按现金再平衡回测。"
-    ),
-    "R is measured from each fill's raw entry price to its initial raw stop.": (
-        "R按每笔成交的原始入场价到初始原始止损价之间的风险距离计算。"
-    ),
-}
+from stock_research.reporting.signal_text import (
+    exit_reason_text,
+    note_text,
+    readable_reason as _readable_signal_reason,
+    signal_type_text,
+)
 
 
 def _fmt_number(value, digits=3) -> str:
@@ -100,38 +19,97 @@ def _fmt_number(value, digits=3) -> str:
     return "" if number is None else f"{number:,.{digits}f}"
 
 
-def _profit_condition_text(value) -> str:
-    raw = str(value or "").strip()
-    if raw.startswith("volume_node_break:"):
-        date = raw.split(":", 1)[1]
-        return f"跌破量价节点（节点日{date}）"
-    return _PROFIT_CONDITION_REPLACEMENTS.get(raw, raw)
+def _qualification_items(values) -> str:
+    rendered = []
+    for value in values or []:
+        if isinstance(value, dict):
+            rendered.append(json.dumps(value, ensure_ascii=False, sort_keys=True))
+        else:
+            rendered.append(str(value))
+    return ", ".join(rendered) or "未列明"
+
+
+def apply_stock_basic_display_names(
+    result: dict,
+    stock_basic: pd.DataFrame,
+) -> dict:
+    """Attach current Chinese names and missing industry labels after decisions."""
+    def display_text(value) -> str:
+        if value is None or pd.isna(value):
+            return ""
+        text = str(value).strip()
+        return "" if text.lower() in {"nan", "none", "<na>"} else text
+
+    names = {}
+    industries = {}
+    if stock_basic is not None and not stock_basic.empty:
+        for _, row in stock_basic.iterrows():
+            code = display_text(row.get("code"))
+            name = display_text(row.get("name"))
+            if code and name and name != code:
+                names[code] = name
+            industry = display_text(row.get("industry"))
+            if code and industry:
+                industries[code] = industry
+
+    def update_item(item):
+        if not isinstance(item, dict):
+            return
+        code = display_text(item.get("code"))
+        if code in names:
+            item["name"] = names[code]
+        replacement_code = display_text(item.get("replacement_code"))
+        if replacement_code in names:
+            item["replacement_name"] = names[replacement_code]
+
+    def backfill_industry(item):
+        if not isinstance(item, dict) or item.get("industry_tags"):
+            return
+        code = display_text(item.get("code"))
+        if code in industries:
+            item["display_industry_tags"] = [industries[code]]
+
+    for key in ("events", "entry_blocks"):
+        for item in result.get(key) or []:
+            update_item(item)
+    for key in ("trade_ledger", "final_positions", "concentration_blocks"):
+        for item in result.get(key) or []:
+            update_item(item)
+            backfill_industry(item)
+
+    concentration = result.get("profit_concentration_summary") or {}
+    update_item(concentration.get("top1_symbol"))
+    backfill_industry(concentration.get("top1_symbol"))
+    for item in concentration.get("top_symbols") or []:
+        update_item(item)
+        backfill_industry(item)
+
+    traded_codes = {
+        display_text(item.get("code"))
+        for item in result.get("trade_ledger") or []
+        if display_text(item.get("code"))
+    }
+    result["display_name_source"] = {
+        "source": "local_tushare_stock_basic_current_snapshot",
+        "decision_input": False,
+        "scope": "artifact_display_only",
+        "resolved_traded_symbol_count": len(traded_codes & set(names)),
+        "unresolved_traded_codes": sorted(traded_codes - set(names)),
+        "resolved_traded_industry_count": len(traded_codes & set(industries)),
+        "unresolved_industry_traded_codes": sorted(traded_codes - set(industries)),
+        "note": (
+            "Current security names and missing industry labels are attached "
+            "only after the backtest; historical selection, industry decisions "
+            "and ST filters remain point-in-time inputs."
+        ),
+    }
+    return result
 
 
 def readable_reason(value, event: dict | None = None) -> str:
-    parts = []
-    action = str((event or {}).get("action") or "")
-    left_grid = action.startswith("左侧网格")
-    for raw in str(value or "").split(";"):
-        part = raw.strip()
-        if not part or re.fullmatch(r"[Rr]\d+", part):
-            continue
-        if part.startswith("止盈条件="):
-            conditions = part.split("=", 1)[1].split(",")
-            part = "止盈条件：" + "、".join(
-                _profit_condition_text(condition) for condition in conditions
-            )
-        if left_grid:
-            part = part.replace("上一格卖出", "上一格网格卖价")
-        for source, target in _REASON_REPLACEMENTS.items():
-            replacement = target
-            if left_grid and source == "intraday_cross":
-                replacement = "盘中触及预设网格价成交"
-            elif left_grid and source == "gap_or_open_fill":
-                replacement = "开盘触及预设网格价成交"
-            part = part.replace(source, replacement)
-        parts.append(part)
-    if left_grid and event:
+    text = _readable_signal_reason(value, event)
+    if str((event or {}).get("action") or "").startswith("左侧网格") and event:
+        parts = [text] if text else []
         details = []
         value_line = _fmt_number(event.get("value_line"))
         if value_line:
@@ -141,7 +119,8 @@ def readable_reason(value, event: dict | None = None) -> str:
             details.append(f"网格槽{int(grid_slot)}")
         if details:
             parts.append("，".join(details))
-    return "；".join(parts) or "策略条件触发"
+        return "；".join(parts) or "策略条件触发"
+    return text
 
 
 def _number(value, digits=2):
@@ -248,6 +227,7 @@ def build_readable_trade_frame(trade_ledger) -> pd.DataFrame:
             "买卖": side,
             "操作摘要": _action_summary(event, side, quantity, holdings_after),
             "交易结果": _trade_result(side, event),
+            "信号类型": signal_type_text(event.get("signal_type")),
             "成交价": _number(event.get("execution_price", event.get("price")), 3),
             "数量(股)": quantity,
             "成交金额(元)": _number(event.get("trade_amount")),
@@ -275,7 +255,11 @@ def build_readable_trade_frame(trade_ledger) -> pd.DataFrame:
                 if event.get("anchor_low_date") and event.get("anchor_high_date")
                 else ""
             ),
-            "账户模式": str(event.get("account_mode") or ""),
+            "账户模式": (
+                _mode_text(event.get("account_mode"))
+                if event.get("account_mode")
+                else ""
+            ),
             "价值线": _number(event.get("value_line"), 3),
             "网格槽": _number(event.get("grid_slot"), 0),
         })
@@ -305,33 +289,51 @@ def _mode_text(value) -> str:
     return mapping.get(str(value or ""), str(value or "—"))
 
 
-def _block_reason_text(value) -> str:
-    raw = str(value or "")
-    if ":" in raw:
-        prefix, detail = raw.split(":", 1)
-        if prefix in _BLOCK_REASON_REPLACEMENTS:
-            return f"{_BLOCK_REASON_REPLACEMENTS[prefix]}（{detail}）"
-    return _BLOCK_REASON_REPLACEMENTS.get(raw, raw or "未成交")
-
-
-def _signal_type_text(value) -> str:
-    raw = str(value or "")
-    return _SIGNAL_TYPE_REPLACEMENTS.get(raw, raw or "—")
-
-
 def _exit_reason_text(value) -> str:
-    raw = str(value or "")
-    return _EXIT_REASON_REPLACEMENTS.get(raw, raw or "其他退出")
+    return exit_reason_text(value)
 
 
 def _note_text(value) -> str:
-    raw = str(value or "")
-    return _NOTE_REPLACEMENTS.get(raw, raw)
+    return note_text(value)
 
 
-def _table_number(value, digits=2):
-    number = _number(value, digits)
-    return "—" if number is None else number
+def _display_industry_tags(row: dict) -> list[str]:
+    tags = row.get("display_industry_tags")
+    if not tags:
+        tags = row.get("industry_tags")
+    cleaned = []
+    for tag in tags or []:
+        text = str(tag).strip()
+        if text and text.lower() not in {"nan", "none", "<na>", "未分类"}:
+            cleaned.append(text)
+    return cleaned
+
+
+def _display_industry_contribution(rows, initial_capital) -> list[dict]:
+    totals: dict[str, float] = {}
+    for row in rows or []:
+        tags = _display_industry_tags(row) or ["未映射"]
+        share = float(row.get("total_pnl_amount") or 0.0) / len(tags)
+        for tag in tags:
+            totals[tag] = totals.get(tag, 0.0) + share
+    net_total = sum(float(row.get("total_pnl_amount") or 0.0) for row in rows or [])
+    initial_capital = float(initial_capital or 0.0)
+    result_rows = []
+    for tag, value in totals.items():
+        result_rows.append({
+            "industry_tag": tag,
+            "total_pnl_amount": round(value, 2),
+            "total_return_contribution_pct": (
+                round(value / initial_capital * 100.0, 3)
+                if initial_capital > 0 else 0.0
+            ),
+            "net_profit_share_pct": (
+                round(value / net_total * 100.0, 3)
+                if abs(net_total) > 1e-9 else 0.0
+            ),
+        })
+    result_rows.sort(key=lambda item: item["total_pnl_amount"], reverse=True)
+    return result_rows
 
 
 def _render_profit_concentration(result: dict) -> list[str]:
@@ -358,23 +360,33 @@ def _render_profit_concentration(result: dict) -> list[str]:
         lines.append("- 集中度警告：收益明显依赖少数股票，必须做剔除头部贡献后的稳健性复核。")
     lines.extend([
         "",
-        "| 股票 | 行业/主题 | 已实现 | 期末浮盈 | 合计贡献 | 正贡献占比 |",
-        "|---|---|---:|---:|---:|---:|",
+        "| 股票 | 行业/主题 | 已实现 | 期末浮盈 | 应收股利 | 合计贡献 | 正贡献占比 |",
+        "|---|---|---:|---:|---:|---:|---:|",
     ])
-    for row in (summary.get("top_symbols") or [])[:10]:
-        tags = "、".join(row.get("industry_tags") or []) or "未分类"
+    top_rows = (summary.get("top_symbols") or [])[:10]
+    for row in top_rows:
+        tags = "、".join(_display_industry_tags(row)) or "未映射"
         lines.append(
             f"| {row.get('name') or row.get('code')}({row.get('code')}) | {tags} | "
             f"{_money(row.get('realized_pnl_amount'))} | "
             f"{_money(row.get('unrealized_pnl_amount'))} | "
+            f"{_money(row.get('dividend_receivable_amount'))} | "
             f"{_money(row.get('total_pnl_amount'))} | "
             f"{_pct(row.get('positive_profit_share_pct'))} |"
         )
-    industries = summary.get("industry_contribution_top") or []
+    industries = (
+        _display_industry_contribution(
+            top_rows, result.get("initial_capital"),
+        )
+        if top_rows
+        else (summary.get("industry_contribution_top") or [])
+    )
     if industries:
         lines.extend([
             "",
-            "| 行业/主题 | 合计贡献 | 收益贡献 | 净利润占比 |",
+            "以下行业汇总仅覆盖上表前十贡献股票；已实现收益含已到账分红，应收股利单列。",
+            "",
+            "| 行业/主题 | 合计贡献 | 收益贡献 | 上述股票净利润占比 |",
             "|---|---:|---:|---:|",
         ])
         for row in industries[:10]:
@@ -403,6 +415,8 @@ def _render_r_multiple_audit(result: dict) -> list[str]:
         f"- R 盈亏比：{_number(summary.get('payoff_r'), 2) or '—'}；R 利润因子：{_number(summary.get('profit_factor_r'), 2) or '—'}",
         f"- 亏损超过 1R：{summary.get('loss_beyond_one_r_count', 0)} 次，占全部可审计卖出 {_pct(summary.get('loss_beyond_one_r_pct'))}",
     ]
+    if summary.get("all_sell_count") is not None:
+        lines.append(f"- 原始风险覆盖：{summary.get('sell_count', 0)}/{summary['all_sell_count']} 笔卖出（{_pct(summary.get('r_coverage_pct'))}）；缺少定义的 {summary.get('missing_initial_r_count', 0)} 笔不补造R。")
     realized_to_planned = summary.get("average_realized_to_planned_rr_pct")
     if realized_to_planned is not None:
         lines.append(f"- 实际/计划 R 均值：{_pct(realized_to_planned)}")
@@ -427,80 +441,6 @@ def _render_r_multiple_audit(result: dict) -> list[str]:
     return lines
 
 
-def _render_relevant_entry_blocks(result: dict, *, max_rows_per_code: int = 20) -> list[str]:
-    positions = result.get("final_positions") or []
-    held_codes = {str(item.get("code") or "") for item in positions}
-    held_codes.discard("")
-    if not held_codes:
-        return []
-    blocks = [
-        item for item in result.get("entry_blocks") or []
-        if str(item.get("code") or "") in held_codes
-    ]
-    if not blocks:
-        return []
-    grouped: dict[str, list[dict]] = {}
-    names: dict[str, str] = {
-        str(item.get("code") or ""): str(item.get("name") or item.get("code") or "")
-        for item in positions
-    }
-    for item in blocks:
-        code = str(item.get("code") or "")
-        grouped.setdefault(code, []).append(item)
-        block_name = str(item.get("name") or "")
-        if block_name and block_name != code:
-            names[code] = block_name
-    last_trade_dates: dict[str, str] = {}
-    for event in result.get("trade_ledger") or []:
-        code = str(event.get("code") or "")
-        if code in held_codes and event.get("date"):
-            last_trade_dates[code] = max(last_trade_dates.get(code, ""), str(event.get("date")))
-    lines = [
-        "",
-        "## 期末持仓相关未成交信号",
-        "",
-        "| 股票 | 日期 | 信号 | 旧证据分 | 交易分 | 领导力 | 未成交/未左转右原因 |",
-        "|---|---|---|---:|---:|---:|---|",
-    ]
-    for code in sorted(grouped):
-        all_items = sorted(grouped[code], key=lambda row: str(row.get("date") or ""))
-        last_trade_date = last_trade_dates.get(code, "")
-        after_last_trade = [
-            item for item in all_items
-            if str(item.get("date") or "") > last_trade_date
-        ]
-        head_count = max_rows_per_code // 2
-        selected = after_last_trade[:head_count] + all_items[-(max_rows_per_code - head_count):]
-        seen = set()
-        items = []
-        for item in sorted(selected, key=lambda row: str(row.get("date") or "")):
-            key = (
-                str(item.get("date") or ""),
-                str(item.get("signal_type") or ""),
-                str(item.get("reason") or ""),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            items.append(item)
-        overflow = max(0, len(all_items) - len(items))
-        if overflow:
-            lines.append(
-                f"| {names.get(code, code)}（{code}） | — | — | — | — | — | "
-                f"另有{overflow}条同标的未成交信号，详见summary.entry_blocks |"
-            )
-        for item in items:
-            lines.append(
-                f"| {names.get(code, code)}（{code}） | {item.get('date') or ''} | "
-                f"{_signal_type_text(item.get('signal_type'))} | "
-                f"{_table_number(item.get('entry_evidence_score'), 2)} | "
-                f"{_table_number(item.get('trade_basis_score'), 2)} | "
-                f"{_table_number(item.get('leadership_score'), 2)} | "
-                f"{_block_reason_text(item.get('reason'))} |"
-            )
-    return lines
-
-
 def render_trade_report_markdown(result: dict) -> str:
     """Render summary, chronological trades and final holdings as Markdown."""
     ledger = build_readable_trade_frame(result.get("trade_ledger") or [])
@@ -519,8 +459,63 @@ def render_trade_report_markdown(result: dict) -> str:
         f"- 已平仓净盈亏：{_money(trade_summary.get('closed_trade_net_pnl_amount'))}",
         f"- 全部交易成本：{_money(trade_summary.get('transaction_cost_amount'))}",
     ]
+    qualification = result.get("qualification") or {}
+    if result.get("research_only") or result.get("acceptance_status") not in {None, "passed"}:
+        lines.extend([
+            "",
+            "## 研究资格与数据限制",
+            "",
+            f"- 验收状态：{result.get('acceptance_status') or 'research_only'}",
+            f"- research_only：{bool(result.get('research_only'))}",
+            f"- 数据限制：{_qualification_items(result.get('data_limitations') or qualification.get('data_limitations') or ['未列明'])}",
+            f"- 原因：{_qualification_items(qualification.get('reasons') or ['研究回放'])}",
+        ])
+    attribution = result.get("capital_risk_attribution") or {}
+    if attribution:
+        lines.extend([
+            "", "## 资金利用与收益来源", "",
+            f"- 年化复合收益：{_pct(attribution.get('cagr_pct'))}",
+            f"- 平均 / 中位市值仓位：{_pct(attribution.get('mean_market_exposure_pct'))} / {_pct(attribution.get('median_market_exposure_pct'))}",
+            f"- 空仓天数：{attribution.get('flat_days', 0)} / {attribution.get('trading_days', 0)}；市值仓位低于30%：{attribution.get('below_30pct_exposure_days', 0)}天",
+            "- 成本敞口以初始本金为分母；市值仓位以当日净值为分母。新买入预算仍按初始本金计算。",
+            "", "| 最初来源 | 已平仓净盈亏 | 未平仓净浮盈 | 现金分红 | 收益贡献 |",
+            "|---|---:|---:|---:|---:|",
+        ])
+        for row in attribution.get("by_origin", []):
+            origin = {"left": "左侧（含转右）", "right": "原生右侧", "unknown": "来源缺失"}.get(row["origin_account"], row["origin_account"])
+            lines.append(f"| {origin} | {_money(row['realized_net_pnl'])} | {_money(row['unrealized_net_pnl'])} | {_money(row['dividend_cash'])} | {_pct(row['return_contribution_pct'])} |")
+        lines.extend([
+            "", f"> {attribution.get('note', '')}",
+            f"> 来源利润对账差额：{_money(attribution.get('origin_pnl_reconciliation_difference'))}；现金对账差额：{_money(attribution.get('cash_reconciliation_difference'))}。分批卖出的R统计不等于独立交易周期胜率。",
+        ])
     lines.extend(_render_profit_concentration(result))
     lines.extend(_render_r_multiple_audit(result))
+    factor_holding_days = result.get("factor_horizon_holding_days")
+    if factor_holding_days:
+        trend_management_return = result.get(
+            "factor_horizon_trend_management_return_pct"
+        )
+        lines.extend([
+            "",
+            "## 成交口径说明",
+            "",
+            (
+                (
+                    f"- 因子周期仓历史最大浮盈达到{_pct(trend_management_return)}后，"
+                    "取消固定到期退出，转入统一分仓止盈和趋势尾仓管理；"
+                    f"未达到时仍以{int(factor_holding_days)}个交易日为研究周期上限。"
+                )
+                if trend_management_return is not None
+                else (
+                    f"- 因子周期交易持有满{int(factor_holding_days)}个交易日后按规则退出；"
+                    "这不是止盈或止损信号。"
+                )
+            ),
+            (
+                "- 按当日收盘价近似成交：日K回测没有分钟级委托和排队数据，"
+                "因此用当日收盘价近似收盘前确认成交，不代表真实盘中成交。"
+            ),
+        ])
     lines.extend([
         "",
         "## 每次买卖流水（按时间顺序）",
@@ -559,7 +554,6 @@ def render_trade_report_markdown(result: dict) -> str:
                 f"{_pct(item.get('unrealized_pnl_pct'))} | "
                 f"{_bool_text(item.get('profit_tail'))} | {_bool_text(item.get('capacity_counted'))} |"
             )
-    lines.extend(_render_relevant_entry_blocks(result))
     lines.extend([
         "",
         "> 说明：买入行的结果展示成本价/股和当次费用，“本次已实现盈亏”只包含当次交易成本；卖出行包含按该次卖出数量分摊的买入成本与全部卖出费用。",

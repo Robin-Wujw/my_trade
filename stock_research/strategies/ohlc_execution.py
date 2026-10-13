@@ -14,6 +14,16 @@ def _number(value):
     return number if math.isfinite(number) else None
 
 
+def _untradable_status(row) -> str | None:
+    trade_status = _number(row.get("tradestatus"))
+    if trade_status is not None and trade_status <= 0:
+        return "suspended_or_no_trade"
+    volume = _number(row.get("volume"))
+    if volume is not None and volume <= 0:
+        return "suspended_or_no_trade"
+    return None
+
+
 def daily_limit_pct(code: str, *, trade_date=None, is_st: bool = False) -> float:
     if is_st:
         date = pd.to_datetime(trade_date, errors="coerce")
@@ -31,31 +41,66 @@ def daily_limit_pct(code: str, *, trade_date=None, is_st: bool = False) -> float
 def locked_limit_direction(row, previous_close, code: str, *, is_st: bool = False) -> str | None:
     """Return up/down only for a one-price bar near the board limit."""
     prices = [_number(row.get(name)) for name in ("open", "high", "low", "close")]
-    previous = _number(previous_close)
-    if previous is None or previous <= 0 or any(price is None for price in prices):
+    if any(price is None or price <= 0 for price in prices):
         return None
     if max(prices) - min(prices) > max(prices) * 1e-6:
         return None
-    one_price = prices[0]
+    return opening_limit_direction(row, previous_close, code, is_st=is_st)
+
+
+def opening_limit_direction(
+    row, previous_close, code: str, *, is_st: bool = False,
+) -> str | None:
+    """Return the limit direction using only information visible at the open."""
+    day_open = _number(row.get("open"))
+    previous = _number(previous_close)
+    if day_open is None or day_open <= 0:
+        return None
     up_limit = _number(row.get("up_limit"))
     down_limit = _number(row.get("down_limit"))
-    if up_limit is not None and math.isclose(
-        one_price, up_limit, rel_tol=1e-6, abs_tol=1e-4,
-    ):
+    tolerance = max(1e-4, day_open * 1e-6)
+    if up_limit is not None and day_open >= up_limit - tolerance:
         return "up"
-    if down_limit is not None and math.isclose(
-        one_price, down_limit, rel_tol=1e-6, abs_tol=1e-4,
-    ):
+    if down_limit is not None and day_open <= down_limit + tolerance:
         return "down"
-    change = prices[0] / previous - 1
+    if previous is None or previous <= 0:
+        return None
+    change = day_open / previous - 1.0
     threshold = daily_limit_pct(
         code, trade_date=row.get("date"), is_st=is_st,
     ) - 0.005
-    if change >= threshold:
+    # An explicit limit governs its side even when the price does not touch it.
+    if up_limit is None and change >= threshold:
         return "up"
-    if change <= -threshold:
+    if down_limit is None and change <= -threshold:
         return "down"
     return None
+
+
+def fill_market_on_open(
+    row, *, side: str, previous_close, code: str, is_st: bool = False,
+) -> dict:
+    """Conservatively simulate a market-on-open order without later bar data."""
+    if side not in {"buy", "sell"}:
+        raise ValueError("side must be buy or sell")
+    untradable = _untradable_status(row)
+    if untradable:
+        return {"filled": False, "status": untradable, "price": None}
+    day_open = _number(row.get("open"))
+    if day_open is None or day_open <= 0:
+        return {"filled": False, "status": "missing_open", "price": None}
+    direction = opening_limit_direction(
+        row, previous_close, code, is_st=is_st,
+    )
+    if (side == "buy" and direction == "up") or (
+        side == "sell" and direction == "down"
+    ):
+        return {
+            "filled": False,
+            "status": f"locked_limit_{direction}",
+            "price": None,
+        }
+    return {"filled": True, "status": "open_fill", "price": day_open}
 
 
 def fill_limit_order(
@@ -65,13 +110,19 @@ def fill_limit_order(
     """Simulate a resting limit order; an exact touch is not assumed to fill."""
     if side not in {"buy", "sell"}:
         raise ValueError("side must be buy or sell")
+    untradable = _untradable_status(row)
+    if untradable:
+        return {"filled": False, "status": untradable, "price": None}
     price = float(limit_price)
     day_open = _number(row.get("open"))
     day_high = _number(row.get("high"))
     day_low = _number(row.get("low"))
     if None in (day_open, day_high, day_low):
         return {"filled": False, "status": "missing_ohlc", "price": None}
-    locked = locked_limit_direction(row, previous_close, code, is_st=is_st)
+    opening = day_open <= price if side == "buy" else day_open >= price
+    locked = (opening_limit_direction if opening else locked_limit_direction)(
+        row, previous_close, code, is_st=is_st,
+    )
     if (side == "buy" and locked == "up") or (side == "sell" and locked == "down"):
         return {"filled": False, "status": f"locked_limit_{locked}", "price": None}
     if side == "buy":
@@ -93,12 +144,18 @@ def fill_sell_stop(
     row, *, stop_price: float, previous_close, code: str, is_st: bool = False,
 ) -> dict:
     """Simulate a resting sell stop, including an unfilled locked limit-down."""
+    untradable = _untradable_status(row)
+    if untradable:
+        return {"filled": False, "status": untradable, "price": None}
     stop = float(stop_price)
     day_open = _number(row.get("open"))
     day_low = _number(row.get("low"))
     if day_open is None or day_low is None:
         return {"filled": False, "status": "missing_ohlc", "price": None}
-    if locked_limit_direction(row, previous_close, code, is_st=is_st) == "down":
+    direction = (opening_limit_direction if day_open <= stop else locked_limit_direction)(
+        row, previous_close, code, is_st=is_st,
+    )
+    if direction == "down":
         return {"filled": False, "status": "locked_limit_down", "price": None}
     if day_open <= stop:
         return {"filled": True, "status": "gap_stop", "price": day_open}
@@ -113,12 +170,18 @@ def fill_buy_stop(
     is_st: bool = False, max_gap_pct: float = 0.05,
 ) -> dict:
     """Simulate a pre-placed breakout buy stop using only the daily bar."""
+    untradable = _untradable_status(row)
+    if untradable:
+        return {"filled": False, "status": untradable, "price": None}
     trigger = float(trigger_price)
     day_open = _number(row.get("open"))
     day_high = _number(row.get("high"))
     if day_open is None or day_high is None:
         return {"filled": False, "status": "missing_ohlc", "price": None}
-    if locked_limit_direction(row, previous_close, code, is_st=is_st) == "up":
+    direction = (opening_limit_direction if day_open >= trigger else locked_limit_direction)(
+        row, previous_close, code, is_st=is_st,
+    )
+    if direction == "up":
         return {"filled": False, "status": "locked_limit_up", "price": None}
     if day_open >= trigger:
         if day_open / trigger - 1 > max_gap_pct:

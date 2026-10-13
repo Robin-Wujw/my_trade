@@ -14,6 +14,17 @@ def _json(value) -> str:
     return json.dumps(value, ensure_ascii=False, default=str, sort_keys=True)
 
 
+def _sha256(value: str) -> str:
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
+def _timestamp_parameter(value) -> str:
+    timestamp = pd.to_datetime(value, errors="coerce", utc=True)
+    if pd.isna(timestamp):
+        raise ValueError(f"invalid timestamp filter: {value}")
+    return timestamp.tz_convert(None).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _date_value(row: dict, names: Iterable[str]):
     for name in names:
         value = row.get(name)
@@ -52,6 +63,27 @@ DEFAULT_KEY_COLUMNS = (
 )
 
 DATASET_KEY_COLUMNS = {
+    "income": (
+        "ts_code", "ann_date", "f_ann_date", "end_date", "report_type",
+        "comp_type", "update_flag",
+    ),
+    "balancesheet": (
+        "ts_code", "ann_date", "f_ann_date", "end_date", "report_type",
+        "comp_type", "update_flag",
+    ),
+    "cashflow": (
+        "ts_code", "ann_date", "f_ann_date", "end_date", "report_type",
+        "comp_type", "update_flag",
+    ),
+    "eastmoney_income": (
+        "ts_code", "end_date", "report_type",
+    ),
+    "eastmoney_balancesheet": (
+        "ts_code", "end_date", "report_type",
+    ),
+    "sw_member": (
+        "ts_code", "in_date", "l1_code", "l2_code", "l3_code",
+    ),
     "dividend": (
         "ts_code",
         "ann_date",
@@ -110,6 +142,43 @@ def normalize_tushare_code(code: str) -> str:
     return f"{symbol}.{suffix}"
 
 
+def _dataset_version_frame(
+    dataset: str,
+    frame: pd.DataFrame,
+    *,
+    source: str,
+    key_columns: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    key_columns = key_columns or dataset_key_columns(dataset)
+    rows = []
+    for raw_row in frame.to_dict("records"):
+        row = {str(key): value for key, value in raw_row.items()}
+        payload_json = _json(row)
+        rows.append({
+            "dataset": str(dataset),
+            "row_key": _row_key(str(dataset), row, key_columns),
+            "ts_code": row.get("ts_code"),
+            "trade_date": _date_value(
+                row, ("trade_date", "cal_date", "week_date"),
+            ),
+            "report_period": _date_value(
+                row, ("end_date", "period", "report_period"),
+            ),
+            "ann_date": _date_value(
+                row, ("ann_date", "f_ann_date", "pub_date"),
+            ),
+            "end_date": _date_value(
+                row, ("end_date", "delist_date", "maturity_date"),
+            ),
+            "source": str(source),
+            "payload_json": payload_json,
+            "payload_sha256": _sha256(payload_json),
+        })
+    return pd.DataFrame(rows).drop_duplicates(
+        ["dataset", "row_key", "payload_sha256"], keep="last",
+    )
+
+
 def tushare_to_project_code(code: str) -> str:
     """Convert a Tushare ts_code to the repository's exchange-first format."""
     text = str(code or "").strip().upper()
@@ -147,6 +216,7 @@ class TushareRepository:
         rows = []
         for raw_row in frame.to_dict("records"):
             row = {str(key): value for key, value in raw_row.items()}
+            payload_json = _json(row)
             rows.append({
                 "dataset": str(dataset),
                 "row_key": _row_key(str(dataset), row, key_columns),
@@ -156,13 +226,28 @@ class TushareRepository:
                 "ann_date": _date_value(row, ("ann_date", "f_ann_date", "pub_date")),
                 "end_date": _date_value(row, ("end_date", "delist_date", "maturity_date")),
                 "source": str(source),
-                "payload_json": _json(row),
+                "payload_json": payload_json,
+                "payload_sha256": _sha256(payload_json),
             })
         data = pd.DataFrame(rows).drop_duplicates(["dataset", "row_key"], keep="last")
         connection = self.database.connect()
         connection.execute("BEGIN TRANSACTION")
         try:
-            columns = tuple(data.columns)
+            version_columns = tuple(data.columns)
+            version_placeholders = ", ".join("?" for _ in version_columns)
+            connection.executemany(
+                f"""
+                INSERT OR IGNORE INTO raw.tushare_dataset_row_versions (
+                    {", ".join(version_columns)}
+                ) VALUES ({version_placeholders})
+                """,
+                (
+                    [record[column] for column in version_columns]
+                    for record in data.to_dict("records")
+                ),
+            )
+            current = data.drop(columns=["payload_sha256"])
+            columns = tuple(current.columns)
             placeholders = ", ".join("?" for _ in columns)
             connection.executemany(
                 f"""
@@ -172,7 +257,7 @@ class TushareRepository:
                 """,
                 (
                     [record[column] for column in columns]
-                    for record in data.to_dict("records")
+                    for record in current.to_dict("records")
                 ),
             )
             connection.execute(
@@ -205,6 +290,156 @@ class TushareRepository:
         finally:
             connection.close()
         return int(len(data))
+
+    def append_dataset_versions(
+        self,
+        dataset: str,
+        frame: pd.DataFrame,
+        *,
+        source: str = "tushare",
+        key_columns: tuple[str, ...] | None = None,
+    ) -> int:
+        """Capture payload versions without mutating current rows or sync state."""
+        if frame is None or frame.empty:
+            return 0
+        return self.append_dataset_version_batch(
+            {str(dataset): frame},
+            source=source,
+            key_columns_by_dataset={str(dataset): key_columns},
+        )[str(dataset)]
+
+    def append_dataset_version_batch(
+        self,
+        datasets: dict[str, pd.DataFrame],
+        *,
+        source: str,
+        key_columns_by_dataset: (
+            dict[str, tuple[str, ...] | None] | None
+        ) = None,
+    ) -> dict[str, int]:
+        """Atomically capture several provider datasets as one observation."""
+        prepared = {
+            str(dataset): _dataset_version_frame(
+                str(dataset),
+                frame,
+                source=source,
+                key_columns=(key_columns_by_dataset or {}).get(str(dataset)),
+            )
+            for dataset, frame in datasets.items()
+            if frame is not None and not frame.empty
+        }
+        counts = {
+            str(dataset): int(len(frame))
+            for dataset, frame in datasets.items()
+        }
+        if not prepared:
+            return counts
+        connection = self.database.connect()
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            for data in prepared.values():
+                columns = tuple(data.columns)
+                placeholders = ", ".join("?" for _ in columns)
+                connection.executemany(
+                    f"""
+                    INSERT OR IGNORE INTO raw.tushare_dataset_row_versions (
+                        {", ".join(columns)}
+                    ) VALUES ({placeholders})
+                    """,
+                    (
+                        [record[column] for column in columns]
+                        for record in data.to_dict("records")
+                    ),
+                )
+            connection.execute("COMMIT")
+        except Exception:
+            try:
+                connection.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            connection.close()
+        return counts
+
+    def load_dataset_versions(
+        self,
+        dataset: str,
+        *,
+        ts_code: str | None = None,
+        captured_from: str | None = None,
+        captured_through: str | None = None,
+    ) -> pd.DataFrame:
+        """Load provider payloads with their first local capture timestamps."""
+        clauses = ["dataset = ?"]
+        params = [str(dataset)]
+        if ts_code:
+            clauses.append("ts_code = ?")
+            params.append(str(ts_code))
+        if captured_from:
+            clauses.append("captured_at >= ?")
+            params.append(_timestamp_parameter(captured_from))
+        if captured_through:
+            clauses.append("captured_at <= ?")
+            params.append(_timestamp_parameter(captured_through))
+        connection = self.database.connect(read_only=True)
+        try:
+            rows = connection.execute(
+                f"""
+                SELECT row_key, payload_sha256, captured_at, payload_json
+                FROM raw.tushare_dataset_row_versions
+                WHERE {" AND ".join(clauses)}
+                ORDER BY captured_at, ts_code, row_key, payload_sha256
+                """,
+                params,
+            ).fetchall()
+        finally:
+            connection.close()
+        result = []
+        for row_key, payload_sha256, captured_at, payload_json in rows:
+            payload = json.loads(payload_json)
+            payload.update({
+                "_row_key": row_key,
+                "_payload_sha256": payload_sha256,
+                "_captured_at": captured_at,
+            })
+            result.append(payload)
+        return pd.DataFrame(result)
+
+    def load_dataset_current_observations(
+        self,
+        dataset: str,
+        *,
+        ts_code: str | None = None,
+    ) -> pd.DataFrame:
+        """Load current payloads together with their local observation time."""
+        clauses = ["dataset = ?"]
+        params = [str(dataset)]
+        if ts_code:
+            clauses.append("ts_code = ?")
+            params.append(str(ts_code))
+        connection = self.database.connect(read_only=True)
+        try:
+            rows = connection.execute(
+                f"""
+                SELECT row_key, updated_at, payload_json
+                FROM raw.tushare_dataset_rows
+                WHERE {" AND ".join(clauses)}
+                ORDER BY updated_at, ts_code, row_key
+                """,
+                params,
+            ).fetchall()
+        finally:
+            connection.close()
+        result = []
+        for row_key, updated_at, payload_json in rows:
+            payload = json.loads(payload_json)
+            payload.update({
+                "_row_key": row_key,
+                "_updated_at": updated_at,
+            })
+            result.append(payload)
+        return pd.DataFrame(result)
 
     def load_dataset(
         self,
@@ -665,7 +900,11 @@ class TushareRepository:
             if pd.isna(ex_date):
                 continue
             ex_date = pd.Timestamp(ex_date).normalize()
-            if ex_date < start.normalize() or ex_date > end.normalize():
+            related_dates = pd.to_datetime([
+                payload.get(key) for key in ("record_date", "ex_date", "pay_date", "div_listdate")
+            ], errors="coerce")
+            if not any(start.normalize() <= date.normalize() <= end.normalize()
+                       for date in related_dates if pd.notna(date)):
                 continue
             for requested_code in ts_to_requested.get(str(ts_code), []):
                 action = dict(payload)

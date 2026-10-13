@@ -30,16 +30,15 @@ def _daily_closes(price_frames, dates, codes):
     for code in codes:
         frame = pd.DataFrame(price_frames[code]).copy()
         frame["date"] = pd.to_datetime(frame.get("date"), errors="coerce").dt.normalize()
-        frame["close"] = pd.to_numeric(frame.get("close"), errors="coerce")
+        frame["close"] = pd.to_numeric(frame.get("raw_close", frame.get("close")), errors="coerce")
         series = (
             frame.dropna(subset=["date", "close"])
             .drop_duplicates("date", keep="last")
             .set_index("date")["close"]
         )
-        closes[code] = series.reindex(closes.index)
-    # Missing bars usually mean suspension.  Carry the last tradable close for
-    # valuation; bfill only affects dates before a symbol has any position.
-    return closes.ffill().bfill()
+        closes[code] = series.reindex(series.index.union(closes.index)).sort_index().ffill().reindex(closes.index)
+    # Only past observations may supply a missing valuation.
+    return closes
 
 
 def _corporate_action_quantity_delta(event):
@@ -129,6 +128,7 @@ def run_vectorbt_cross_check(
     minimum_commission,
     initial_capital,
     sell_stamp_duty_rate,
+    sell_stamp_duty_rate_before_2023_08_28=None,
     estimated_slippage_rate,
 ):
     """Replay emitted fills in vectorbt and compare daily account values.
@@ -138,6 +138,11 @@ def run_vectorbt_cross_check(
     allocated 100% before paying fees.  Such a delta is a finding rather than
     something to hide in the adapter.
     """
+    if any(_corporate_action_cash_amount(event) or event.get("dividend_receivable_change")
+           for event in result.get("events", [])):
+        return {"engine": "vectorbt", "status": "unsupported_corporate_action_cash_flow",
+                "validation_passed": False,
+                "reason": "from_orders does not inject dividend cash at settlement; use the independent source-action ledger"}
     vbt = _load_vectorbt()
     built = _build_timeline(
         price_frames, result.get("events") or [], result.get("equity_curve") or [],
@@ -188,7 +193,15 @@ def run_vectorbt_cross_check(
             )
             variable_rate = float(commission_rate) + float(estimated_slippage_rate)
             if quantity < 0:
-                variable_rate += float(sell_stamp_duty_rate)
+                stamp_duty_rate = float(sell_stamp_duty_rate)
+                if (
+                    sell_stamp_duty_rate_before_2023_08_28 is not None
+                    and timestamp.normalize() < pd.Timestamp("2023-08-28")
+                ):
+                    stamp_duty_rate = float(
+                        sell_stamp_duty_rate_before_2023_08_28
+                    )
+                variable_rate += stamp_duty_rate
         size.loc[timestamp, code] = quantity
         price.loc[timestamp, code] = execution_price
         fees.loc[timestamp, code] = variable_rate
@@ -211,16 +224,10 @@ def run_vectorbt_cross_check(
         freq="1D",
     )
 
-    external_cash = pd.Series(0.0, index=close.index)
-    for timestamp, event in event_at.items():
-        cash_amount = _corporate_action_cash_amount(event)
-        if abs(cash_amount) > 1e-12:
-            external_cash.loc[timestamp] += cash_amount
-    external_cash = external_cash.cumsum()
-    value = portfolio.value().reindex(eod_rows) + external_cash.reindex(eod_rows)
-    cash = portfolio.cash().reindex(eod_rows) + external_cash.reindex(eod_rows)
+    value = portfolio.value().reindex(eod_rows)
+    cash = portfolio.cash().reindex(eod_rows)
     vector_equity = value / float(initial_capital)
-    vector_drawdown = vector_equity / vector_equity.cummax() - 1.0
+    vector_drawdown = vector_equity / vector_equity.cummax().clip(lower=1.0) - 1.0
     current = pd.Series(
         {
             pd.Timestamp(row["date"]).normalize(): float(row["equity"])

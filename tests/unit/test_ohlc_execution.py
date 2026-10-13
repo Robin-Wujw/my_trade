@@ -1,4 +1,10 @@
-from stock_research.strategies.ohlc_execution import daily_limit_pct, fill_buy_stop, fill_limit_order, fill_sell_stop
+from stock_research.strategies.ohlc_execution import (
+    daily_limit_pct,
+    fill_buy_stop,
+    fill_limit_order,
+    fill_market_on_open,
+    fill_sell_stop,
+)
 
 
 def bar(open_, high, low, close):
@@ -61,6 +67,47 @@ def test_explicit_daily_limit_takes_precedence_over_board_rule():
     assert result["status"] == "locked_limit_up"
 
 
+def test_market_on_open_uses_opening_limit_without_later_bar_information():
+    up_then_opened = {
+        "date": "2024-01-02",
+        "volume": 1_000_000,
+        "up_limit": 11.0,
+        "down_limit": 9.0,
+        **bar(11.0, 11.2, 10.7, 10.9),
+    }
+    down_then_opened = {
+        "date": "2024-01-02",
+        "volume": 1_000_000,
+        "up_limit": 11.0,
+        "down_limit": 9.0,
+        **bar(9.0, 9.3, 8.9, 9.2),
+    }
+
+    assert fill_market_on_open(
+        up_then_opened,
+        side="buy",
+        previous_close=10.0,
+        code="sh.600000",
+    )["status"] == "locked_limit_up"
+    assert fill_market_on_open(
+        down_then_opened,
+        side="sell",
+        previous_close=10.0,
+        code="sh.600000",
+    )["status"] == "locked_limit_down"
+
+
+def test_market_on_open_rejects_suspended_trade_status():
+    row = {"tradestatus": 0, "volume": 1_000_000, **bar(10, 10.2, 9.8, 10)}
+
+    assert fill_market_on_open(
+        row,
+        side="buy",
+        previous_close=10.0,
+        code="sh.600000",
+    )["status"] == "suspended_or_no_trade"
+
+
 def test_breakout_stop_fills_at_trigger_or_small_gap_but_rejects_large_gap():
     intraday = fill_buy_stop(bar(9.8, 10.2, 9.7, 10.1), trigger_price=10, previous_close=9.8, code="sh.600000")
     small_gap = fill_buy_stop(bar(10.2, 10.4, 10.1, 10.3), trigger_price=10, previous_close=9.8, code="sh.600000")
@@ -68,3 +115,61 @@ def test_breakout_stop_fills_at_trigger_or_small_gap_but_rejects_large_gap():
     assert intraday["price"] == 10
     assert small_gap["price"] == 10.2
     assert large_gap["status"] == "gap_above_chase_limit"
+
+
+def test_exact_limits_do_not_fall_back_to_an_estimated_st_limit():
+    row = {"date": "2024-01-02", "up_limit": 11, "down_limit": 9,
+           **bar(10.5, 10.5, 10.5, 10.5)}
+    for previous in (10, None):
+        assert fill_market_on_open(
+            row, side="buy", previous_close=previous, code="sh.600000", is_st=True,
+        )["filled"] is True
+        assert fill_limit_order(
+            row, side="buy", limit_price=10.6, previous_close=previous,
+            code="sh.600000", is_st=True,
+        )["filled"] is True
+    row = {"up_limit": 11, "down_limit": 9, **bar(11, 11, 11, 11)}
+    assert fill_market_on_open(
+        row, side="buy", previous_close=None, code="sh.600000",
+    )["status"] == "locked_limit_up"
+
+
+def test_opening_stop_and_limit_cannot_use_later_unlocking():
+    row = {"up_limit": 11, "down_limit": 9, **bar(11, 11, 10, 10.5)}
+    assert fill_buy_stop(
+        row, trigger_price=10.8, previous_close=10, code="sh.600000",
+    )["status"] == "locked_limit_up"
+    assert fill_limit_order(
+        row, side="buy", limit_price=11, previous_close=10, code="sh.600000",
+    )["status"] == "locked_limit_up"
+    row = {"up_limit": 11, "down_limit": 9, **bar(9, 10, 9, 9.5)}
+    assert fill_sell_stop(
+        row, stop_price=9.5, previous_close=10, code="sh.600000",
+    )["status"] == "locked_limit_down"
+    assert fill_limit_order(
+        row, side="sell", limit_price=9, previous_close=10, code="sh.600000",
+    )["status"] == "locked_limit_down"
+
+
+def test_suspended_placeholder_bar_never_fills_orders():
+    suspended = {"volume": 0, **bar(10, 12, 8, 11)}
+
+    assert fill_limit_order(
+        suspended,
+        side="buy",
+        limit_price=10,
+        previous_close=10,
+        code="sh.600000",
+    )["status"] == "suspended_or_no_trade"
+    assert fill_sell_stop(
+        suspended,
+        stop_price=9,
+        previous_close=10,
+        code="sh.600000",
+    )["status"] == "suspended_or_no_trade"
+    assert fill_buy_stop(
+        suspended,
+        trigger_price=11,
+        previous_close=10,
+        code="sh.600000",
+    )["status"] == "suspended_or_no_trade"

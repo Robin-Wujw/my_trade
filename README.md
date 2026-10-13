@@ -63,6 +63,8 @@ python -m apps.portfolio_backtest --start-date 2026-01-01 --end-date 2026-07-10 
 
 正常回测会先刷新输入；只有确认要复用冻结数据时才加 `--no-refresh-inputs`。
 
+默认执行口径为收盘确认后次日开盘（`next_open`），并计入佣金、最低佣金、卖出印花税和估算滑点。`close_proxy` 只允许作为显式研究敏感性参数；回测完成后应检查 summary 中的 `close_confirmed_execution` 和费用字段。
+
 ## 选股口径
 
 候选快照目录：

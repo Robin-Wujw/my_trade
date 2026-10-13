@@ -4,9 +4,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from apps import portfolio_backtest as portfolio_backtest_app
+from stock_research.backtesting import workflow as portfolio_backtest_app
+from stock_research.backtesting import cli as portfolio_cli
 from apps import portfolio_yearly_backtest
-from apps.portfolio_backtest import (
+from stock_research.backtesting.workflow import (
     apply_candidate_exclusions,
     candidate_manifest_empty_dates,
     candidate_manifest_financial_status,
@@ -27,6 +28,7 @@ from apps.portfolio_backtest import (
     validate_backtest_input_coverage,
     validate_candidate_manifest_financial_point_in_time,
     validate_candidate_manifest_industry_point_in_time,
+    validate_daily_price_limit_coverage,
     validate_price_frame_coverage,
 )
 from stock_research.indicators.price_structure import (
@@ -62,7 +64,7 @@ from stock_research.strategies.candidate_interface import (
     normalize_candidate,
     normalize_candidate_snapshots,
 )
-from stock_research.strategies.portfolio_backtest import (
+from stock_research.backtesting.engine import (
     PositionState,
     _active_profit_trigger_ids,
     _affordable_buy_notional,
@@ -73,10 +75,13 @@ from stock_research.strategies.portfolio_backtest import (
     _effective_profit_tranches,
     _portfolio_profit_concentration_summary,
     _portfolio_r_multiple_summary,
+    _right_entry_priority_sort_key,
     _large_liquid_trend_core_profile,
     _leader_trend_add_signal,
     _minimum_trimmed_entry_size,
     _price_structure_signal,
+    _prepare_bull_half_reversal_signal,
+    _confirm_bull_half_reversal_signal,
     _prepare_frame,
     _semantic_right_entry_gate,
     _signal_support_has_fast_ma_confluence,
@@ -88,7 +93,113 @@ from stock_research.strategies.portfolio_backtest import (
     prepare_portfolio_price_frames,
     run_portfolio_backtest,
 )
+from stock_research.backtesting import engine as portfolio_engine
 from stock_research.storage import Database, TushareRepository
+
+
+def test_right_entry_priority_default_preserves_legacy_weighted_order():
+    frames = {"A": pd.DataFrame({"structure_proximity_score": [90.0]})}
+    item = (150.0, 100.0, 4, "A", 0, {
+        "entry_evidence_score": 12.0,
+    }, {}, "standard_right_entry")
+
+    key = _right_entry_priority_sort_key(
+        item, frames, mode="legacy_weighted",
+    )
+
+    assert key == (150.0, 100.0, 4.0, "A", 0)
+
+
+def test_structure_priority_is_lexicographic_before_factor_score():
+    frames = {
+        "A": pd.DataFrame({"structure_proximity_score": [80.0]}),
+        "B": pd.DataFrame({"structure_proximity_score": [40.0]}),
+    }
+    stronger_structure = (120.0, 90.0, 5, "A", 0, {
+        "entry_evidence_score": 10.0,
+    }, {}, "standard_right_entry")
+    higher_factor_score = (180.0, 100.0, 4, "B", 0, {
+        "entry_evidence_score": 20.0,
+    }, {}, "standard_right_entry")
+
+    ordered = sorted(
+        (stronger_structure, higher_factor_score),
+        key=lambda item: _right_entry_priority_sort_key(
+            item, frames, mode="structure_lexicographic",
+        ),
+        reverse=True,
+    )
+
+    assert ordered[0][3] == "A"
+
+
+def test_right_entry_size_multiplier_changes_size_not_trade_timing():
+    bars = breakout_bars()
+    date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
+    snapshots = {date: [{
+        "code": "A",
+        "candidate_score": 100.0,
+    }]}
+    phases = {date: {"phase": "active", "window_up_streak": 5}}
+
+    baseline = run_portfolio_backtest(
+        {"A": bars}, snapshots, phases,
+        requested_start=date, end_date=date,
+        signals_effective_next_day=False,
+    )
+    enlarged = run_portfolio_backtest(
+        {"A": bars}, snapshots, phases,
+        requested_start=date, end_date=date,
+        signals_effective_next_day=False,
+        right_entry_size_multiplier=2.0,
+    )
+
+    baseline_buy = next(
+        row for row in baseline["events"] if row["position_change_pct"] > 0
+    )
+    enlarged_buy = next(
+        row for row in enlarged["events"] if row["position_change_pct"] > 0
+    )
+    assert baseline_buy["date"] == enlarged_buy["date"] == date
+    assert enlarged_buy["position_change_pct"] > (
+        baseline_buy["position_change_pct"] * 1.9
+    )
+    assert baseline["right_entry_size_multiplier"] == 1.0
+    assert enlarged["right_entry_size_multiplier"] == 2.0
+
+
+def test_entry_participation_cap_trims_size_without_changing_trade_date():
+    bars = breakout_bars()
+    bars["amount"] = 10_000.0
+    date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
+    snapshots = {date: [{"code": "A", "candidate_score": 100.0}]}
+    phases = {date: {"phase": "active", "window_up_streak": 5}}
+
+    baseline = run_portfolio_backtest(
+        {"A": bars}, snapshots, phases,
+        requested_start=date, end_date=date,
+        signals_effective_next_day=False,
+    )
+    capped = run_portfolio_backtest(
+        {"A": bars}, snapshots, phases,
+        requested_start=date, end_date=date,
+        signals_effective_next_day=False,
+        price_amount_multiplier=1000.0,
+        max_entry_signal_amount_participation=0.01,
+        max_entry_avg_amount_participation=0.05,
+    )
+
+    baseline_buy = next(
+        row for row in baseline["events"] if row["position_change_pct"] > 0
+    )
+    capped_buy = next(
+        row for row in capped["events"] if row["position_change_pct"] > 0
+    )
+    assert capped_buy["date"] == baseline_buy["date"]
+    assert capped_buy["position_change_pct"] == pytest.approx(10.0, abs=0.1)
+    assert capped_buy["entry_liquidity_limited"] is True
+    assert capped_buy["observed_signal_amount"] == pytest.approx(10_000_000.0)
+    assert capped["liquidity_limited_order_count"] == 1
 
 
 _run_portfolio_backtest = run_portfolio_backtest
@@ -123,6 +234,12 @@ def normalize_candidate_snapshots(snapshots, **kwargs):
 def run_portfolio_backtest(price_frames, candidate_snapshots, *args, **kwargs):
     """Give synthetic value candidates the same explicit audit as production rows."""
     kwargs.setdefault("signals_effective_next_day", False)
+    kwargs.setdefault("close_confirmed_execution", "close_proxy")
+    # Synthetic unit scenarios historically model only the fee explicitly
+    # supplied by each test.  Keep that fixture contract explicit now that the
+    # production engine has conservative non-zero defaults.
+    kwargs.setdefault("estimated_slippage_rate", 0.0)
+    kwargs.setdefault("sell_stamp_duty_rate_before_2023_08_28", None)
     audited_snapshots = {}
     for date, rows in candidate_snapshots.items():
         audited_rows = []
@@ -131,6 +248,458 @@ def run_portfolio_backtest(price_frames, candidate_snapshots, *args, **kwargs):
         audited_snapshots[date] = audited_rows
     return _run_portfolio_backtest(
         price_frames, audited_snapshots, *args, **kwargs,
+    )
+
+
+def _standard_close_signal_for(signal_date, *, stop=9.0):
+    signal_date = pd.Timestamp(signal_date).normalize()
+
+    def fake_right_signal(data, index, plan=None, **kwargs):
+        if pd.Timestamp(data.iloc[index]["date"]).normalize() != signal_date:
+            return None
+        return {
+            "rank": 4,
+            "trigger": 10.0,
+            "stop": stop,
+            "order_type": "close",
+            "reason": "close-confirmed standard right entry",
+            "known_volume_ratio": 1.0,
+            "signal_type": "consolidation_breakout",
+            "entry_evidence_score": 9.0,
+        }
+
+    return fake_right_signal
+
+
+def _standard_right_candidate(code="sz.000001"):
+    return {
+        "code": code,
+        "name": "Sample Right",
+        "candidate_score": 99.0,
+        "selected_for_trading": True,
+        "signal_eligible": True,
+        "allow_right": True,
+        "allow_left": False,
+    }
+
+
+def _standard_close_execution_bars():
+    dates = pd.bdate_range("2026-01-05", periods=65)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [10.0] * len(dates),
+        "high": [10.1] * len(dates),
+        "low": [9.9] * len(dates),
+        "close": [10.0] * len(dates),
+        "volume": [1_000_000] * len(dates),
+    })
+    return dates, bars
+
+
+def test_standard_close_confirmed_next_open_rejects_gap_above_chase_limit(
+    monkeypatch,
+):
+    dates, bars = _standard_close_execution_bars()
+    snapshot_date, signal_date, execution_date = dates[-3:]
+    bars.loc[bars["date"] == execution_date, [
+        "open", "high", "low", "close",
+    ]] = [10.8, 11.0, 10.7, 10.9]
+    monkeypatch.setattr(
+        portfolio_engine, "_right_signal",
+        _standard_close_signal_for(signal_date),
+    )
+
+    result = _run_portfolio_backtest(
+        {"sz.000001": bars},
+        {snapshot_date.strftime("%Y-%m-%d"): [_standard_right_candidate()]},
+        {},
+        requested_start=snapshot_date.strftime("%Y-%m-%d"),
+        end_date=execution_date.strftime("%Y-%m-%d"),
+        signals_effective_next_day=True,
+        close_confirmed_execution="next_open",
+    )
+
+    assert result["trade_ledger"] == []
+    assert any(
+        row["reason"] == "next_open_gap_above_chase_limit"
+        for row in result["entry_blocks"]
+    )
+
+
+@pytest.mark.parametrize(("stop", "expected_position_pct"), [
+    (9.8, 30.0),
+    (9.5, 16.0),
+])
+def test_standard_right_risk_budget_sizes_first_entry_from_stop_distance(
+    monkeypatch, stop, expected_position_pct,
+):
+    dates, bars = _standard_close_execution_bars()
+    snapshot_date, signal_date = dates[-2:]
+    monkeypatch.setattr(
+        portfolio_engine, "_right_signal",
+        _standard_close_signal_for(signal_date, stop=stop),
+    )
+
+    result = _run_portfolio_backtest(
+        {"sz.000001": bars},
+        {snapshot_date.strftime("%Y-%m-%d"): [_standard_right_candidate()]},
+        {},
+        requested_start=snapshot_date.strftime("%Y-%m-%d"),
+        end_date=signal_date.strftime("%Y-%m-%d"),
+        signals_effective_next_day=True,
+        close_confirmed_execution="close_proxy",
+        right_entry_risk_budget_pct=0.008,
+    )
+
+    buy = result["trade_ledger"][0]
+    assert buy["requested_position_pct"] == pytest.approx(
+        expected_position_pct,
+    )
+    assert result["right_entry_risk_budget_pct"] == pytest.approx(0.008)
+
+
+def test_standard_right_risk_budget_uses_next_open_gap_price(monkeypatch):
+    dates, bars = _standard_close_execution_bars()
+    snapshot_date, signal_date, execution_date = dates[-3:]
+    bars.loc[bars["date"] == execution_date, [
+        "open", "high", "low", "close",
+    ]] = [10.05, 10.2, 9.9, 10.1]
+    monkeypatch.setattr(
+        portfolio_engine, "_right_signal",
+        _standard_close_signal_for(signal_date, stop=9.1),
+    )
+
+    result = _run_portfolio_backtest(
+        {"sz.000001": bars},
+        {snapshot_date.strftime("%Y-%m-%d"): [_standard_right_candidate()]},
+        {},
+        requested_start=snapshot_date.strftime("%Y-%m-%d"),
+        end_date=execution_date.strftime("%Y-%m-%d"),
+        signals_effective_next_day=True,
+        close_confirmed_execution="next_open",
+        right_entry_risk_budget_pct=0.008,
+    )
+
+    buy = result["trade_ledger"][0]
+    assert buy["price"] == pytest.approx(10.05)
+    assert buy["initial_stop_raw_price"] == pytest.approx(9.1)
+    assert buy["requested_position_pct"] == pytest.approx(
+        0.008 / ((10.05 - 9.1) / 10.05) * 100
+    )
+    assert buy["next_open_revalidated"] is True
+
+
+def test_standard_right_inverse_volatility_sizing_changes_only_order_size(
+    monkeypatch,
+):
+    dates, bars = _standard_close_execution_bars()
+    snapshot_date, signal_date, execution_date = dates[-3:]
+    monkeypatch.setattr(
+        portfolio_engine, "_right_signal",
+        _standard_close_signal_for(signal_date),
+    )
+    candidate = _standard_right_candidate()
+    candidate["right_inverse_volatility_multiplier"] = 0.5
+    common = dict(
+        price_frames={"sz.000001": bars},
+        candidate_snapshots={
+            snapshot_date.strftime("%Y-%m-%d"): [candidate],
+        },
+        formula_phases={},
+        requested_start=snapshot_date.strftime("%Y-%m-%d"),
+        end_date=execution_date.strftime("%Y-%m-%d"),
+        signals_effective_next_day=True,
+        close_confirmed_execution="next_open",
+    )
+
+    baseline = _run_portfolio_backtest(**common)
+    weighted = _run_portfolio_backtest(
+        **common, enable_right_inverse_volatility_sizing=True,
+    )
+
+    baseline_buy = baseline["trade_ledger"][0]
+    weighted_buy = weighted["trade_ledger"][0]
+    assert weighted_buy["date"] == baseline_buy["date"]
+    assert weighted_buy["requested_position_pct"] == pytest.approx(
+        baseline_buy["requested_position_pct"] * 0.5,
+    )
+    assert weighted["right_inverse_volatility_sizing_enabled"] is True
+    assert weighted["right_inverse_volatility_sizing_scope"] == (
+        "ordinary_standard_right_first_entry_only"
+    )
+
+
+def test_standard_right_market_volatility_sizing_changes_only_first_order_size(
+    monkeypatch,
+):
+    dates, bars = _standard_close_execution_bars()
+    snapshot_date, signal_date, execution_date = dates[-3:]
+    monkeypatch.setattr(
+        portfolio_engine, "_right_signal",
+        _standard_close_signal_for(signal_date),
+    )
+    candidate = _standard_right_candidate()
+    candidate["right_market_volatility_multiplier"] = 0.5
+    common = dict(
+        price_frames={"sz.000001": bars},
+        candidate_snapshots={
+            snapshot_date.strftime("%Y-%m-%d"): [candidate],
+        },
+        formula_phases={},
+        requested_start=snapshot_date.strftime("%Y-%m-%d"),
+        end_date=execution_date.strftime("%Y-%m-%d"),
+        signals_effective_next_day=True,
+        close_confirmed_execution="next_open",
+    )
+
+    baseline = _run_portfolio_backtest(**common)
+    weighted = _run_portfolio_backtest(
+        **common, enable_right_market_volatility_sizing=True,
+    )
+
+    baseline_buy = baseline["trade_ledger"][0]
+    weighted_buy = weighted["trade_ledger"][0]
+    assert weighted_buy["date"] == baseline_buy["date"]
+    assert weighted_buy["requested_position_pct"] == pytest.approx(
+        baseline_buy["requested_position_pct"] * 0.5,
+    )
+    assert weighted["right_market_volatility_sizing_enabled"] is True
+
+
+def test_right_entry_risk_budget_default_and_size_multiplier_are_exclusive():
+    bars = breakout_bars()
+    date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
+    snapshots = {date: [{"code": "A", "candidate_score": 100.0}]}
+
+    default_result = run_portfolio_backtest(
+        {"A": bars}, snapshots, {},
+        requested_start=date, end_date=date,
+    )
+
+    assert default_result["right_entry_risk_budget_pct"] is None
+    with pytest.raises(ValueError, match="cannot be enabled together"):
+        run_portfolio_backtest(
+            {"A": bars}, snapshots, {},
+            requested_start=date, end_date=date,
+            right_entry_risk_budget_pct=0.008,
+            right_entry_size_multiplier=1.5,
+        )
+
+
+@pytest.mark.parametrize("risk_budget", [0.0, -0.001, 0.0301])
+def test_right_entry_risk_budget_validates_account_fraction(risk_budget):
+    bars = breakout_bars()
+    date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
+
+    with pytest.raises(ValueError, match="greater than 0 and at most 0.03"):
+        run_portfolio_backtest(
+            {"A": bars},
+            {date: [{"code": "A", "candidate_score": 100.0}]},
+            {},
+            requested_start=date,
+            end_date=date,
+            right_entry_risk_budget_pct=risk_budget,
+        )
+
+
+def test_standard_close_confirmed_next_open_no_k_does_not_defer(
+    monkeypatch,
+):
+    dates, stock_bars = _standard_close_execution_bars()
+    snapshot_date, signal_date, execution_date, resumed_date = dates[-4:]
+    market_bars = stock_bars.copy()
+    stock_bars = stock_bars[stock_bars["date"] != execution_date].copy()
+    monkeypatch.setattr(
+        portfolio_engine, "_right_signal",
+        _standard_close_signal_for(signal_date),
+    )
+
+    result = _run_portfolio_backtest(
+        {"sz.000001": stock_bars, "sz.000002": market_bars},
+        {snapshot_date.strftime("%Y-%m-%d"): [_standard_right_candidate()]},
+        {},
+        requested_start=snapshot_date.strftime("%Y-%m-%d"),
+        end_date=resumed_date.strftime("%Y-%m-%d"),
+        signals_effective_next_day=True,
+        close_confirmed_execution="next_open",
+    )
+
+    assert result["trade_ledger"] == []
+    blocks = [
+        row for row in result["entry_blocks"]
+        if row["reason"] == "standard_right_next_open_no_kline"
+    ]
+    assert len(blocks) == 1
+    assert blocks[0]["date"] == execution_date.strftime("%Y-%m-%d")
+    assert blocks[0]["technical_signal_date"] == signal_date.strftime(
+        "%Y-%m-%d",
+    )
+    assert blocks[0]["execution_status"] == (
+        "standard_right_next_open_no_kline"
+    )
+    assert result["pending_standard_right_close_codes"] == []
+
+
+def test_standard_close_confirmed_next_open_blocks_locked_limit_up(
+    monkeypatch,
+):
+    dates, bars = _standard_close_execution_bars()
+    snapshot_date, signal_date, execution_date = dates[-3:]
+    bars.loc[bars["date"] == execution_date, [
+        "open", "high", "low", "close",
+    ]] = [11.0, 11.0, 11.0, 11.0]
+    monkeypatch.setattr(
+        portfolio_engine, "_right_signal",
+        _standard_close_signal_for(signal_date),
+    )
+
+    result = _run_portfolio_backtest(
+        {"sz.000001": bars},
+        {snapshot_date.strftime("%Y-%m-%d"): [_standard_right_candidate()]},
+        {},
+        requested_start=snapshot_date.strftime("%Y-%m-%d"),
+        end_date=execution_date.strftime("%Y-%m-%d"),
+        signals_effective_next_day=True,
+        close_confirmed_execution="next_open",
+    )
+
+    assert result["trade_ledger"] == []
+    assert result["entry_blocks"][0]["reason"] == (
+        "standard_right_next_open_locked_limit_up"
+    )
+    assert result["entry_blocks"][0]["date"] == execution_date.strftime(
+        "%Y-%m-%d",
+    )
+
+
+def test_standard_next_open_blocks_open_limit_up_even_if_board_opens_later(
+    monkeypatch,
+):
+    dates, bars = _standard_close_execution_bars()
+    snapshot_date, signal_date, execution_date = dates[-3:]
+    execution = bars["date"].eq(execution_date)
+    bars.loc[execution, ["open", "high", "low", "close"]] = [
+        11.0, 11.2, 10.7, 10.9,
+    ]
+    bars.loc[execution, "up_limit"] = 11.0
+    bars.loc[execution, "down_limit"] = 9.0
+    monkeypatch.setattr(
+        portfolio_engine, "_right_signal",
+        _standard_close_signal_for(signal_date),
+    )
+
+    result = _run_portfolio_backtest(
+        {"sz.000001": bars},
+        {snapshot_date.strftime("%Y-%m-%d"): [_standard_right_candidate()]},
+        {},
+        requested_start=snapshot_date.strftime("%Y-%m-%d"),
+        end_date=execution_date.strftime("%Y-%m-%d"),
+        signals_effective_next_day=True,
+        close_confirmed_execution="next_open",
+    )
+
+    assert result["trade_ledger"] == []
+    assert result["entry_blocks"][0]["reason"] == (
+        "standard_right_next_open_locked_limit_up"
+    )
+
+
+def test_standard_next_open_freezes_weekend_candidate_and_formula_context(
+    monkeypatch,
+):
+    dates = pd.bdate_range(end="2026-03-10", periods=65)
+    snapshot_date, signal_date, execution_date = dates[-3:]
+    assert snapshot_date.day_name() == "Friday"
+    assert signal_date.day_name() == "Monday"
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [10.0] * len(dates),
+        "high": [10.1] * len(dates),
+        "low": [9.9] * len(dates),
+        "close": [10.0] * len(dates),
+        "volume": [1_000_000] * len(dates),
+    })
+    monkeypatch.setattr(
+        portfolio_engine, "_right_signal",
+        _standard_close_signal_for(signal_date),
+    )
+    old_candidate = _standard_right_candidate("sz.000001")
+    replacement_candidate = _standard_right_candidate("sz.000002")
+    phases = {
+        snapshot_date.strftime("%Y-%m-%d"): {
+            "phase": "active",
+            "window_down_streak": 0,
+            "window_up_streak": 5,
+        },
+        signal_date.strftime("%Y-%m-%d"): {
+            "phase": "exited",
+            "window_down_streak": 5,
+            "window_up_streak": 0,
+        },
+    }
+
+    result = _run_portfolio_backtest(
+        {"sz.000001": bars, "sz.000002": bars},
+        {
+            snapshot_date.strftime("%Y-%m-%d"): [old_candidate],
+            signal_date.strftime("%Y-%m-%d"): [replacement_candidate],
+        },
+        phases,
+        requested_start=snapshot_date.strftime("%Y-%m-%d"),
+        end_date=execution_date.strftime("%Y-%m-%d"),
+        signals_effective_next_day=True,
+        close_confirmed_execution="next_open",
+    )
+
+    buys = [
+        row for row in result["trade_ledger"]
+        if row["trade_side"] == "买入"
+    ]
+    assert [row["code"] for row in buys] == ["sz.000001"]
+    assert buys[0]["candidate_snapshot_date"] == snapshot_date.strftime(
+        "%Y-%m-%d",
+    )
+    assert buys[0]["technical_signal_date"] == signal_date.strftime(
+        "%Y-%m-%d",
+    )
+    assert buys[0]["frozen_formula_phase"] == "active"
+    assert buys[0]["frozen_formula_down_streak"] == 0
+    assert buys[0]["requested_position_pct"] == pytest.approx(30.0)
+    assert buys[0]["phase"] == "exited"
+    assert "33未三日下行首仓" in buys[0]["reason"]
+    assert "33三日下行试错首仓" not in buys[0]["reason"]
+    assert result["pending_standard_right_close_codes"] == []
+
+
+def test_standard_close_confirmed_close_proxy_keeps_same_day_close(
+    monkeypatch,
+):
+    dates, bars = _standard_close_execution_bars()
+    snapshot_date, signal_date = dates[-2:]
+    bars.loc[bars["date"] == signal_date, [
+        "open", "high", "low", "close",
+    ]] = [10.8, 11.0, 10.7, 10.9]
+    monkeypatch.setattr(
+        portfolio_engine, "_right_signal",
+        _standard_close_signal_for(signal_date),
+    )
+
+    result = _run_portfolio_backtest(
+        {"sz.000001": bars},
+        {snapshot_date.strftime("%Y-%m-%d"): [_standard_right_candidate()]},
+        {},
+        requested_start=snapshot_date.strftime("%Y-%m-%d"),
+        end_date=signal_date.strftime("%Y-%m-%d"),
+        signals_effective_next_day=True,
+        close_confirmed_execution="close_proxy",
+    )
+
+    buy = result["trade_ledger"][0]
+    assert buy["date"] == signal_date.strftime("%Y-%m-%d")
+    assert buy["price"] == pytest.approx(10.9)
+    assert buy["technical_signal_date"] == signal_date.strftime("%Y-%m-%d")
+    assert buy["technical_signal_timing"] == (
+        "same_day_close_confirmed_close_proxy"
     )
 
 
@@ -268,6 +837,11 @@ def test_raw_execution_adjusts_position_across_ex_rights_factor_change():
         commission_rate=0,
         minimum_commission=0,
         signals_effective_next_day=True,
+        corporate_actions={"sz.000001": [{
+            "ex_date": str(split_dates[0].date()),
+            "record_date": str(breakout_bars().iloc[-1]["date"].date()),
+            "div_listdate": str(split_dates[0].date()), "stk_div": 2.,
+        }]},
     )
 
     adjustment = [
@@ -324,6 +898,9 @@ def test_raw_execution_uses_dividend_share_rate_before_factor_fallback():
             "sz.000001": [
                 {
                     "ex_date": ex_date,
+                    "record_date": str(breakout_bars().iloc[-1]["date"].date()),
+                    "pay_date": str(action_dates[1].date()),
+                    "div_listdate": str(action_dates[0].date()),
                     "stk_bo_rate": 0.6,
                     "stk_co_rate": 0.0,
                     "cash_div": 0.1,
@@ -350,7 +927,7 @@ def test_raw_execution_uses_dividend_share_rate_before_factor_fallback():
     assert position["quantity"] + sell_quantity == pytest.approx(buy_quantity * 1.6)
     assert float(position["quantity"]).is_integer()
     assert all(float(event["quantity"]).is_integer() for event in result["trade_ledger"])
-    assert position["cost"] == pytest.approx(10.4 / noisy_factor_multiplier, rel=1e-3)
+    assert position["cost"] == pytest.approx(10.4 / 1.6, rel=1e-3)
 
 
 def test_corporate_action_quantity_allocation_preserves_account_total():
@@ -434,6 +1011,21 @@ def test_prepare_frame_uses_qfq_signal_prices_but_keeps_raw_execution_prices():
     assert prepared.loc[1, "qfq_to_raw_factor"] == pytest.approx(11.9444 / 8.4973)
 
 
+def test_prepare_frame_rejects_missing_adjustment_factor():
+    raw = pd.DataFrame({
+        "date": pd.to_datetime(["2025-05-26", "2025-05-27"]),
+        "open": [10.0, 10.1],
+        "high": [10.2, 10.3],
+        "low": [9.8, 9.9],
+        "close": [10.1, 10.2],
+        "volume": [1000, 1000],
+        "raw_to_qfq_factor": [0.5, pd.NA],
+    })
+
+    with pytest.raises(ValueError, match="complete and positive"):
+        _prepare_frame(raw)
+
+
 def test_raw_execution_ignores_small_cash_dividend_factor_drift():
     bars = breakout_bars()
     dividend_dates = pd.bdate_range(
@@ -503,6 +1095,45 @@ def test_load_price_frames_can_bypass_database_for_raw_execution_prices(tmp_path
     assert frames["sz.002594"].loc[0, "raw_to_qfq_factor"] == pytest.approx(3.03591, rel=1e-4)
 
 
+def test_load_price_frames_reads_prepared_pickle_and_slices_dates(tmp_path):
+    pd.DataFrame([
+        {
+            "date": pd.Timestamp("2023-12-28"),
+            "open": 9.8,
+            "high": 10.1,
+            "low": 9.7,
+            "close": 10.0,
+            "volume": 1000,
+            "raw_close": 10.0,
+            "ma20": 9.5,
+        },
+        {
+            "date": pd.Timestamp("2023-12-29"),
+            "open": 10.0,
+            "high": 10.3,
+            "low": 9.9,
+            "close": 10.2,
+            "volume": 1200,
+            "raw_close": 10.2,
+            "ma20": 9.6,
+        },
+    ]).to_pickle(tmp_path / "bj_920000.pkl")
+
+    frames = load_price_frames(
+        ["bj.920000"],
+        tmp_path,
+        start_date="2023-12-29",
+        end_date="2023-12-29",
+        prefer_database=False,
+    )
+
+    assert list(frames) == ["bj.920000"]
+    assert frames["bj.920000"]["date"].tolist() == [
+        pd.Timestamp("2023-12-29")
+    ]
+    assert frames["bj.920000"]["ma20"].tolist() == [9.6]
+
+
 def test_infer_price_frame_source_recognizes_formula33_miniqmt_cache():
     assert infer_price_frame_source(r"D:\repo\var\cache\formula33_kline\miniqmt") == "miniqmt"
 
@@ -552,6 +1183,17 @@ def test_load_price_frames_can_use_tushare_sqlite_without_future_bars(tmp_path, 
             },
         ]),
     )
+    TushareRepository(database).upsert_dataset(
+        "stk_limit",
+        pd.DataFrame([
+            {
+                "ts_code": "600000.SH",
+                "trade_date": "20260720",
+                "up_limit": 9.02,
+                "down_limit": 7.38,
+            },
+        ]),
+    )
 
     frames = load_price_frames(
         ["sh.600000"],
@@ -566,6 +1208,33 @@ def test_load_price_frames_can_use_tushare_sqlite_without_future_bars(tmp_path, 
     assert frames["sh.600000"]["date"].tolist() == ["2026-07-20"]
     assert frames["sh.600000"].loc[0, "close"] == pytest.approx(8.2)
     assert frames["sh.600000"].loc[0, "raw_to_qfq_factor"] == pytest.approx(0.25)
+    assert frames["sh.600000"].loc[0, "up_limit"] == pytest.approx(9.02)
+    assert frames["sh.600000"].loc[0, "down_limit"] == pytest.approx(7.38)
+
+
+def test_daily_price_limit_coverage_can_fail_closed():
+    frames = {
+        "sh.600000": pd.DataFrame({
+            "date": ["2024-01-02", "2024-01-03"],
+            "volume": [1000, 1000],
+            "up_limit": [11.0, pd.NA],
+            "down_limit": [9.0, pd.NA],
+        }),
+    }
+
+    coverage = validate_daily_price_limit_coverage(
+        frames, "2024-01-02", "2024-01-03",
+    )
+
+    assert coverage["covered_bar_count"] == 1
+    assert coverage["missing_bar_count"] == 1
+    with pytest.raises(RuntimeError, match="price-limit coverage"):
+        validate_daily_price_limit_coverage(
+            frames,
+            "2024-01-02",
+            "2024-01-03",
+            require_complete=True,
+        )
 
 
 def test_price_frame_coverage_requires_all_candidate_codes_to_endpoint():
@@ -612,7 +1281,7 @@ def test_price_frame_coverage_uses_last_trading_day_before_period_end():
 
 def test_price_frame_coverage_uses_first_candidate_date():
     frames = {
-        "A": pd.DataFrame({"date": ["2026-01-10", "2026-07-17"]}),
+        "A": pd.DataFrame({"date": ["2026-01-10", "2026-01-15", "2026-07-17"]}),
         "B": pd.DataFrame({"date": ["2026-01-15", "2026-07-17"]}),
     }
     snapshots = {
@@ -1353,6 +2022,587 @@ def test_formula_phase_history_uses_three_five_and_exit_streaks():
     assert list(result.values()) == ["waiting", "watch", "active", "exited"]
 
 
+def test_bull_half_reversal_requires_next_close_without_chasing():
+    dates = pd.bdate_range("2026-01-01", periods=2)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [10.0, 10.2],
+        "high": [10.2, 10.8],
+        "low": [9.6, 10.1],
+        "close": [10.0, 10.7],
+        "volume": [1000, 1000],
+    })
+    signal = _prepare_bull_half_reversal_signal(
+        bars,
+        0,
+        {
+            "rank": 4,
+            "trigger": 10.0,
+            "stop": 10.0,
+            "order_type": "limit",
+            "reason": "连阳波段一半拉回",
+            "known_volume_ratio": 1.0,
+            "signal_type": "bull_run_half_pullback",
+        },
+    )
+
+    assert signal["stop"] == pytest.approx(9.6 * 0.995)
+    assert signal["requires_next_day_confirmation"] is True
+    confirmed, _, reason = _confirm_bull_half_reversal_signal(
+        bars, 1, signal,
+    )
+    assert confirmed is False
+    assert reason == "next_close_confirmation_too_extended"
+
+
+def test_breadth_reversal_channel_delays_entry_sizes_risk_and_exits_at_3r(
+    monkeypatch,
+):
+    dates = pd.bdate_range("2026-01-01", periods=66)
+    signal_date, confirmation_date, target_date = dates[-3:]
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [10.0] * 66,
+        "high": [10.1] * 63 + [10.2, 10.2, 12.0],
+        "low": [9.9] * 63 + [9.6, 9.9, 10.2],
+        "close": [10.0] * 63 + [10.0, 10.1, 11.8],
+        "volume": [1000] * 66,
+    })
+
+    def fake_right_signal(data, index, plan=None, **kwargs):
+        if pd.Timestamp(data.iloc[index]["date"]) != signal_date:
+            return None
+        return {
+            "rank": 4,
+            "trigger": 10.0,
+            "stop": 10.0,
+            "order_type": "limit",
+            "reason": "连阳波段一半拉回; 一半位置止损",
+            "known_volume_ratio": 1.0,
+            "signal_type": "bull_run_half_pullback",
+        }
+
+    monkeypatch.setattr(portfolio_engine, "_right_signal", fake_right_signal)
+    candidate = {
+        "code": "A",
+        "name": "测试标的",
+        "selection_profile": "quantsplaybook_multichannel",
+        "selected_for_trading": True,
+        "signal_eligible": True,
+        "allow_right": True,
+        "breadth_reversal_channel_eligible": True,
+        "candidate_score": 80,
+        "return_60d": -0.20,
+        "avg_amount_20": 800_000_000,
+    }
+    signal_date_text = signal_date.strftime("%Y-%m-%d")
+    phases = {
+        date.strftime("%Y-%m-%d"): {
+            "phase": "exited",
+            "window_down_streak": 5,
+            "window_up_streak": 0,
+            "window_unique_count": 20,
+        }
+        for date in (signal_date, confirmation_date, target_date)
+    }
+
+    result = run_portfolio_backtest(
+        {"A": bars},
+        {signal_date_text: [candidate]},
+        phases,
+        requested_start=signal_date_text,
+        end_date=target_date.strftime("%Y-%m-%d"),
+        enable_breadth_reversal_half_pullback=True,
+        commission_rate=0,
+        minimum_commission=0,
+        sell_stamp_duty_rate=0,
+        estimated_slippage_rate=0,
+        initial_capital=1_000_000,
+    )
+
+    trades = result["trade_ledger"]
+    assert [row["trade_side"] for row in trades] == ["买入", "卖出"]
+    assert trades[0]["date"] == confirmation_date.strftime("%Y-%m-%d")
+    assert trades[0]["technical_signal_date"] == signal_date_text
+    assert trades[0]["semantic_entry_setup_cn"] == "低广度反转连阳拉回买点"
+    assert trades[0]["initial_risk_amount"] <= 6_000
+    assert trades[0]["initial_risk_amount"] > 5_000
+    assert trades[1]["date"] == target_date.strftime("%Y-%m-%d")
+    assert trades[1]["action"] == "低广度反转3R止盈"
+    assert trades[1]["realized_r_multiple"] == pytest.approx(3.0, abs=0.02)
+    assert result["final_positions"] == []
+    assert result["breadth_reversal_observation_count"] == 2
+    assert result["breadth_reversal_observations"][-1]["status_cn"] == (
+        "次日收盘确认通过"
+    )
+
+
+def test_factor_horizon_channel_ignores_standard_right_risk_budget():
+    dates = pd.bdate_range("2026-01-05", periods=24)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [10.0] * len(dates),
+        "high": [10.2] * len(dates),
+        "low": [9.8] * len(dates),
+        "close": [10.0] * len(dates),
+        "volume": [1_000_000] * len(dates),
+    })
+    snapshot_date = dates[0].strftime("%Y-%m-%d")
+    candidate = {
+        "code": "A",
+        "name": "周期匹配测试",
+        "candidate_score": 99.0,
+        "playbook_factor_rank": 3,
+        "structure_proximity_score": 50.0,
+        "avg_amount_20": 800_000_000.0,
+        "known_volume_ratio": 1.0,
+        "selected_for_trading": True,
+        "signal_eligible": True,
+        "allow_right": True,
+        "allow_left": False,
+        "factor_horizon_channel_eligible": True,
+    }
+
+    result = _run_portfolio_backtest(
+        {"A": bars},
+        {
+            snapshot_date: [candidate],
+            dates[1].strftime("%Y-%m-%d"): [],
+        },
+        {},
+        requested_start=snapshot_date,
+        end_date=dates[-1].strftime("%Y-%m-%d"),
+        signals_effective_next_day=True,
+        enable_factor_horizon_channel=True,
+        right_entry_risk_budget_pct=0.001,
+        close_confirmed_execution="close_proxy",
+        commission_rate=0,
+        minimum_commission=0,
+        sell_stamp_duty_rate=0,
+        estimated_slippage_rate=0,
+        initial_capital=1_000_000,
+    )
+
+    trades = result["trade_ledger"]
+    assert [row["trade_side"] for row in trades] == ["买入", "卖出"]
+    assert trades[0]["date"] == dates[1].strftime("%Y-%m-%d")
+    assert trades[0]["technical_signal_date"] == snapshot_date
+    assert trades[0]["semantic_entry_setup_cn"] == "因子周期匹配买点"
+    assert trades[0]["requested_position_pct"] == pytest.approx(18.75)
+    assert trades[0]["initial_risk_amount"] <= 15_000
+    assert trades[0]["initial_risk_amount"] > 14_000
+    assert trades[1]["date"] == dates[20].strftime("%Y-%m-%d")
+    assert trades[1]["action"] == "因子周期匹配到期退出"
+    assert result["factor_horizon_buy_count"] == 1
+    assert result["right_entry_risk_budget_pct"] == pytest.approx(0.001)
+    assert result["final_positions"] == []
+
+
+def test_factor_horizon_twenty_percent_profit_switches_to_trend_management():
+    dates = pd.bdate_range("2026-01-05", periods=24)
+    closes = [10.0] * 5 + [12.1] * 19
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": closes,
+        "high": [value + 0.1 for value in closes],
+        "low": [value - 0.1 for value in closes],
+        "close": closes,
+        "volume": [1_000_000] * len(dates),
+    })
+    snapshot_date = dates[0].strftime("%Y-%m-%d")
+    candidate = {
+        "code": "A",
+        "name": "趋势管理测试",
+        "candidate_score": 99.0,
+        "playbook_factor_rank": 3,
+        "structure_proximity_score": 50.0,
+        "avg_amount_20": 800_000_000.0,
+        "known_volume_ratio": 1.0,
+        "selected_for_trading": True,
+        "signal_eligible": True,
+        "allow_right": True,
+        "allow_left": False,
+        "factor_horizon_channel_eligible": True,
+    }
+
+    result = _run_portfolio_backtest(
+        {"A": bars},
+        {snapshot_date: [candidate]},
+        {},
+        requested_start=snapshot_date,
+        end_date=dates[-1].strftime("%Y-%m-%d"),
+        signals_effective_next_day=True,
+        enable_factor_horizon_channel=True,
+        factor_horizon_trend_management_return=0.20,
+        close_confirmed_execution="close_proxy",
+        commission_rate=0,
+        minimum_commission=0,
+        sell_stamp_duty_rate=0,
+        estimated_slippage_rate=0,
+        initial_capital=1_000_000,
+    )
+
+    assert [row["trade_side"] for row in result["trade_ledger"]] == ["买入"]
+    assert result["final_positions"][0]["batches"][0][
+        "factor_horizon_trend_managed"
+    ] is True
+    assert result["factor_horizon_trend_management_return_pct"] == 20.0
+    assert result["factor_horizon_trend_managed_batch_count"] == 1
+    assert result["factor_horizon_trend_managed_codes"] == ["A"]
+
+
+def test_factor_horizon_deep_reversal_filters_are_explicit_and_localized():
+    dates = pd.bdate_range("2026-01-05", periods=3)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [10.0] * len(dates),
+        "high": [10.2] * len(dates),
+        "low": [9.8] * len(dates),
+        "close": [10.0] * len(dates),
+        "volume": [1_000_000] * len(dates),
+    })
+    common = {
+        "candidate_score": 99.0,
+        "playbook_factor_rank": 3,
+        "structure_proximity_score": 55.0,
+        "avg_amount_20": 800_000_000.0,
+        "known_volume_ratio": 1.0,
+        "selected_for_trading": True,
+        "signal_eligible": True,
+        "allow_right": True,
+        "allow_left": False,
+        "factor_horizon_channel_eligible": True,
+    }
+    candidates = [
+        {**common, "code": "A", "return_60d": -0.15, "ma20_rising": False},
+        {**common, "code": "B", "return_60d": -0.05, "ma20_rising": False},
+        {**common, "code": "C", "return_60d": -0.20, "ma20_rising": True},
+    ]
+    snapshot_date = dates[0].strftime("%Y-%m-%d")
+
+    result = _run_portfolio_backtest(
+        {code: bars for code in ("A", "B", "C")},
+        {snapshot_date: candidates},
+        {},
+        requested_start=snapshot_date,
+        end_date=dates[-1].strftime("%Y-%m-%d"),
+        signals_effective_next_day=True,
+        enable_factor_horizon_channel=True,
+        factor_horizon_max_return_60d=-0.10,
+        factor_horizon_require_ma20_not_rising=True,
+        commission_rate=0,
+        minimum_commission=0,
+        sell_stamp_duty_rate=0,
+        estimated_slippage_rate=0,
+    )
+
+    buys = [
+        row for row in result["trade_ledger"]
+        if row["trade_side"] == "买入"
+    ]
+    assert [row["code"] for row in buys] == ["A"]
+    assert "60日收益不高于-10.0%" in buys[0]["reason_cn"]
+    assert "MA20尚未上扬" in buys[0]["reason_cn"]
+    blocks = {row["code"]: row for row in result["entry_blocks"]}
+    assert blocks["B"]["reason_cn"] == (
+        "候选日60日跌幅未达到因子周期深回撤门槛"
+    )
+    assert blocks["C"]["reason_cn"] == (
+        "候选日MA20已经上扬，不符合因子周期深回撤反转条件"
+    )
+
+    watch_result = _run_portfolio_backtest(
+        {"A": bars},
+        {snapshot_date: [candidates[0]]},
+        {
+            snapshot_date: {
+                "phase": "watch",
+                "window_up_streak": 3,
+            },
+        },
+        requested_start=snapshot_date,
+        end_date=dates[-1].strftime("%Y-%m-%d"),
+        signals_effective_next_day=True,
+        enable_factor_horizon_channel=True,
+        factor_horizon_exclude_watch_phase=True,
+        commission_rate=0,
+        minimum_commission=0,
+        sell_stamp_duty_rate=0,
+        estimated_slippage_rate=0,
+    )
+
+    assert watch_result["trade_ledger"] == []
+    assert watch_result["entry_blocks"][0]["reason_cn"] == (
+        "Formula33处于观察阶段，暂不启动因子周期交易"
+    )
+
+
+def test_compressed_structure_channel_freezes_signal_and_buys_next_open(
+    monkeypatch,
+):
+    dates = pd.bdate_range("2026-01-05", periods=50)
+    signal_index = 25
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [10.0] * signal_index + [10.1] * (len(dates) - signal_index),
+        "high": [10.1] * signal_index + [10.2] * (len(dates) - signal_index),
+        "low": [9.9] * signal_index + [10.0] * (len(dates) - signal_index),
+        "close": [10.0] * signal_index + [10.1] * (len(dates) - signal_index),
+        "volume": [1_000_000] * signal_index + [1_500_000] + [
+            1_000_000
+        ] * (len(dates) - signal_index - 1),
+    })
+    signal_date = dates[signal_index]
+
+    def fake_right_signal(data, index, plan=None, **kwargs):
+        if pd.Timestamp(data.iloc[index]["date"]) != signal_date:
+            return None
+        return {
+            "rank": 4,
+            "trigger": 10.0,
+            "stop": 9.95,
+            "order_type": "close",
+            "reason": "整理平台收盘突破；平台下方止损",
+            "known_volume_ratio": 1.2,
+            "signal_type": "consolidation_breakout",
+            "requires_next_day_confirmation": True,
+            "entry_evidence_score": 9.0,
+        }
+
+    monkeypatch.setattr(portfolio_engine, "_right_signal", fake_right_signal)
+    candidate = {
+        "code": "A",
+        "name": "紧结构测试",
+        "candidate_score": 99.0,
+        "playbook_factor_rank": 3,
+        "avg_amount_20": 800_000_000.0,
+        "selected_for_trading": True,
+        "signal_eligible": True,
+        "allow_right": True,
+        "allow_left": False,
+        "compressed_structure_channel_eligible": True,
+        "selection_profile": "quantsplaybook_multichannel",
+    }
+    signal_date_text = signal_date.strftime("%Y-%m-%d")
+
+    result = _run_portfolio_backtest(
+        {"A": bars},
+        {signal_date_text: [candidate]},
+        {},
+        requested_start=signal_date_text,
+        end_date=dates[-1].strftime("%Y-%m-%d"),
+        signals_effective_next_day=True,
+        enable_compressed_structure_channel=True,
+        compressed_structure_min_avg_amount=500_000_000,
+        close_confirmed_execution="close_proxy",
+        commission_rate=0,
+        minimum_commission=0,
+        sell_stamp_duty_rate=0,
+        estimated_slippage_rate=0,
+        initial_capital=1_000_000,
+    )
+
+    trades = result["trade_ledger"]
+    assert [row["trade_side"] for row in trades] == ["买入", "卖出"]
+    assert trades[0]["date"] == dates[signal_index + 1].strftime("%Y-%m-%d")
+    assert trades[0]["technical_signal_date"] == signal_date_text
+    assert trades[0]["structure_proximity_score"] > 40.0
+    assert trades[0]["structure_proximity_score_source"] == (
+        "signal_date_visible_price_history"
+    )
+    assert trades[0]["signal_type_cn"] == "紧结构平台延续买点"
+    assert trades[0]["semantic_entry_setup_cn"] == "紧结构平台延续买点"
+    assert trades[0]["initial_risk_amount"] <= 15_000
+    assert trades[0]["initial_risk_amount"] > 14_000
+    assert trades[0]["entry_liquidity_floor"] == 500_000_000
+    assert trades[1]["date"] == dates[signal_index + 20].strftime("%Y-%m-%d")
+    assert trades[1]["action"] == "紧结构平台延续到期退出"
+    assert result["compressed_structure_buy_count"] == 1
+    assert result["final_positions"] == []
+
+
+def test_compressed_structure_capacity_preserves_factor_horizon_slot(
+    monkeypatch,
+):
+    dates = pd.bdate_range("2026-01-05", periods=30)
+    signal_index = 25
+    signal_date = dates[signal_index]
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [10.0] * signal_index + [10.1] * (len(dates) - signal_index),
+        "high": [10.1] * signal_index + [10.2] * (len(dates) - signal_index),
+        "low": [9.9] * signal_index + [10.0] * (len(dates) - signal_index),
+        "close": [10.0] * signal_index + [10.1] * (len(dates) - signal_index),
+        "volume": [1_000_000] * signal_index + [1_500_000] + [
+            1_000_000
+        ] * (len(dates) - signal_index - 1),
+    })
+
+    def fake_right_signal(data, index, plan=None, **kwargs):
+        if pd.Timestamp(data.iloc[index]["date"]) != signal_date:
+            return None
+        return {
+            "rank": 4,
+            "trigger": 10.0,
+            "stop": 9.95,
+            "order_type": "close",
+            "reason": "整理平台收盘突破；平台下方止损",
+            "known_volume_ratio": 1.2,
+            "signal_type": "consolidation_breakout",
+            "entry_evidence_score": 9.0,
+        }
+
+    monkeypatch.setattr(portfolio_engine, "_right_signal", fake_right_signal)
+    common = {
+        "selected_for_trading": True,
+        "signal_eligible": True,
+        "allow_right": True,
+        "allow_left": False,
+        "avg_amount_20": 800_000_000.0,
+        "structure_proximity_score": 50.0,
+        "selection_profile": "quantsplaybook_multichannel",
+    }
+    candidates = [
+        {
+            **common,
+            "code": "A",
+            "candidate_score": 99.0,
+            "playbook_factor_rank": 2,
+            "compressed_structure_channel_eligible": True,
+        },
+        {
+            **common,
+            "code": "B",
+            "candidate_score": 98.0,
+            "playbook_factor_rank": 3,
+            "compressed_structure_channel_eligible": True,
+        },
+        {
+            **common,
+            "code": "C",
+            "candidate_score": 97.0,
+            "playbook_factor_rank": 4,
+            "factor_horizon_channel_eligible": True,
+        },
+    ]
+    signal_date_text = signal_date.strftime("%Y-%m-%d")
+
+    result = _run_portfolio_backtest(
+        {code: bars for code in ("A", "B", "C")},
+        {signal_date_text: candidates},
+        {},
+        requested_start=signal_date_text,
+        end_date=dates[-1].strftime("%Y-%m-%d"),
+        max_positions=3,
+        max_total_held_symbols=3,
+        signals_effective_next_day=True,
+        enable_compressed_structure_channel=True,
+        compressed_structure_max_positions=1,
+        enable_factor_horizon_channel=True,
+        factor_horizon_max_positions=2,
+        close_confirmed_execution="close_proxy",
+        commission_rate=0,
+        minimum_commission=0,
+        sell_stamp_duty_rate=0,
+        estimated_slippage_rate=0,
+        initial_capital=1_000_000,
+    )
+
+    buys = [
+        row for row in result["trade_ledger"]
+        if row["trade_side"] == "买入"
+    ]
+    assert {row["code"] for row in buys} == {"A", "C"}
+    assert {row["signal_type_cn"] for row in buys} == {
+        "紧结构平台延续买点",
+        "因子周期匹配买点",
+    }
+    capacity_blocks = [
+        row for row in result["entry_blocks"]
+        if row["reason"] == "specialized_channel_capacity_full"
+    ]
+    assert [row["code"] for row in capacity_blocks] == ["B"]
+    assert capacity_blocks[0]["reason_cn"] == (
+        "该专用通道同时持仓数量已达上限"
+    )
+
+
+def test_compressed_structure_entry_does_not_wait_for_resume(monkeypatch):
+    dates = pd.bdate_range("2026-01-05", periods=3)
+    signal_date = dates[0]
+    stock_bars = pd.DataFrame({
+        "date": [dates[0], dates[2]],
+        "open": [10.0, 10.0],
+        "high": [10.2, 10.2],
+        "low": [9.8, 9.8],
+        "close": [10.0, 10.0],
+        "volume": [1_000_000, 1_000_000],
+    })
+    calendar_bars = pd.DataFrame({
+        "date": dates,
+        "open": [10.0] * len(dates),
+        "high": [10.2] * len(dates),
+        "low": [9.8] * len(dates),
+        "close": [10.0] * len(dates),
+        "volume": [1_000_000] * len(dates),
+    })
+
+    def fake_right_signal(data, index, plan=None, **kwargs):
+        if pd.Timestamp(data.iloc[index]["date"]) != signal_date:
+            return None
+        return {
+            "rank": 4,
+            "trigger": 10.0,
+            "stop": 9.95,
+            "order_type": "close",
+            "reason": "整理平台收盘突破；平台下方止损",
+            "known_volume_ratio": 1.2,
+            "signal_type": "consolidation_breakout",
+            "entry_evidence_score": 9.0,
+        }
+
+    monkeypatch.setattr(portfolio_engine, "_right_signal", fake_right_signal)
+    candidate = {
+        "code": "A",
+        "name": "停牌测试",
+        "candidate_score": 99.0,
+        "playbook_factor_rank": 3,
+        "structure_proximity_score": 50.0,
+        "avg_amount_20": 800_000_000.0,
+        "selected_for_trading": True,
+        "signal_eligible": True,
+        "allow_right": True,
+        "allow_left": False,
+        "selection_profile": "quantsplaybook_factor_only",
+    }
+
+    result = _run_portfolio_backtest(
+        {"A": stock_bars, "B": calendar_bars},
+        {signal_date.strftime("%Y-%m-%d"): [candidate]},
+        {},
+        requested_start=signal_date.strftime("%Y-%m-%d"),
+        end_date=dates[-1].strftime("%Y-%m-%d"),
+        signals_effective_next_day=True,
+        factor_only_compressed_structure_only=True,
+        close_confirmed_execution="close_proxy",
+        commission_rate=0,
+        minimum_commission=0,
+        sell_stamp_duty_rate=0,
+        estimated_slippage_rate=0,
+    )
+
+    assert result["trade_ledger"] == []
+    blocks = [
+        row for row in result["entry_blocks"]
+        if row["code"] == "A"
+        and row["reason"] == "compressed_structure_no_trade_on_execution_date"
+    ]
+    assert len(blocks) == 1
+    assert blocks[0]["reason_cn"] == (
+        "下一全市场交易日该标的无有效K线，不顺延成交"
+    )
+
+
 def test_portfolio_backtest_defaults_to_next_day_signals():
     bars = breakout_bars()
     date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
@@ -1385,6 +2635,35 @@ def test_portfolio_does_not_chain_open_symbols_on_the_same_day():
     assert sum(item["position_pct"] for item in result["final_positions"]) == pytest.approx(29.95)
 
 
+def test_diversified_factor_sleeve_opens_multiple_risk_budgeted_symbols():
+    bars = breakout_bars()
+    date = bars.iloc[-1]["date"].strftime("%Y-%m-%d")
+    codes = ["A", "B", "C"]
+    candidates = [{
+        "code": code,
+        "candidate_source": "quantsplaybook_factor",
+        "selection_profile": "quantsplaybook_factor_only",
+    } for code in codes]
+
+    result = run_portfolio_backtest(
+        {code: bars for code in codes},
+        {date: candidates},
+        {date: {"phase": "active", "window_up_streak": 5}},
+        requested_start=date,
+        end_date=date,
+        max_positions=3,
+        signals_effective_next_day=False,
+        enable_diversified_factor_sleeve=True,
+    )
+
+    assert {item["code"] for item in result["final_positions"]} == set(codes)
+    assert all(
+        item["position_pct"] <= 20.0
+        for item in result["final_positions"]
+    )
+    assert result["diversified_factor_sleeve_enabled"] is True
+
+
 def test_right_add_on_requires_current_effective_candidate(monkeypatch):
     dates = pd.bdate_range("2026-01-01", periods=82)
     bars = pd.DataFrame({
@@ -1408,7 +2687,7 @@ def test_right_add_on_requires_current_effective_candidate(monkeypatch):
         }
 
     monkeypatch.setattr(
-        "stock_research.strategies.portfolio_backtest._right_signal",
+        "stock_research.backtesting.engine._right_signal",
         always_buy_signal,
     )
     first = dates[-3].strftime("%Y-%m-%d")
@@ -1455,7 +2734,7 @@ def test_left_to_right_switch_without_current_candidate_only_manages_existing_le
         }
 
     monkeypatch.setattr(
-        "stock_research.strategies.portfolio_backtest._right_signal",
+        "stock_research.backtesting.engine._right_signal",
         always_buy_signal,
     )
     first = dates[-2].strftime("%Y-%m-%d")
@@ -1638,6 +2917,42 @@ def test_factor_only_profile_allows_technical_pullback_pilot():
     )
 
 
+def test_factor_only_liquidity_gate_uses_visible_trailing_amount():
+    data = _prepare_frame(pd.DataFrame({
+        "date": pd.bdate_range("2026-01-01", periods=30),
+        "open": [10.0] * 30,
+        "high": [10.2] * 30,
+        "low": [9.8] * 30,
+        "close": [10.0] * 30,
+        "volume": [1000.0] * 30,
+        "amount": [400_000.0] * 30,
+    }))
+    signal = {
+        "signal_type": "uptrend_support_pullback",
+        "order_type": "close",
+        "trigger": 10.0,
+        "stop": 9.5,
+        "target_price": 11.5,
+        "known_volume_ratio": 1.0,
+        "support_confluence": ["MA20"],
+    }
+
+    ok, enriched, reason = _semantic_right_entry_gate(
+        data,
+        len(data) - 1,
+        {"selection_profile": "quantsplaybook_factor_only"},
+        signal,
+        price_amount_multiplier=1000.0,
+        factor_only_min_avg_amount=500_000_000.0,
+    )
+
+    assert ok is False
+    assert reason == "liquidity_too_thin"
+    assert enriched["observed_signal_amount"] == pytest.approx(400_000_000.0)
+    assert enriched["observed_avg_amount_20"] == pytest.approx(400_000_000.0)
+    assert enriched["observed_amount_multiplier"] == pytest.approx(1000.0)
+
+
 def test_three_day_formula_decline_blocks_new_entry_without_profit_buffer():
     dates = pd.bdate_range("2026-01-01", periods=81)
 
@@ -1712,6 +3027,58 @@ def test_portfolio_executes_intraday_space_stop_at_stop_price():
     assert sell["profit_loss_amount"] == pytest.approx(-30_135.16)
     assert sell["reason"]
     assert result["trade_summary"]["closed_trade_net_pnl_amount"] == pytest.approx(-30_135.16)
+
+
+def test_sell_stamp_duty_uses_historical_rate_before_reduction_date():
+    assert portfolio_engine.sell_stamp_duty_rate_for_date(
+        "2023-08-25", 0.0005, 0.001,
+    ) == pytest.approx(0.001)
+    assert portfolio_engine.sell_stamp_duty_rate_for_date(
+        "2023-08-28", 0.0005, 0.001,
+    ) == pytest.approx(0.0005)
+    assert portfolio_engine.sell_stamp_duty_rate_for_date(
+        "2022-01-04", 0.0005, None,
+    ) == pytest.approx(0.0005)
+
+
+def test_portfolio_sell_ledger_applies_historical_stamp_duty_rate():
+    bars = breakout_bars()
+    bars["date"] = pd.bdate_range("2022-01-03", periods=len(bars))
+    entry_date = bars.iloc[-1]["date"]
+    exit_date = entry_date + pd.offsets.BDay(1)
+    bars = pd.concat([bars, pd.DataFrame([{
+        "date": exit_date,
+        "open": 10.1,
+        "high": 10.2,
+        "low": 8.8,
+        "close": 9.4,
+        "volume": 1000,
+    }])], ignore_index=True)
+    snapshot_date = entry_date.strftime("%Y-%m-%d")
+
+    result = run_portfolio_backtest(
+        {"A": bars},
+        {snapshot_date: [{"code": "A", "strategy_part": "normal"}]},
+        {snapshot_date: {"phase": "active", "window_up_streak": 5}},
+        requested_start=snapshot_date,
+        end_date=exit_date.strftime("%Y-%m-%d"),
+        max_positions=1,
+        commission_rate=0.0,
+        minimum_commission=0.0,
+        sell_stamp_duty_rate=0.0005,
+        sell_stamp_duty_rate_before_2023_08_28=0.001,
+        estimated_slippage_rate=0.0,
+    )
+
+    sell = [
+        row for row in result["trade_ledger"]
+        if row["trade_side"] == "卖出"
+    ][0]
+    assert sell["stamp_duty_amount"] == pytest.approx(
+        sell["trade_amount"] * 0.001,
+        abs=0.01,
+    )
+    assert result["sell_stamp_duty_rate_before_2023_08_28"] == 0.001
 
 
 def test_unlimited_symbols_still_obeys_sequential_right_side_entry():
@@ -2106,7 +3473,9 @@ def test_value_grid_candidate_removal_stops_new_left_buys_without_clearing():
     assert {item["grid_slot"] for item in result["final_positions"][0]["left_batches"]} == set(range(5))
 
 
-def test_left_to_right_stops_grid_and_uses_right_side_batches(monkeypatch):
+def test_left_to_right_ignores_inverse_volatility_sizing_and_uses_right_batches(
+    monkeypatch,
+):
     dates = pd.bdate_range("2026-01-01", periods=83)
     bars = pd.DataFrame({
         "date": dates,
@@ -2136,7 +3505,7 @@ def test_left_to_right_stops_grid_and_uses_right_side_batches(monkeypatch):
         }
 
     monkeypatch.setattr(
-        "stock_research.strategies.portfolio_backtest._right_signal",
+        "stock_research.backtesting.engine._right_signal",
         fake_signal,
     )
 
@@ -2163,11 +3532,16 @@ def test_left_to_right_stops_grid_and_uses_right_side_batches(monkeypatch):
             }],
         },
         {}, requested_start=first, end_date=last,
+        enable_right_inverse_volatility_sizing=True,
     )
 
     actions = [event["action"] for event in result["events"]]
     assert "左转右接管左仓" in actions
-    assert "左侧网格卖出" not in actions
+    # A close-confirmed transition cannot cancel resting grid fills at the open.
+    switch_sequence = next(e["event_sequence"] for e in result["events"] if e["action"] == "左转右接管左仓")
+    grid_sells = [e for e in result["events"] if e["action"] == "左侧网格卖出"]
+    assert grid_sells
+    assert all(e["event_sequence"] < switch_sequence for e in grid_sells)
     position = result["final_positions"][0]
     assert position["position_mode"] == "right"
     assert position["left_batches"] == []
@@ -2176,9 +3550,9 @@ def test_left_to_right_stops_grid_and_uses_right_side_batches(monkeypatch):
         item for item in position["batches"]
         if item.get("origin_account") == "left"
     ]
-    assert {item["origin_batch"] for item in promoted} == {
-        "L1", "L2", "L3", "L4", "L5",
-    }
+    assert {item["origin_batch"] for item in promoted} | {
+        item["origin_batch"] for item in grid_sells
+    } == {"L1", "L2", "L3", "L4", "L5"}
     assert all(item["batch"].startswith("R") for item in promoted)
     assert {round(item["stop"], 3) for item in position["batches"]} == {106.0}
     switch_index = actions.index("左转右接管左仓")
@@ -2187,6 +3561,10 @@ def test_left_to_right_stops_grid_and_uses_right_side_batches(monkeypatch):
         str(event["reason"]).startswith("L")
         for event in managed_after_switch
     )
+    assert not [
+        item for item in result["entry_blocks"]
+        if item["reason"] == "right_inverse_volatility_multiplier_invalid"
+    ]
 
 
 def test_left_to_right_allows_support_pullback_signal(monkeypatch):
@@ -2219,7 +3597,7 @@ def test_left_to_right_allows_support_pullback_signal(monkeypatch):
         }
 
     monkeypatch.setattr(
-        "stock_research.strategies.portfolio_backtest._right_signal",
+        "stock_research.backtesting.engine._right_signal",
         fake_signal,
     )
 
@@ -2301,7 +3679,7 @@ def test_left_to_right_is_not_blocked_as_a_new_symbol(monkeypatch):
         return None
 
     monkeypatch.setattr(
-        "stock_research.strategies.portfolio_backtest._right_signal",
+        "stock_research.backtesting.engine._right_signal",
         fake_signal,
     )
     rows = [
@@ -2364,7 +3742,7 @@ def test_left_to_right_promotes_existing_lots_when_add_on_is_below_board_lot(mon
         }
 
     monkeypatch.setattr(
-        "stock_research.strategies.portfolio_backtest._right_signal",
+        "stock_research.backtesting.engine._right_signal",
         fake_signal,
     )
     rows = [{
@@ -2400,14 +3778,14 @@ def test_left_to_right_promotes_existing_lots_when_add_on_is_below_board_lot(mon
 
 
 def test_left_origin_batches_exit_without_reopening_left_on_right_stop(monkeypatch):
-    dates = pd.bdate_range("2026-01-01", periods=84)
+    dates = pd.bdate_range("2026-01-01", periods=85)
     bars = pd.DataFrame({
         "date": dates,
-        "open": [100.0] * 81 + [112.0, 109.0, 103.0],
-        "high": [100.5] * 81 + [113.0, 110.0, 104.0],
-        "low": [99.5] * 81 + [111.0, 108.0, 102.0],
-        "close": [100.0] * 81 + [112.0, 109.0, 103.0],
-        "volume": [1000.0] * 84,
+        "open": [100.0] * 81 + [112.0, 112.0, 103.0, 100.0],
+        "high": [100.5] * 81 + [113.0, 113.0, 104.0, 101.0],
+        "low": [99.5] * 81 + [111.0, 108.0, 102.0, 99.0],
+        "close": [100.0] * 81 + [112.0, 109.0, 103.0, 100.0],
+        "volume": [1000.0] * 85,
     })
     first = dates[80].strftime("%Y-%m-%d")
     turn = dates[81].strftime("%Y-%m-%d")
@@ -2430,7 +3808,7 @@ def test_left_origin_batches_exit_without_reopening_left_on_right_stop(monkeypat
         }
 
     monkeypatch.setattr(
-        "stock_research.strategies.portfolio_backtest._right_signal",
+        "stock_research.backtesting.engine._right_signal",
         fake_signal,
     )
 
@@ -2462,7 +3840,9 @@ def test_left_origin_batches_exit_without_reopening_left_on_right_stop(monkeypat
                 "trade_basis_score": 8, "leadership_score": 28,
             }],
         },
-        {}, requested_start=first, end_date=last,
+        {}, requested_start=first,
+        end_date=dates[84].strftime("%Y-%m-%d"),
+        close_confirmed_execution="next_open",
     )
 
     actions = [event["action"] for event in result["events"]]
@@ -2513,7 +3893,7 @@ def test_exited_promoted_left_does_not_displace_new_left_symbol(monkeypatch):
         }
 
     monkeypatch.setattr(
-        "stock_research.strategies.portfolio_backtest._right_signal",
+        "stock_research.backtesting.engine._right_signal",
         fake_signal,
     )
 
@@ -2575,11 +3955,12 @@ def test_exited_promoted_left_does_not_displace_new_left_symbol(monkeypatch):
     assert result["final_positions"][0]["position_mode"] == "left"
 
 
-def test_value_grid_financial_falsification_exits_left_at_next_open():
+@pytest.mark.parametrize("opening_price", [90.0, 91.0])
+def test_value_grid_financial_falsification_exits_left_at_next_open(opening_price):
     dates = pd.bdate_range("2026-01-01", periods=83)
     bars = pd.DataFrame({
         "date": dates,
-        "open": [100.0] * 82 + [90.0],
+        "open": [100.0] * 82 + [opening_price],
         "high": [100.5] * 83,
         "low": [99.5] * 82 + [89.5],
         "close": [100.0] * 83,
@@ -2610,9 +3991,15 @@ def test_value_grid_financial_falsification_exits_left_at_next_open():
     )
 
     exits = [event for event in result["events"] if event["action"] == "左侧价值证伪清仓"]
-    assert len(exits) == 5
-    assert {event["date"] for event in exits} == {last}
-    assert result["final_positions"] == []
+    if opening_price == 90.0:
+        # Opening limit-down cannot be filled retroactively after the board opens.
+        assert exits == []
+        assert result["final_positions"][0]["quantity"] > 0
+    else:
+        assert len(exits) == 5
+        assert {event["date"] for event in exits} == {last}
+        assert {event["execution_price"] for event in exits} == {opening_price}
+        assert result["final_positions"] == []
 
 
 def test_left_core_only_position_does_not_consume_capacity():
@@ -2681,6 +4068,88 @@ def test_reduced_left_grid_max_exposure_starts_capped_initial_grid():
     assert position["left_position_pct"] == pytest.approx(5)
     assert {item["grid_slot"] for item in position["left_batches"]} == {0, 1, 2}
     assert position["capacity_counted"] is False
+
+
+def test_pe_pb_left_lane_has_separate_five_percent_and_one_symbol_caps():
+    dates = pd.bdate_range("2026-01-01", periods=81)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 81,
+        "high": [100.5] * 81,
+        "low": [99.0] * 81,
+        "close": [100.0] * 81,
+        "volume": [1000.0] * 81,
+    })
+    day = dates[-1].strftime("%Y-%m-%d")
+    value = {
+        "code": "VALUE", "candidate_source": "value_model",
+        "value_line": 100.0, "candidate_score": 1.0,
+        "quality_score": 90.0, "earnings_yoy": 0.30,
+        "mktcap": 200.0, "price_to_value": 1.0,
+    }
+    pe_a = {
+        "code": "PE_A", "candidate_source": "pe_model",
+        "value_line": 100.0, "candidate_score": 200.0,
+        "quality_score": 80.0, "mktcap": 200.0, "pe_ratio": 0.7,
+    }
+    pe_b = {**pe_a, "code": "PE_B", "candidate_score": 100.0}
+
+    result = run_portfolio_backtest(
+        {code: bars for code in ("VALUE", "PE_A", "PE_B")},
+        {day: [pe_b, pe_a, value]},
+        {},
+        requested_start=day,
+        end_date=day,
+        max_left_positions=3,
+        pe_pb_left_max_positions=1,
+        pe_pb_left_max_exposure=0.05,
+    )
+
+    positions = {row["code"]: row for row in result["final_positions"]}
+    assert set(positions) == {"VALUE", "PE_A"}
+    assert positions["VALUE"]["left_position_pct"] == pytest.approx(10.0)
+    assert positions["PE_A"]["left_position_pct"] == pytest.approx(5.0)
+    assert {
+        row["grid_slot"] for row in positions["PE_A"]["left_batches"]
+    } == {0, 1, 2}
+    assert result["pe_pb_left_max_positions"] == 1
+    assert result["pe_pb_left_max_exposure_pct"] == pytest.approx(5.0)
+    assert result["pe_pb_left_initial_slots"] == 3
+    assert result["pe_pb_left_core_slots"] == 2
+
+
+def test_value_model_has_entry_priority_over_higher_scored_pe_pb_candidate():
+    dates = pd.bdate_range("2026-01-01", periods=81)
+    bars = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 81,
+        "high": [100.5] * 81,
+        "low": [99.0] * 81,
+        "close": [100.0] * 81,
+        "volume": [1000.0] * 81,
+    })
+    day = dates[-1].strftime("%Y-%m-%d")
+    candidates = [{
+        "code": "PE", "candidate_source": "pe_model",
+        "value_line": 100.0, "candidate_score": 999.0,
+        "quality_score": 80.0, "mktcap": 200.0, "pe_ratio": 0.7,
+    }, {
+        "code": "VALUE", "candidate_source": "value_model",
+        "value_line": 100.0, "candidate_score": 1.0,
+        "quality_score": 90.0, "earnings_yoy": 0.30,
+        "mktcap": 200.0, "price_to_value": 1.0,
+    }]
+
+    result = run_portfolio_backtest(
+        {"PE": bars, "VALUE": bars},
+        {day: candidates},
+        {},
+        requested_start=day,
+        end_date=day,
+        max_left_positions=1,
+    )
+
+    assert [row["code"] for row in result["final_positions"]] == ["VALUE"]
 
 
 def test_configured_single_left_position_limit_is_honored():
@@ -3179,7 +4648,7 @@ def test_close_proxy_exit_waits_through_locked_limit_down(monkeypatch):
         }
 
     monkeypatch.setattr(
-        "stock_research.strategies.portfolio_backtest._right_signal",
+        "stock_research.backtesting.engine._right_signal",
         fake_signal,
     )
 
@@ -3962,7 +5431,7 @@ def test_support_pullback_pilot_ignores_legacy_evidence_score(monkeypatch):
         }
 
     monkeypatch.setattr(
-        "stock_research.strategies.portfolio_backtest._right_signal",
+        "stock_research.backtesting.engine._right_signal",
         fake_signal,
     )
 
@@ -4254,10 +5723,10 @@ def test_tranche_profit_protection_is_independent_from_formula33():
     }, history, 5)
 
 
-def test_half_profit_pullback_does_not_clear_final_runner():
+def test_sub_twenty_percent_pullback_does_not_clear_final_runner():
     history = pd.DataFrame({"close": [120.0], "ma20": [100.0]})
     assert "maximum_profit_half" not in _active_profit_trigger_ids({
-        "maximum_return_pct": 80,
+        "maximum_return_pct": 15,
         "half_profit_triggered": True,
         "close": 120.0,
     }, history, 1)
@@ -4292,7 +5761,7 @@ def test_valid_volume_node_break_sells_one_intermediate_profit_tranche():
     ]
 
 
-def test_maximum_profit_half_no_longer_clears_last_runner():
+def test_maximum_profit_half_is_the_final_runner_exit_signal():
     history = pd.DataFrame({"close": [100.0] * 10, "ma20": [90.0] * 10})
     profit = {
         "maximum_return_pct": 100.0,
@@ -4301,7 +5770,7 @@ def test_maximum_profit_half_no_longer_clears_last_runner():
     }
 
     assert "maximum_profit_half" not in _active_profit_trigger_ids(profit, history, 2)
-    assert "maximum_profit_half" not in _active_profit_trigger_ids(profit, history, 1)
+    assert "maximum_profit_half" in _active_profit_trigger_ids(profit, history, 1)
 
 
 def test_only_the_last_sold_down_profit_tranche_is_a_non_capacity_tail():
@@ -4325,10 +5794,136 @@ def test_only_the_last_sold_down_profit_tranche_is_a_non_capacity_tail():
     assert not _is_profit_tail(state)
 
 
-def test_profit_tail_requires_one_part_and_fifty_percent_current_return():
-    assert _qualifies_profit_tail({"current_return_pct": 50.0}, 1, 0.50)
-    assert not _qualifies_profit_tail({"current_return_pct": 49.9}, 1, 0.50)
-    assert not _qualifies_profit_tail({"current_return_pct": 80.0}, 2, 0.50)
+def test_profit_tail_requires_one_part_and_minimum_maximum_return():
+    profit = {"current_return_pct": 8.0, "maximum_return_pct": 20.0}
+    assert _qualifies_profit_tail(profit, 1, 0.20)
+    assert not _qualifies_profit_tail(profit, 1, 0.21)
+    assert not _qualifies_profit_tail(profit, 2, 0.20)
+
+
+def test_qualified_profit_tail_allows_five_active_positions_and_six_held_symbols(
+    monkeypatch,
+):
+    dates = pd.bdate_range("2026-01-01", periods=46)
+    tail_entry_date = dates[40]
+    tail_trim_date = dates[42]
+
+    def frame(marker):
+        closes = [10.0] * len(dates)
+        if marker == 1001:
+            closes[41:] = [12.2] + [12.1] * (len(dates) - 42)
+        return pd.DataFrame({
+            "date": dates,
+            "open": closes,
+            "high": [value + 0.1 for value in closes],
+            "low": [value - 0.1 for value in closes],
+            "close": closes,
+            "volume": [marker] * len(dates),
+        })
+
+    def fake_right_signal(data, index, plan=None, **kwargs):
+        if (
+            int(data.iloc[0]["volume"]) != 1001
+            or pd.Timestamp(data.iloc[index]["date"]) != tail_entry_date
+        ):
+            return None
+        return {
+            "rank": 2,
+            "stop": 9.0,
+            "trigger": 10.0,
+            "order_type": "close",
+            "reason": "尾仓容量测试买点",
+            "known_volume_ratio": 1.0,
+        }
+
+    def fake_profit_trigger_ids(profit, history, remaining_parts):
+        if (
+            int(history.iloc[0]["volume"]) == 1001
+            and pd.Timestamp(history.iloc[-1]["date"]) == tail_trim_date
+            and remaining_parts == 5
+        ):
+            return {
+                "profit_floor",
+                "trailing_10",
+                "divergence_time",
+                "rising_ma20_break_3pct",
+            }
+        return _active_profit_trigger_ids(profit, history, remaining_parts)
+
+    monkeypatch.setattr(portfolio_engine, "_right_signal", fake_right_signal)
+    monkeypatch.setattr(
+        portfolio_engine,
+        "_active_profit_trigger_ids",
+        fake_profit_trigger_ids,
+    )
+
+    factor_codes = [f"F{index}" for index in range(1, 6)]
+    frames = {"TAIL": frame(1001)}
+    frames.update({
+        code: frame(2000 + index)
+        for index, code in enumerate(factor_codes, start=1)
+    })
+    snapshots = {
+        tail_entry_date.strftime("%Y-%m-%d"): [{
+            "code": "TAIL",
+            "candidate_score": 100.0,
+            "industry": "尾仓测试行业",
+        }],
+        tail_trim_date.strftime("%Y-%m-%d"): [{
+            "code": code,
+            "candidate_score": 100.0 - index,
+            "playbook_factor_rank": index,
+            "structure_proximity_score": 50.0,
+            "avg_amount_20": 800_000_000.0,
+            "selected_for_trading": True,
+            "signal_eligible": True,
+            "allow_right": True,
+            "allow_left": False,
+            "factor_horizon_channel_eligible": True,
+            "industry": f"测试行业{index}",
+        } for index, code in enumerate(factor_codes, start=1)],
+    }
+    formula = {
+        date: {
+            "phase": "active",
+            "window_up_streak": 5,
+            "window_down_streak": 0,
+        }
+        for date in snapshots
+    }
+
+    result = _run_portfolio_backtest(
+        frames,
+        snapshots,
+        formula,
+        requested_start=min(snapshots),
+        end_date=dates[-1].strftime("%Y-%m-%d"),
+        max_positions=5,
+        max_total_held_symbols=10,
+        max_same_industry=1,
+        profit_tail_min_return=0.20,
+        signals_effective_next_day=False,
+        enable_factor_horizon_channel=True,
+        factor_horizon_max_positions=5,
+        factor_horizon_trend_management_return=0.20,
+        close_confirmed_execution="close_proxy",
+        initial_capital=1_000_000,
+        commission_rate=0,
+        minimum_commission=0,
+        sell_stamp_duty_rate=0,
+        estimated_slippage_rate=0,
+    )
+
+    held = {item["code"]: item for item in result["final_positions"]}
+    assert set(held) == {"TAIL", *factor_codes}
+    assert held["TAIL"]["capacity_counted"] is False
+    assert all(held[code]["capacity_counted"] is True for code in factor_codes)
+    assert result["maximum_profit_tail_count"] == 1
+    assert result["maximum_total_held_symbols"] == 6
+    assert max(
+        row["capacity_position_count"] for row in result["equity_curve"]
+    ) == 5
+    assert result["maximum_gross_exposure_pct"] <= 100.0
 
 
 def test_three_or_five_parts_always_reserve_the_final_profit_tranche():
@@ -4342,7 +5937,7 @@ def test_three_or_five_parts_always_reserve_the_final_profit_tranche():
 
 
 def test_four_symbol_cap_allows_four_but_blocks_third_same_industry(monkeypatch):
-    dates = pd.bdate_range("2026-01-01", periods=74)
+    dates = pd.bdate_range("2026-01-01", periods=75)
     targets = {1001: 70, 1002: 71, 1003: 72, 1004: 73, 1005: 73}
 
     def frame(marker):
@@ -4363,18 +5958,19 @@ def test_four_symbol_cap_allows_four_but_blocks_third_same_industry(monkeypatch)
         if index != targets[marker]:
             return None
         return {
-            "rank": 2, "stop": 10.0, "trigger": 10.0,
+            "rank": 2, "stop": 9.5, "trigger": 10.0,
+            "entry_target_price": 14.0,
             "order_type": "stop", "reason": "test breakout",
             "known_volume_ratio": 1.0,
         }
 
     monkeypatch.setattr(
-        "stock_research.strategies.portfolio_backtest._right_signal",
+        "stock_research.backtesting.engine._right_signal",
         fake_signal,
     )
     codes = {f"S{marker}": frame(marker) for marker in targets}
     snapshots = {}
-    for index in range(70, 74):
+    for index in range(70, 75):
         date = dates[index].strftime("%Y-%m-%d")
         snapshots[date] = [
             {"code": "S1001", "candidate_score": 10, "mainline_boards": "通信设备"},
@@ -4899,7 +6495,7 @@ def test_financial_preflight_fails_when_auto_fetch_remains_below_target(monkeypa
 
 def test_no_refresh_inputs_requires_strict_candidate_manifest():
     with pytest.raises(RuntimeError, match="production backtests must refresh"):
-        portfolio_backtest_app.main([
+        portfolio_cli.main([
             "--start-date", "2026-07-10",
             "--end-date", "2026-07-14",
             "--no-refresh-inputs",
@@ -4908,7 +6504,7 @@ def test_no_refresh_inputs_requires_strict_candidate_manifest():
 
 def test_allow_frozen_inputs_still_requires_strict_candidate_manifest():
     with pytest.raises(RuntimeError, match="candidate manifest"):
-        portfolio_backtest_app.main([
+        portfolio_cli.main([
             "--start-date", "2026-07-10",
             "--end-date", "2026-07-14",
             "--no-refresh-inputs",
@@ -4950,7 +6546,7 @@ def test_yearly_backtest_runs_single_year_ranges_without_frozen_input_bypass(tmp
             encoding="utf-8",
         )
 
-    monkeypatch.setattr(portfolio_yearly_backtest.portfolio_backtest, "main", fake_portfolio_main)
+    monkeypatch.setattr(portfolio_yearly_backtest.portfolio_cli, "main", fake_portfolio_main)
 
     assert portfolio_yearly_backtest.main([
         "--start-year", "2024",
@@ -5035,6 +6631,32 @@ def test_missing_candidate_manifest_financial_point_in_time_fails_closed(tmp_pat
     assert validate_candidate_manifest_financial_point_in_time(
         tmp_path, allow_unsafe_financial=True,
     )["available"] is False
+
+
+@pytest.mark.parametrize("top_level", [None, False])
+def test_candidate_manifest_financial_status_requires_explicit_true_fields(
+    tmp_path,
+    top_level,
+):
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({
+            "financial_point_in_time": top_level,
+            "uses_financial_data": True,
+            "strict_financial_point_in_time": True,
+            "snapshots": [{
+                "date": "2024-09-24",
+                "candidate_count": 10,
+                "financial_point_in_time": None,
+            }],
+        }),
+        encoding="utf-8",
+    )
+
+    status = candidate_manifest_financial_status(tmp_path)
+
+    assert status["unsafe_dates"] == ["2024-09-24"]
+    with pytest.raises(RuntimeError, match="not strict financial point-in-time"):
+        validate_candidate_manifest_financial_point_in_time(tmp_path)
 
 
 def test_revision_incomplete_financial_manifest_requires_research_override(tmp_path):
@@ -5200,6 +6822,24 @@ def test_candidate_snapshot_loader_rejects_manifest_row_count_mismatch(tmp_path)
     }), encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="row count differs"):
+        load_candidate_snapshots(tmp_path, "2024-09-24", "2024-09-24")
+
+
+def test_candidate_snapshot_loader_rejects_manifest_hash_mismatch(tmp_path):
+    path = tmp_path / "candidates_2024-09-24.csv"
+    pd.DataFrame([{"code": "ONLY"}]).to_csv(path, index=False)
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "version": SNAPSHOT_VERSION,
+        "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
+        "snapshots": [{
+            "date": "2024-09-24",
+            "file": path.name,
+            "candidate_count": 1,
+            "sha256": "0" * 64,
+        }],
+    }), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="SHA256 differs"):
         load_candidate_snapshots(tmp_path, "2024-09-24", "2024-09-24")
 
 

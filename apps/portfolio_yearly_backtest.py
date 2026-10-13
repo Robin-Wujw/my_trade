@@ -8,7 +8,15 @@ from pathlib import Path
 
 import pandas as pd
 
-from apps import portfolio_backtest
+from stock_research.backtesting import workflow as portfolio_backtest
+from stock_research.backtesting import cli as portfolio_cli
+from stock_research.backtesting.defaults import (
+    DEFAULT_CLOSE_CONFIRMED_EXECUTION,
+    DEFAULT_COMMISSION_RATE,
+    DEFAULT_ESTIMATED_SLIPPAGE_RATE,
+    DEFAULT_MINIMUM_COMMISSION,
+    DEFAULT_SELL_STAMP_DUTY_RATE,
+)
 from stock_research.core.paths import PATHS
 
 
@@ -41,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--close-confirmed-execution",
         choices=("close_proxy", "next_open"),
-        default="close_proxy",
+        default=DEFAULT_CLOSE_CONFIRMED_EXECUTION,
     )
     parser.add_argument("--disable-pullback-pilot", action="store_true")
     parser.add_argument(
@@ -65,10 +73,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("auto", "miniqmt", "akshare", "tushare"),
         default="auto",
     )
-    parser.add_argument("--commission-rate", type=float, default=0.000085)
-    parser.add_argument("--minimum-commission", type=float, default=5.0)
-    parser.add_argument("--sell-stamp-duty-rate", type=float, default=0.0005)
-    parser.add_argument("--estimated-slippage-rate", type=float, default=0.0005)
+    parser.add_argument("--commission-rate", type=float, default=DEFAULT_COMMISSION_RATE)
+    parser.add_argument("--minimum-commission", type=float, default=DEFAULT_MINIMUM_COMMISSION)
+    parser.add_argument("--sell-stamp-duty-rate", type=float, default=DEFAULT_SELL_STAMP_DUTY_RATE)
+    parser.add_argument("--estimated-slippage-rate", type=float, default=DEFAULT_ESTIMATED_SLIPPAGE_RATE)
     return parser
 
 
@@ -147,6 +155,14 @@ def _summary_row(year: int, path: Path) -> dict:
     concentration = summary.get("profit_concentration_summary") or {}
     top1 = concentration.get("top1_symbol") or {}
     trade_summary = summary.get("trade_summary") or {}
+    limitations = summary.get("data_limitations") or []
+    if not isinstance(limitations, (list, tuple, set)):
+        limitations = [limitations]
+    limitations_text = ";".join(
+        json.dumps(value, ensure_ascii=False, sort_keys=True)
+        if isinstance(value, dict) else str(value)
+        for value in limitations
+    )
     return {
         "year": year,
         "actual_start": summary.get("actual_start"),
@@ -165,6 +181,10 @@ def _summary_row(year: int, path: Path) -> dict:
         "top1_name": top1.get("name"),
         "top1_return_contribution_pct": concentration.get("top1_return_contribution_pct"),
         "inputs_refreshed": summary.get("inputs_refreshed"),
+        "research_only": bool(summary.get("research_only")),
+        "acceptance_status": summary.get("acceptance_status"),
+        "strict_point_in_time": summary.get("strict_point_in_time", False),
+        "data_limitations": limitations_text,
         "summary_path": str(path),
     }
 
@@ -195,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
             f"range={start_date}..{end_date}",
             flush=True,
         )
-        portfolio_backtest.main(year_argv)
+        portfolio_cli.main(year_argv)
         summary_path = _latest_summary(output_dir, start_date)
         row = _summary_row(year, summary_path)
         rows.append(row)

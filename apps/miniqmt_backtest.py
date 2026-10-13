@@ -7,9 +7,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from apps.portfolio_backtest import (
+from stock_research.backtesting.workflow import (
     load_candidate_snapshots,
     load_price_frames,
+    qualify_backtest_result,
     validate_backtest_input_coverage,
 )
 from stock_research.core.paths import PATHS
@@ -62,6 +63,11 @@ def build_parser():
     parser.add_argument("--commission-rate", type=float, default=DEFAULT_MINIQMT_BACKTEST_PROFILE.commission_rate)
     parser.add_argument("--minimum-commission", type=float, default=DEFAULT_MINIQMT_BACKTEST_PROFILE.minimum_commission)
     parser.add_argument("--sell-stamp-duty-rate", type=float, default=DEFAULT_MINIQMT_BACKTEST_PROFILE.sell_stamp_duty_rate)
+    parser.add_argument(
+        "--sell-stamp-duty-rate-before-2023-08-28",
+        type=float,
+        default=DEFAULT_MINIQMT_BACKTEST_PROFILE.sell_stamp_duty_rate_before_2023_08_28,
+    )
     parser.add_argument("--estimated-slippage-rate", type=float, default=DEFAULT_MINIQMT_BACKTEST_PROFILE.estimated_slippage_rate)
     return parser
 
@@ -197,6 +203,9 @@ def main(argv=None):
         commission_rate=args.commission_rate,
         minimum_commission=args.minimum_commission,
         sell_stamp_duty_rate=args.sell_stamp_duty_rate,
+        sell_stamp_duty_rate_before_2023_08_28=(
+            args.sell_stamp_duty_rate_before_2023_08_28
+        ),
         estimated_slippage_rate=args.estimated_slippage_rate,
     )
     result = run_miniqmt_backtest(
@@ -217,6 +226,32 @@ def main(argv=None):
         allow_pullback_pilot=not args.disable_pullback_pilot,
         initial_capital=args.initial_capital,
     )
+    try:
+        candidate_manifest = json.loads(
+            (Path(args.candidate_directory) / "manifest.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, TypeError):
+        candidate_manifest = {}
+    # MiniQMT supplies read-only daily bars; this entry point is a research
+    # replay and cannot model live order routing or intraday queue position.
+    qualify_backtest_result(
+        result,
+        candidate_manifest=candidate_manifest,
+        args=args,
+        price_coverage={
+            "internal_missing_bar_count": int(price_source_summary.get("missing_count", 0) or 0),
+        },
+        daily_limit_coverage={"complete": False},
+    )
+    result["research_only"] = True
+    result["strict_point_in_time"] = False
+    result["qualification"]["reasons"] = sorted(set(
+        result["qualification"]["reasons"] + ["miniqmt_read_only_daily_replay"]
+    ))
+    result["qualification"]["research_only"] = True
+    result["acceptance_status"] = (
+        "data_limited" if result.get("data_limitations") else "research_only"
+    )
     output = Path(args.output_directory)
     output.mkdir(parents=True, exist_ok=True)
     stem = f"miniqmt_{args.start_date}_{args.end_date}"
@@ -234,6 +269,9 @@ def main(argv=None):
     summary["input_coverage_end"] = input_coverage_end
     summary["read_only_connector"] = True
     summary["price_source"] = price_source_summary
+    summary["research_only"] = True
+    summary["strict_point_in_time"] = False
+    summary["acceptance_status"] = result.get("acceptance_status", "research_only")
     (output / f"{stem}_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8",
     )
