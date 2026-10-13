@@ -21,6 +21,7 @@
 - [多通道选股与买卖匹配验证](multichannel-selection-execution-validation-2026-08-04.md)：四步走诊断、训练期冻结参数、2024 唯一揭盲、通道归因、成交审计和中文信号验收。
 - [因子周期20%转趋势管理与尾仓容量回测](factor-horizon-trend-tail-backtest-2026-08-04.md)：20%最大浮盈后取消固定到期退出、尾仓容量状态验证、逐笔归因和冻结前向审计。
 - [右侧选股、仓位与去赢家稳健性研究](right-selection-robustness-research-2026-08-11.md)：低残差波动率替换、次日开盘仓位训练、滚动五年和精确去Top1/Top3反事实。
+- [每日选股有效性审计](selection-effectiveness-audit-2026-10-13.md)：生产日报与研究候选链路核对，以及 T+1/5/10/20/60 前向收益审计入口。
 
 以上带日期的 QuantsPlaybook 文档是研究过程和审计记录；模型是否仍在使用及其当前公式统一以[当前模型与因子清单](current-models-and-factors.md)为准。
 
