@@ -373,6 +373,31 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_tushare_dataset_report_period ON raw.tushare_dataset_rows (dataset, report_period)",
         ),
     ),
+    Migration(
+        version=12,
+        name="tushare_append_only_payload_versions",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS raw.tushare_dataset_row_versions (
+                dataset VARCHAR NOT NULL,
+                row_key VARCHAR NOT NULL,
+                payload_sha256 VARCHAR NOT NULL,
+                ts_code VARCHAR,
+                trade_date DATE,
+                report_period DATE,
+                ann_date DATE,
+                end_date DATE,
+                source VARCHAR NOT NULL,
+                payload_json VARCHAR NOT NULL,
+                captured_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (dataset, row_key, payload_sha256)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_tushare_version_dataset_ts_code ON raw.tushare_dataset_row_versions (dataset, ts_code)",
+            "CREATE INDEX IF NOT EXISTS idx_tushare_version_dataset_ann_date ON raw.tushare_dataset_row_versions (dataset, ann_date)",
+            "CREATE INDEX IF NOT EXISTS idx_tushare_version_captured_at ON raw.tushare_dataset_row_versions (dataset, captured_at)",
+        ),
+    ),
 )
 
 

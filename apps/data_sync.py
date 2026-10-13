@@ -11,13 +11,13 @@ from stock_research.storage import Database, TushareRepository
 TUSHARE_DEFAULT_FIELDS = {
     "stock_basic": "ts_code,symbol,name,area,industry,list_date,list_status,exchange",
     "daily_basic": "ts_code,trade_date,close,turnover_rate,volume_ratio,pe,pb,total_mv,circ_mv",
-    "income": "ts_code,ann_date,f_ann_date,end_date,report_type,basic_eps,diluted_eps,total_revenue,n_income_attr_p",
-    "balancesheet": "ts_code,ann_date,f_ann_date,end_date,report_type,total_assets,total_liab,total_hldr_eqy_exc_min_int",
-    "cashflow": "ts_code,ann_date,f_ann_date,end_date,report_type,n_cashflow_act,n_cashflow_inv_act,n_cash_flows_fnc_act",
+    "income": "ts_code,ann_date,f_ann_date,end_date,report_type,comp_type,update_flag,basic_eps,diluted_eps,total_revenue,oper_cost,n_income_attr_p",
+    "balancesheet": "ts_code,ann_date,f_ann_date,end_date,report_type,comp_type,update_flag,total_assets,total_liab,total_hldr_eqy_exc_min_int",
+    "cashflow": "ts_code,ann_date,f_ann_date,end_date,report_type,comp_type,update_flag,n_cashflow_act,n_cashflow_inv_act,n_cash_flows_fnc_act",
     "fina_indicator": "ts_code,ann_date,end_date,eps,dt_eps,bps,roe,roe_dt,netprofit_yoy,or_yoy",
     "share_float": "ts_code,ann_date,float_date,float_share,float_ratio,holder_name,share_type",
     "dividend": (
-        "ts_code,ann_date,end_date,record_date,ex_date,div_listdate,div_proc,"
+        "ts_code,ann_date,imp_ann_date,end_date,record_date,ex_date,pay_date,div_listdate,div_proc,"
         "stk_div,stk_bo_rate,stk_co_rate,cash_div,cash_div_tax"
     ),
 }

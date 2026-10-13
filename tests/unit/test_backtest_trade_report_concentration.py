@@ -122,4 +122,32 @@ def test_trade_report_renders_profit_concentration_diagnostics():
     assert "30.35%" in markdown
     assert "R 倍数审计" in markdown
     assert "实现-2.00R" in markdown
-    assert "hard_space_stop" in markdown
+    assert "空间硬止损" in markdown
+    assert "hard_space_stop" not in markdown
+
+def test_profit_concentration_uses_display_industry_labels():
+    result = {
+        "initial_capital": 1_000_000,
+        "profit_concentration_summary": {
+            "top1_symbol": {"code": "sz.300308", "name": "中际旭创"},
+            "top_symbols": [
+                {
+                    "code": "sz.300308",
+                    "name": "中际旭创",
+                    "display_industry_tags": ["通信设备"],
+                    "total_pnl_amount": 1000,
+                },
+                {
+                    "code": "sz.000066",
+                    "name": "中国长城",
+                    "total_pnl_amount": 500,
+                },
+            ],
+        },
+    }
+
+    markdown = render_trade_report_markdown(result)
+
+    assert "| 中际旭创(sz.300308) | 通信设备 |" in markdown
+    assert "| 中国长城(sz.000066) | 未映射 |" in markdown
+    assert "未分类" not in markdown

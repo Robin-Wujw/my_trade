@@ -12,7 +12,9 @@ MiniQMT/本地行情与财务缓存 -> 候选快照 v5（价值线行业白名�
 - 所有候选只使用观察日当时可见的信息。行情切到观察日，财务使用逐公司公告日可见口径；不允许用回测结束后的财报、复权锚点或行业名单倒灌历史。
 - 候选池只负责“选哪只”；买卖引擎只负责“何时买、买多少、错了哪里止损、盈利怎么处理”。选股强不等于立刻买入。
 - 人工观察名单、持仓计划和历史牛股复盘不能直接注入候选池，只能作为显式计划或诊断。
-- 买入信号默认次日生效；MiniQMT 回测里用 `close_proxy` 近似 14:55/收盘确认执行。日 K 回测不能声称自己知道盘中真实排队成交。
+- 收盘确认买入默认使用 `next_open`，前收盘冻结后于次日开盘检查成交；`close_proxy` 仅作为显式研究敏感性参数，日 K 回测不能声称知道真实盘中排队成交。
+- 组合回测统一使用佣金 `0.0085%`、最低佣金 `5` 元、卖出印花税 `0.05%`、2023-08-28 前印花税 `0.10%` 和估算滑点 `0.05%`；零成本或收盘代理必须显式传参，并在结果摘要中核对执行参数。
+- 组合按公司行动、开盘、盘中、收盘和日终估值分阶段处理；每阶段的买入现金预算和持仓名额在阶段开始时固定，不使用该阶段未知的先后卖出所得倒推买单。
 
 ## 2. 最终候选池
 
@@ -20,7 +22,7 @@ MiniQMT/本地行情与财务缓存 -> 候选快照 v5（价值线行业白名�
 
 - 当前 Tushare 候选池：`var/backtests/tushare_official_candidates_2021_to_20260721_merged/manifest.json`
 - 当前修正后回测摘要：`var/backtests/portfolio_tushare_official_2021_to_20260721_raw_qfq_split_dividend_exdate_sync_left_management_fix_vectorbt/portfolio_2021-01-01_2026-07-21_summary.json`
-- 当前口径：`financial_point_in_time=true`，`strict_financial_point_in_time=true`，`unsafe_snapshot_count=0`；`industry_point_in_time=true`，`industry_point_in_time_status=safe`，行业来源为 Tushare `sw_member` 按 `in_date/out_date` 重建的时点快照。
+- 当前口径：`financial_point_in_time=true`，`strict_financial_point_in_time=true`，`unsafe_snapshot_count=0`；`industry_point_in_time=true`，`industry_point_in_time_status=safe`，行业来源为 Tushare `sw_member` 按 `in_date/out_date` 重建的时点快照。若财务缓存缺少完整 revision vintage、行情内部交易日缺口或涨跌停覆盖不足，结果必须标记为 `data_limited/research_only`，不能宣称严格无未来函数或生产可用。
 
 ### 2.1 硬门槛
 

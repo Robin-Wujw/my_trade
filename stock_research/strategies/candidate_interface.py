@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import math
 
+import pandas as pd
+
 from stock_research.strategies.fundamental_selection import (
     VALUE_INDUSTRY_RULE_VERSION,
     is_value_industry_allowed,
@@ -13,6 +15,18 @@ from stock_research.strategies.fundamental_selection import (
 MAX_DAILY_CANDIDATES = 60
 MIN_CORE_DAILY_CANDIDATES = 0
 FACTOR_QUANT_SOURCES = {"factor_quant", "quant_right"}
+RIGHT_SELECTION_SOURCES = {
+    "standard_mainline",
+    "growth_leadership",
+    "quant_right",
+    "factor_quant",
+    "quantsplaybook_factor",
+}
+FUNDAMENTAL_GATED_RIGHT_SOURCES = RIGHT_SELECTION_SOURCES - {
+    "quantsplaybook_factor",
+}
+LEFT_SELECTION_SOURCES = {"value_model", "pe_model", "pb_model"}
+PE_PB_LEFT_SOURCES = {"pe_model", "pb_model"}
 LEFT_VALUE_EXPLOSIVE_GROWTH_YOY = 1.0
 LEFT_VALUE_SMALL_CAP_BUFFER = 150.0
 LEFT_VALUE_DEEP_DISCOUNT_RATIO = 0.90
@@ -29,17 +43,19 @@ def _number(value):
 
 
 def _truthy(value):
-    if value is None or (isinstance(value, float) and math.isnan(value)):
+    if _missing(value):
         return False
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y"}
     return bool(value)
 
 
+def _missing(value) -> bool:
+    return value is None or (pd.api.types.is_scalar(value) and bool(pd.isna(value)))
+
+
 def _clean_text(value) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, float) and math.isnan(value):
+    if _missing(value):
         return ""
     text = str(value).strip()
     return "" if text.lower() in {"nan", "none", "<na>"} else text
@@ -92,12 +108,21 @@ def left_value_permission_reasons(row) -> list[str]:
             "value_industry_rule_version_missing"
             if not rule_version else "value_industry_rule_version_mismatch"
         )
-    if _number(row.get("quality_score")) is None:
+    quality = _number(row.get("quality_score"))
+    if quality is None:
         reasons.append("quality_score_missing")
-    if _number(row.get("earnings_yoy", row.get("yoy"))) is None:
+    elif quality < 70.0:
+        reasons.append("quality_score_below_70")
+    growth = _number(row.get("earnings_yoy", row.get("yoy")))
+    if growth is None:
         reasons.append("earnings_yoy_missing")
-    if _number(row.get("mktcap")) is None:
+    elif growth < 0.10:
+        reasons.append("earnings_yoy_below_10pct")
+    market_cap = _number(row.get("mktcap"))
+    if market_cap is None:
         reasons.append("mktcap_missing")
+    elif market_cap < 100.0:
+        reasons.append("mktcap_below_100")
     price_to_value = _number(row.get("price_to_value"))
     if price_to_value is None:
         reasons.append("price_to_value_missing")
@@ -116,8 +141,8 @@ def normalize_candidate(candidate):
     position and exit engine.
     """
     row = dict(candidate)
-    row["code"] = str(row.get("code") or "")
-    row["name"] = str(row.get("name") or row["code"])
+    row["code"] = _clean_text(row.get("code"))
+    row["name"] = _clean_text(row.get("name")) or row["code"]
     quality = _number(row.get("quality_score"))
     growth = _number(row.get("earnings_yoy", row.get("yoy")))
     market_cap = _number(row.get("mktcap"))
@@ -127,26 +152,30 @@ def normalize_candidate(candidate):
         original_score = _number(row.get("candidate_score")) or 0.0
     source = _clean_text(row.get("candidate_source"))
     sources = {item for item in source.split("+") if item}
+    is_pe_pb_left = bool(sources & PE_PB_LEFT_SOURCES)
     if sources:
-        row["allow_left"] = "value_model" in sources
-        row["allow_right"] = bool(
-            sources & {
-                "standard_mainline", "growth_leadership",
-                "quant_right", "factor_quant",
-            }
-        )
+        row["allow_left"] = bool(sources & LEFT_SELECTION_SOURCES)
+        row["allow_right"] = bool(sources & RIGHT_SELECTION_SOURCES)
     else:
-        row["allow_left"] = bool(row.get("allow_left", False))
-        row["allow_right"] = bool(row.get("allow_right", True))
+        row["allow_left"] = _truthy(row.get("allow_left", False))
+        row["allow_right"] = _truthy(row.get("allow_right", True))
+    # value_industry 白名单审计是 value_model 通道专属契约（含质量/成长/市值/
+    # price_to_value 硬门槛）。PE/PB 低估通道不使用行业白名单，其门槛由
+    # left_candidate_can_add 的 pe_model/pb_model 分支定义（quality>=60、
+    # mktcap>=100、ratio<=1.0）。
     left_permission_reasons = (
         left_value_permission_reasons(row)
-        if "value_model" in sources or row["allow_left"] else []
+        if "value_model" in sources else []
     )
     if left_permission_reasons:
         row["allow_left"] = False
         for reason in left_permission_reasons:
             _append_failure_reason(row, reason)
-    if quality is not None and growth is not None:
+    quantsplaybook_factor = "quantsplaybook_factor" in sources
+    if (
+        quality is not None and growth is not None
+        and not quantsplaybook_factor and not is_pe_pb_left
+    ):
         mainline_bonus = 0.0
         valuation_bonus = 0.0
         price_to_value = _number(row.get("price_to_value"))
@@ -189,58 +218,70 @@ def normalize_candidate(candidate):
         row["value_falsification_reason"]
     )
     row["selection_reason"] = _clean_text(
-        row.get("selection_reason")
-        or row.get("strategy_part")
-        or row.get("candidate_source")
+        _clean_text(row.get("selection_reason"))
+        or _clean_text(row.get("strategy_part"))
+        or _clean_text(row.get("candidate_source"))
         or "选股模型入选"
     )
     eligible = row.get("signal_eligible")
     if eligible is None:
         eligible = True
-    if isinstance(eligible, str):
-        eligible = eligible.strip().lower() in {"1", "true", "yes", "y"}
+    eligible = _truthy(eligible)
     eligibility_reasons = []
     requires_full_fundamentals = bool(
-        sources & {
-            "standard_mainline", "growth_leadership",
-            "quant_right", "factor_quant",
-        }
+        sources & FUNDAMENTAL_GATED_RIGHT_SOURCES
     )
-    if requires_full_fundamentals and quality is None:
-        eligibility_reasons.append("quality_score_missing")
-        eligible = False
-    if quality is not None:
-        if quality < 70.0:
-            eligibility_reasons.append("quality_score_below_70")
-        eligible = eligible and quality >= 70.0
-    if requires_full_fundamentals and growth is None:
-        eligibility_reasons.append("earnings_yoy_missing")
-        eligible = False
-    if growth is not None:
-        if growth < 0.10:
-            eligibility_reasons.append("earnings_yoy_below_10pct")
-        eligible = eligible and growth >= 0.10
-    requires_market_cap = bool(sources) or quality is not None or growth is not None
-    if requires_market_cap:
-        if market_cap is None:
-            eligibility_reasons.append("mktcap_missing")
-        elif market_cap < 100.0:
-            eligibility_reasons.append("mktcap_below_100")
-        eligible = eligible and market_cap is not None and market_cap >= 100.0
-    elif market_cap is not None:
-        if market_cap < 100.0:
-            eligibility_reasons.append("mktcap_below_100")
-        eligible = eligible and market_cap >= 100.0
+    if is_pe_pb_left and requires_full_fundamentals and not quantsplaybook_factor:
+        right_reasons = []
+        if quality is None or quality < 70:
+            right_reasons.append("right_quality_score_missing_or_below_70")
+        if growth is None or growth < .10:
+            right_reasons.append("right_earnings_yoy_missing_or_below_10pct")
+        if market_cap is None or market_cap < 100:
+            right_reasons.append("right_mktcap_missing_or_below_100")
+        if right_reasons:
+            row["allow_right"] = False
+            for reason in right_reasons:
+                _append_failure_reason(row, reason)
+        # Preserve the independently qualified valuation lane.
+        requires_full_fundamentals = False
+    if not quantsplaybook_factor:
+        if requires_full_fundamentals and quality is None:
+            eligibility_reasons.append("quality_score_missing")
+            eligible = False
+        if quality is not None:
+            min_quality = 60.0 if is_pe_pb_left else 70.0
+            if quality < min_quality:
+                eligibility_reasons.append(f"quality_score_below_{int(min_quality)}")
+            eligible = eligible and quality >= min_quality
+        if requires_full_fundamentals and growth is None:
+            eligibility_reasons.append("earnings_yoy_missing")
+            eligible = False
+        if growth is not None and not is_pe_pb_left:
+            if growth < 0.10:
+                eligibility_reasons.append("earnings_yoy_below_10pct")
+            eligible = eligible and growth >= 0.10
+        requires_market_cap = bool(sources) or quality is not None or growth is not None
+        if requires_market_cap:
+            if market_cap is None:
+                eligibility_reasons.append("mktcap_missing")
+            elif market_cap < 100.0:
+                eligibility_reasons.append("mktcap_below_100")
+            eligible = eligible and market_cap is not None and market_cap >= 100.0
+        elif market_cap is not None:
+            if market_cap < 100.0:
+                eligibility_reasons.append("mktcap_below_100")
+            eligible = eligible and market_cap >= 100.0
     data_status = _clean_text(row.get("data_status"))
     if data_status and data_status != "traded":
         eligibility_reasons.append(f"data_status_{data_status}")
         eligible = False
     valid_price_bar = row.get("valid_price_bar")
-    if valid_price_bar is not None and not _truthy(valid_price_bar):
+    if not _missing(valid_price_bar) and not _truthy(valid_price_bar):
         eligibility_reasons.append("invalid_price_bar")
         eligible = False
     is_traded_bar = row.get("is_traded_bar")
-    if is_traded_bar is not None and not _truthy(is_traded_bar):
+    if not _missing(is_traded_bar) and not _truthy(is_traded_bar):
         eligibility_reasons.append("not_traded_bar")
         eligible = False
     for reason in eligibility_reasons:
@@ -261,7 +302,13 @@ def _is_diagnostic_row(candidate):
     )
 
 
-def normalize_candidate_snapshots(snapshots, *, include_diagnostics=False):
+def normalize_candidate_snapshots(
+    snapshots,
+    *,
+    include_diagnostics=False,
+    max_daily_candidates=MAX_DAILY_CANDIDATES,
+):
+    candidate_limit = max(1, int(max_daily_candidates))
     result = {}
     for date, rows in snapshots.items():
         normalized = [normalize_candidate(item) for item in rows]
@@ -273,7 +320,7 @@ def normalize_candidate_snapshots(snapshots, *, include_diagnostics=False):
         selected = []
         selected_codes = set()
         for item in eligible:
-            if len(selected) >= MAX_DAILY_CANDIDATES:
+            if len(selected) >= candidate_limit:
                 break
             if item["code"] not in selected_codes:
                 selected.append(item)

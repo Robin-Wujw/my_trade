@@ -53,6 +53,7 @@ def test_initialize_creates_schemas_and_is_idempotent(tmp_path):
         (9, "stock_kline_real_amount", "test"),
         (10, "stock_kline_adjustment_anchor", "test"),
         (11, "tushare_unified_cache", "test"),
+        (12, "tushare_append_only_payload_versions", "test"),
     ]
     assert {"adjustment", "qfq_anchor_date", "cache_version"} <= kline_columns
     assert {
@@ -65,6 +66,7 @@ def test_initialize_creates_schemas_and_is_idempotent(tmp_path):
         ("raw", "stock_kline_daily"),
         ("raw", "fundamental_metrics"),
         ("raw", "tushare_dataset_rows"),
+        ("raw", "tushare_dataset_row_versions"),
         ("raw", "tushare_sync_state"),
     } <= tables
 

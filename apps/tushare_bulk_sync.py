@@ -15,7 +15,7 @@ DEFAULT_FINANCIAL_DATASETS = ("fina_indicator", "income", "balancesheet", "cashf
 EVENT_DATASETS = ("dividend", "share_float")
 BULK_DATASET_FIELDS = {
     "dividend": (
-        "ts_code,ann_date,end_date,record_date,ex_date,div_listdate,div_proc,"
+        "ts_code,ann_date,imp_ann_date,end_date,record_date,ex_date,pay_date,div_listdate,div_proc,"
         "stk_div,stk_bo_rate,stk_co_rate,cash_div,cash_div_tax"
     ),
     "share_float": (
