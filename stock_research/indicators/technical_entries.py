@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-from stock_research.indicators.price_structure import confirmed_turning_points
 
 
 SUPPORT_ZONE_PCT = 0.05

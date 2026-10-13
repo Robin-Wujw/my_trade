@@ -19,7 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from apps.portfolio_backtest import load_candidate_snapshots, load_price_frames
+from stock_research.backtesting.workflow import load_candidate_snapshots, load_price_frames
 from stock_research.core.paths import PATHS
 
 

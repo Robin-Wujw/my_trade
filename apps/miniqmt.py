@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from apps.portfolio_backtest import load_price_frames
+from stock_research.backtesting.workflow import load_price_frames
 from stock_research.api.miniqmt import (
     MiniQmtClient,
     check_sdk,

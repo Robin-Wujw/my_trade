@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from stock_research.core.paths import PATHS
-from stock_research.strategies.portfolio_backtest import run_portfolio_backtest
+from stock_research.backtesting.engine import run_portfolio_backtest
 
 
 DEFAULT_CASES = {

@@ -12,11 +12,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from apps.portfolio_backtest import load_candidate_snapshots, load_price_frames, validate_backtest_input_coverage
+from stock_research.backtesting.workflow import load_candidate_snapshots, load_price_frames, validate_backtest_input_coverage
 from stock_research.core.paths import PATHS
 from stock_research.reporting.trade_reminders import load_trade_plans
 from stock_research.strategies.candidate_interface import normalize_candidate_snapshots
-from stock_research.strategies.portfolio_backtest import run_portfolio_backtest
+from stock_research.backtesting.engine import run_portfolio_backtest
 
 
 def source_set(row) -> set[str]:

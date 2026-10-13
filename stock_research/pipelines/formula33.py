@@ -2043,39 +2043,6 @@ def resolve_price_source(requested, start_date, end_date, retries, retry_delay):
     return "tushare"
 
 
-def _normalize_akshare_kline_columns(df):
-    """Map AkShare K-line columns while preserving provider OHLC values."""
-    if df is None or df.empty:
-        return pd.DataFrame()
-    aliases = {
-        "\u65e5\u671f": "date",
-        "\u80a1\u7968\u4ee3\u7801": "code",
-        "\u5f00\u76d8": "open",
-        "\u6536\u76d8": "close",
-        "\u6700\u9ad8": "high",
-        "\u6700\u4f4e": "low",
-        "\u6210\u4ea4\u91cf": "volume",
-        "\u6210\u4ea4\u989d": "amount",
-        "\u6362\u624b\u7387": "turnover",
-        "date": "date",
-        "code": "code",
-        "open": "open",
-        "close": "close",
-        "high": "high",
-        "low": "low",
-        "volume": "volume",
-        "amount": "amount",
-        "turnover": "turnover",
-    }
-    return df.rename(
-        columns={
-            column: aliases[str(column).strip()]
-            for column in df.columns
-            if str(column).strip() in aliases
-        }
-    ).copy()
-
-
 def load_kline_akshare(code, start_date, end_date, retries=4, retry_delay=1.5):
     pure = pure_code(code)
     if "." in str(code):
@@ -2827,7 +2794,6 @@ def main(argv=None):
             raise SystemExit(
                 f"交易日不足，无法计算最近 {args.lookback} 个交易日的滚动趋势"
             )
-        output_dates = trade_dates[-args.lookback:]
         latest_date = trade_dates[-1]
         completion_manifest = CompletionManifest(FORMULA33_MANIFEST_FILE)
         completion_arguments = build_completion_arguments(args, latest_date)
@@ -2865,7 +2831,6 @@ def main(argv=None):
                 raise SystemExit(
                     f"股票池最新日期为 {universe_date}，但滚动趋势交易日不足"
                 )
-            output_dates = trade_dates[-args.lookback:]
             latest_date = trade_dates[-1]
             print(f"已按股票池最新日期裁剪统计窗口，最新统计日: {latest_date}")
         print(f"本次统计区间: {trade_dates[0]} ~ {trade_dates[-1]}，共 {len(trade_dates)} 个交易日")

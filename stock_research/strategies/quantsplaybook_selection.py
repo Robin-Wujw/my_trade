@@ -7,6 +7,7 @@ must not be replaced by daily-bar proxies.
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import asdict, dataclass
 import warnings
 
@@ -15,6 +16,16 @@ import pandas as pd
 
 
 QUANTSPLAYBOOK_COMMIT = "87163521c75629a3466564c017ac734a236a9ce4"
+
+MARKET_RESIDUAL_ESTIMATION_WINDOW = 60
+LOW_MARKET_RESIDUAL_VOLATILITY_FACTOR = "low_market_residual_volatility_20"
+LOW_MARKET_RESIDUAL_VOLATILITY_LOOKBACK = 20
+MARKET_RESIDUAL_MOMENTUM_PARAMETERS = {
+    "market_residual_momentum_126_skip5": {"lookback": 126, "skip": 5},
+    "market_residual_momentum_126_skip20": {"lookback": 126, "skip": 20},
+    "market_residual_momentum_252_skip5": {"lookback": 252, "skip": 5},
+    "market_residual_momentum_252_skip20": {"lookback": 252, "skip": 20},
+}
 
 
 @dataclass(frozen=True)
@@ -361,6 +372,68 @@ def executable_factor_columns() -> list[str]:
     ]))
 
 
+def market_residual_momentum_factor_columns() -> list[str]:
+    return list(MARKET_RESIDUAL_MOMENTUM_PARAMETERS)
+
+
+def low_market_residual_volatility_factor_columns() -> list[str]:
+    return [LOW_MARKET_RESIDUAL_VOLATILITY_FACTOR]
+
+
+def low_market_residual_volatility_factor_metadata() -> dict[str, object]:
+    return {
+        "factor_family": "low_market_residual_volatility",
+        "formula": (
+            "market_return_d=equal_weight(valid_returns_of_PIT_tradable_"
+            "stocks_d); regress stock_return on [1, market_return] using the "
+            "last 60 valid observations through d-1; residual_d=return_d-"
+            "alpha_d-beta_d*market_return_d; score_t=-std(last_20_residuals)"
+        ),
+        "estimation_window": MARKET_RESIDUAL_ESTIMATION_WINDOW,
+        "volatility_lookback": LOW_MARKET_RESIDUAL_VOLATILITY_LOOKBACK,
+        "market_return_weighting": "equal_weight",
+        "market_universe": "point_in_time_tradable_A_shares_on_each_date",
+        "missing_return_rule": (
+            "exclude_missing_or_suspended_returns;never_fill_missing_with_zero"
+        ),
+        "regression_timing": (
+            "parameters_for_d_use_valid_observations_through_d_minus_1"
+        ),
+        "insufficient_sample_rule": "fail_closed_to_nan",
+        "industry_data_used": False,
+        "financial_data_used": False,
+    }
+
+
+def market_residual_momentum_factor_metadata(
+    factor_column: str,
+) -> dict[str, object]:
+    if factor_column not in MARKET_RESIDUAL_MOMENTUM_PARAMETERS:
+        raise KeyError(f"unknown market residual momentum factor: {factor_column}")
+    parameters = MARKET_RESIDUAL_MOMENTUM_PARAMETERS[factor_column]
+    return {
+        "factor_family": "market_residual_momentum",
+        "formula": (
+            "market_return_d=equal_weight(valid_returns_of_PIT_tradable_"
+            "stocks_d); regress stock_return on [1, market_return] using the "
+            "last 60 valid observations through d-1; residual_d=return_d-"
+            "alpha_d-beta_d*market_return_d; score_t=sum(residual.shift(skip)"
+            ".rolling(lookback))/std(residual.shift(skip).rolling(lookback))"
+        ),
+        "estimation_window": MARKET_RESIDUAL_ESTIMATION_WINDOW,
+        "lookback": int(parameters["lookback"]),
+        "skip": int(parameters["skip"]),
+        "market_return_weighting": "equal_weight",
+        "market_universe": "point_in_time_tradable_A_shares_on_each_date",
+        "missing_return_rule": (
+            "exclude_missing_or_suspended_returns;never_fill_missing_with_zero"
+        ),
+        "regression_timing": "parameters_for_d_use_valid_observations_through_d_minus_1",
+        "insufficient_sample_rule": "fail_closed_to_nan",
+        "industry_data_used": False,
+    }
+
+
 def _clean_price_frame(frame: pd.DataFrame) -> pd.DataFrame:
     required = {"date", "code", "open", "high", "low", "close"}
     missing = sorted(required - set(frame.columns))
@@ -387,9 +460,19 @@ def _clean_price_frame(frame: pd.DataFrame) -> pd.DataFrame:
     inverse_adjustment = result.get("raw_to_qfq_factor")
     if inverse_adjustment is None:
         inverse_adjustment = pd.Series(1.0, index=result.index)
-    inverse_adjustment = pd.to_numeric(
-        inverse_adjustment, errors="coerce",
-    ).where(lambda value: value > 0, 1.0)
+    else:
+        inverse_adjustment = pd.to_numeric(
+            inverse_adjustment, errors="coerce",
+        )
+        valid_adjustment = inverse_adjustment.notna() & inverse_adjustment.gt(0)
+        if not bool(valid_adjustment.all()):
+            invalid_rows = result.loc[
+                ~valid_adjustment, ["date", "code"],
+            ].head(5).to_dict("records")
+            raise ValueError(
+                "raw_to_qfq_factor must be complete and positive; "
+                f"invalid_rows={invalid_rows}"
+            )
     # TushareRepository stores 1 / adj_factor because the execution engine
     # anchors that inverse series at the requested endpoint.  Factor returns
     # need the forward adjustment path itself.  Multiplying by adj_factor is
@@ -639,7 +722,133 @@ def _amplitude_hidden_structure(
     return pd.DataFrame(output, index=close.index, columns=close.columns)
 
 
-def calculate_daily_factor_panel(frame: pd.DataFrame) -> pd.DataFrame:
+def _point_in_time_tradable_mask(
+    membership: pd.DataFrame,
+    template: pd.DataFrame,
+) -> pd.DataFrame:
+    required = {"date", "code"}
+    missing = sorted(required - set(membership.columns))
+    if missing:
+        raise ValueError(f"tradable membership missing columns: {missing}")
+    rows = membership[["date", "code"]].copy()
+    rows["date"] = pd.to_datetime(rows["date"], errors="coerce")
+    rows["code"] = rows["code"].fillna("").astype(str).str.strip()
+    rows = rows.dropna(subset=["date"]).drop_duplicates(["date", "code"])
+    rows["tradable"] = True
+    if rows.empty:
+        return pd.DataFrame(False, index=template.index, columns=template.columns)
+    mask = rows.pivot(index="date", columns="code", values="tradable")
+    return mask.reindex(index=template.index, columns=template.columns).fillna(
+        False,
+    ).astype(bool)
+
+
+def _market_residual_returns(
+    returns: pd.DataFrame,
+    tradable_mask: pd.DataFrame,
+    *,
+    estimation_window: int = MARKET_RESIDUAL_ESTIMATION_WINDOW,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Calculate one-step residuals with OLS parameters frozen at d-1."""
+    window = int(estimation_window)
+    if window < 2:
+        raise ValueError("estimation_window must be at least 2")
+    eligible_returns = returns.where(
+        tradable_mask.reindex_like(returns).fillna(False).astype(bool),
+    )
+    market_return = eligible_returns.mean(axis=1, skipna=True)
+    market_return = market_return.where(eligible_returns.notna().any(axis=1))
+
+    market_values = market_return.to_numpy(dtype=float)
+    stock_values = eligible_returns.to_numpy(dtype=float)
+    output = np.full_like(stock_values, np.nan)
+    for column in range(stock_values.shape[1]):
+        observations: deque[tuple[float, float]] = deque(maxlen=window)
+        sum_x = 0.0
+        sum_y = 0.0
+        sum_xx = 0.0
+        sum_xy = 0.0
+        for position in range(stock_values.shape[0]):
+            x = market_values[position]
+            y = stock_values[position, column]
+            valid = np.isfinite(x) and np.isfinite(y)
+            if valid and len(observations) == window:
+                denominator = window * sum_xx - sum_x * sum_x
+                scale = max(1.0, abs(window * sum_xx), abs(sum_x * sum_x))
+                if abs(denominator) > np.finfo(float).eps * scale:
+                    beta = (window * sum_xy - sum_x * sum_y) / denominator
+                    alpha = (sum_y - beta * sum_x) / window
+                    output[position, column] = y - alpha - beta * x
+            if not valid:
+                continue
+            if len(observations) == window:
+                old_x, old_y = observations[0]
+                sum_x -= old_x
+                sum_y -= old_y
+                sum_xx -= old_x * old_x
+                sum_xy -= old_x * old_y
+            observations.append((x, y))
+            sum_x += x
+            sum_y += y
+            sum_xx += x * x
+            sum_xy += x * y
+    return (
+        pd.DataFrame(output, index=returns.index, columns=returns.columns),
+        market_return,
+    )
+
+
+def _market_residual_momentum_score(
+    residuals: pd.DataFrame,
+    *,
+    lookback: int,
+    skip: int,
+) -> pd.DataFrame:
+    lookback = int(lookback)
+    skip = int(skip)
+    if lookback < 2:
+        raise ValueError("lookback must be at least 2")
+    if skip < 0:
+        raise ValueError("skip must be non-negative")
+    eligible = residuals.shift(skip)
+    rolling = eligible.rolling(lookback, min_periods=lookback)
+    denominator = rolling.std().replace(0.0, np.nan)
+    return rolling.sum().div(denominator)
+
+
+def calculate_market_residual_momentum_factors(
+    returns: pd.DataFrame,
+    tradable_mask: pd.DataFrame,
+) -> dict[str, pd.DataFrame]:
+    residuals, _ = _market_residual_returns(returns, tradable_mask)
+    return {
+        name: _market_residual_momentum_score(
+            residuals,
+            lookback=int(parameters["lookback"]),
+            skip=int(parameters["skip"]),
+        )
+        for name, parameters in MARKET_RESIDUAL_MOMENTUM_PARAMETERS.items()
+    }
+
+
+def calculate_low_market_residual_volatility_factor(
+    returns: pd.DataFrame,
+    tradable_mask: pd.DataFrame,
+) -> pd.DataFrame:
+    residuals, _ = _market_residual_returns(returns, tradable_mask)
+    return -residuals.rolling(
+        LOW_MARKET_RESIDUAL_VOLATILITY_LOOKBACK,
+        min_periods=LOW_MARKET_RESIDUAL_VOLATILITY_LOOKBACK,
+    ).std()
+
+
+def calculate_daily_factor_panel(
+    frame: pd.DataFrame,
+    *,
+    tradable_membership: pd.DataFrame | None = None,
+    include_market_residual_momentum: bool = False,
+    include_low_market_residual_volatility: bool = False,
+) -> pd.DataFrame:
     """Calculate source-aligned factors using bars no later than each row date."""
     data = _clean_price_frame(frame)
     close = _pivot(data, "qfq_close")
@@ -649,6 +858,44 @@ def calculate_daily_factor_panel(frame: pd.DataFrame) -> pd.DataFrame:
     returns = close.pct_change(fill_method=None)
 
     factors: dict[str, pd.DataFrame] = {}
+
+    if include_market_residual_momentum or include_low_market_residual_volatility:
+        if tradable_membership is None:
+            requested = []
+            if include_market_residual_momentum:
+                requested.extend(market_residual_momentum_factor_columns())
+            if include_low_market_residual_volatility:
+                requested.extend(low_market_residual_volatility_factor_columns())
+            factors.update({
+                name: pd.DataFrame(
+                    np.nan, index=close.index, columns=close.columns,
+                )
+                for name in requested
+            })
+        else:
+            tradable_mask = _point_in_time_tradable_mask(
+                tradable_membership,
+                close,
+            )
+            residuals, _ = _market_residual_returns(returns, tradable_mask)
+            if include_market_residual_momentum:
+                factors.update({
+                    name: _market_residual_momentum_score(
+                        residuals,
+                        lookback=int(parameters["lookback"]),
+                        skip=int(parameters["skip"]),
+                    )
+                    for name, parameters in (
+                        MARKET_RESIDUAL_MOMENTUM_PARAMETERS.items()
+                    )
+                })
+            if include_low_market_residual_volatility:
+                factors[LOW_MARKET_RESIDUAL_VOLATILITY_FACTOR] = (
+                    -residuals.rolling(
+                        LOW_MARKET_RESIDUAL_VOLATILITY_LOOKBACK,
+                        min_periods=LOW_MARKET_RESIDUAL_VOLATILITY_LOOKBACK,
+                    ).std()
+                )
 
     prior_returns = returns.shift(1)
     momentum = close.div(close.shift(61)) - 1.0

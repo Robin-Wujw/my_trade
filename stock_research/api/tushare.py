@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import os
+import ssl
 from pathlib import Path
 
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
 
 from stock_research.core.paths import PATHS
 
@@ -20,6 +22,46 @@ _RATE_LIMITER = FileRateLimiter(
     float(os.environ.get("TUSHARE_MIN_INTERVAL", "1.25")),
     PATHS.tmp / "tushare_rate_limit.lock",
 )
+
+
+def _create_system_trust_context() -> ssl.SSLContext:
+    """Create a verified TLS context without consulting ``SSLKEYLOGFILE``.
+
+    ``ssl.create_default_context`` reads ``SSLKEYLOGFILE``. Some Windows
+    traffic filters expose that variable as a device path which CPython's
+    OpenSSL build cannot open and fail with ``OPENSSL_Applink``. Building the
+    equivalent client context explicitly keeps certificate and hostname
+    verification enabled while loading the Windows certificate stores.
+    """
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.load_default_certs(purpose=ssl.Purpose.SERVER_AUTH)
+    return context
+
+
+class _SystemTrustAdapter(HTTPAdapter):
+    def __init__(self, ssl_context: ssl.SSLContext, *args, **kwargs):
+        self._ssl_context = ssl_context
+        super().__init__(*args, **kwargs)
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs.setdefault("ssl_context", self._ssl_context)
+        return super().init_poolmanager(*args, **kwargs)
+
+    def proxy_manager_for(self, proxy, **proxy_kwargs):
+        proxy_kwargs.setdefault("ssl_context", self._ssl_context)
+        return super().proxy_manager_for(proxy, **proxy_kwargs)
+
+
+def _build_http_session() -> requests.Session:
+    session = requests.Session()
+    if os.name == "nt":
+        session.mount("https://", _SystemTrustAdapter(_create_system_trust_context()))
+    return session
+
+
+_HTTP_SESSION = _build_http_session()
 
 
 class TushareAPIError(RuntimeError):
@@ -49,7 +91,7 @@ def _retryable(exc: Exception) -> bool:
         message = str(exc).lower()
         return any(
             marker in message
-            for marker in ("频繁", "每分钟", "limit", "timeout", "内部错误")
+            for marker in ("频繁", "每分钟", "rate limit", "timeout", "内部错误")
         )
     return is_transient_error(exc)
 
@@ -72,7 +114,7 @@ def query(
 
     def request_once():
         _RATE_LIMITER.wait()
-        response = requests.post(
+        response = _HTTP_SESSION.post(
             API_URL,
             json={
                 "api_name": str(api_name),

@@ -20,7 +20,7 @@ from stock_research.core.paths import PATHS
 from stock_research.indicators.formula33 import calc_kdj_k, calc_rsi, calc_wr
 from stock_research.strategies.fundamental_selection import VALUE_INDUSTRY_RULE_VERSION
 from stock_research.strategies.historical_candidates import CANDIDATE_SNAPSHOT_COLUMNS, SNAPSHOT_VERSION
-from stock_research.strategies.portfolio_backtest import run_portfolio_backtest
+from stock_research.backtesting.engine import run_portfolio_backtest
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -170,8 +170,6 @@ def _industry_for(intervals: dict[str, list[tuple[pd.Timestamp, pd.Timestamp, st
 def _score_frame(frame: pd.DataFrame) -> pd.DataFrame:
     frame = frame.sort_values("date").copy()
     close = pd.to_numeric(frame["close_adj"], errors="coerce")
-    high = pd.to_numeric(frame["high_adj"], errors="coerce")
-    low = pd.to_numeric(frame["low_adj"], errors="coerce")
     volume = pd.to_numeric(frame["vol"], errors="coerce")
     amount_yuan = pd.to_numeric(frame["amount"], errors="coerce") * 1000.0
     frame["return_5d"] = close / close.shift(5) - 1

@@ -158,3 +158,21 @@ def test_vectorbt_replay_applies_corporate_action_quantity_delta():
     assert checked["corporate_action_adjustment_count"] == 1
     assert checked["final_return_delta_pct"] == pytest.approx(0.0, abs=1e-8)
     assert checked["final_positions"][0]["quantity"] == pytest.approx(200.0)
+
+
+def test_dividend_cash_injection_is_reported_as_unsupported():
+    checked = run_vectorbt_cross_check({}, {"events": [{
+        "account_mode": "corporate_action", "corporate_action_cash_amount": 10,
+    }]}, commission_rate=0, minimum_commission=0, initial_capital=100,
+        sell_stamp_duty_rate=0, estimated_slippage_rate=0)
+    assert checked["status"] == "unsupported_corporate_action_cash_flow"
+    assert not checked["validation_passed"]
+
+
+def test_raw_closes_are_used_and_future_prices_do_not_backfill():
+    from stock_research.strategies.vectorbt_replay import _daily_closes
+    frame = _price_frame()
+    frame["raw_close"] = [20., 22.]
+    result = _daily_closes({"A": frame}, pd.to_datetime(["2026-01-02", "2026-01-05"]), ["A"])
+    assert pd.isna(result.iloc[0, 0])
+    assert result.iloc[1, 0] == 20.

@@ -195,3 +195,32 @@ SMTP 必需变量为 `SMTP_HOST`、`SMTP_USERNAME`、`SMTP_PASSWORD` 和 `REPORT
 ## 12. 计划任务
 
 `scripts/setup_scheduled_task.bat` 创建每天 20:30 的 `StockSelection-Daily` 任务，工作目录为项目根目录。定时任务应使用与手工验证相同的解释器和环境变量，并保留 `var/logs` 中的完整日志。
+
+## 13. GP/A 独立前向研究采集
+
+GP/A 不属于七步生产流水线，不参与日报推送，也不能替换当前右侧候选。它从 `2026-08-11` 以后真实捕获的财报版本开始独立积累证据。
+
+先同步当时最新完整年报。下面以2025年报为例；后续年度必须显式修改 `--period`：
+
+```powershell
+& $Python -m apps.data_sync income --period 20251231
+& $Python -m apps.data_sync balancesheet --period 20251231
+```
+
+每次同步都会保留新payload的首次 `captured_at`；相同payload重复同步不会复制版本。网络失败、空表或限流时保留已有版本，不能把当前值表回填到追加版本表。申万成员发生更新时，通过独立状态文件刷新快照，避免旧的断点状态跳过请求：
+
+```powershell
+& $Python -m apps.zer0share_sync --table sw_member --end-date 20260811 --state-file var/state/zer0share_sw_member_20260811.json
+```
+
+候选生成前必须先有覆盖目标观察日的六因子全市场面板和 Formula33 交易日历史，然后显式传入实际文件：
+
+```powershell
+& $Python -m apps.quantsplaybook_gross_profitability_forward `
+  --start-date 2026-08-11 `
+  --end-date 2026-08-11 `
+  --formula-history var/backtests/formula33_forward.csv `
+  --low-volatility-panel-root var/backtests/forward_factor_panels
+```
+
+以下任一条件会失败关闭：观察日早于冻结日、没有冻结日后捕获的两张财务表、缺带本地时间的行业快照、缺上市股票全集、没有当日面板或Formula33日期、ADV20后完整七因子股票少于100只。成功产物写入 `var/forward/right_gross_profitability_to_assets`，必须与同期冻结六因子对照一起保存。MiniQMT仍只读，候选不得发送到券商下单接口。

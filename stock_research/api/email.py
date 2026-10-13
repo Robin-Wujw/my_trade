@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from email.message import EmailMessage
 import os
-from pathlib import Path
 import smtplib
 
 from stock_research.core.paths import PATHS, ProjectPaths

@@ -1,6 +1,6 @@
 import pandas as pd
 
-from apps.quantsplaybook_results import (
+from stock_research.research.quantsplaybook_results import (
     expected_periods,
     strategy_comparison,
 )

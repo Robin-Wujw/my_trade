@@ -1,4 +1,4 @@
-from apps.quantsplaybook_portfolio_matrix import _periods
+from stock_research.research.quantsplaybook_portfolio_matrix import _periods
 
 
 def test_portfolio_matrix_includes_independent_years_and_full_period():

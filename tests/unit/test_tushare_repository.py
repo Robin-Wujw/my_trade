@@ -36,6 +36,183 @@ def test_tushare_repository_roundtrips_dataset_rows(tmp_path):
     ]
 
 
+def test_tushare_repository_preserves_observed_payload_versions(tmp_path):
+    database = Database(tmp_path / "my_trade.sqlite3", code_version="test")
+    database.initialize()
+    repository = TushareRepository(database)
+    base = {
+        "ts_code": "000001.SZ",
+        "ann_date": "20260420",
+        "end_date": "20251231",
+        "report_type": "1",
+    }
+
+    repository.upsert_dataset(
+        "income",
+        pd.DataFrame([{**base, "total_revenue": 100.0, "oper_cost": 60.0}]),
+    )
+    repository.upsert_dataset(
+        "income",
+        pd.DataFrame([{**base, "total_revenue": 110.0, "oper_cost": 65.0}]),
+    )
+
+    current = repository.load_dataset("income", ts_code="000001.SZ")
+    versions = repository.load_dataset_versions(
+        "income", ts_code="000001.SZ",
+    )
+
+    assert current[["total_revenue", "oper_cost"]].to_dict("records") == [
+        {"total_revenue": 110.0, "oper_cost": 65.0},
+    ]
+    observed = versions.sort_values("total_revenue")[[
+        "total_revenue", "oper_cost",
+    ]].to_dict("records")
+    assert observed == [
+        {"total_revenue": 100.0, "oper_cost": 60.0},
+        {"total_revenue": 110.0, "oper_cost": 65.0},
+    ]
+    assert versions["_payload_sha256"].nunique() == 2
+    assert versions["_captured_at"].notna().all()
+
+    capture_date = pd.Timestamp(versions.iloc[0]["_captured_at"]).strftime(
+        "%Y-%m-%d",
+    )
+    assert len(repository.load_dataset_versions(
+        "income",
+        ts_code="000001.SZ",
+        captured_from=f"{capture_date}T00:00:00Z",
+    )) == 2
+
+    assert repository.load_dataset_versions(
+        "income",
+        ts_code="000001.SZ",
+        captured_from="2999-01-01",
+    ).empty
+
+
+def test_tushare_repository_exposes_current_payload_observation_time(tmp_path):
+    database = Database(tmp_path / "my_trade.sqlite3", code_version="test")
+    database.initialize()
+    repository = TushareRepository(database)
+    repository.upsert_dataset(
+        "sw_member",
+        pd.DataFrame([{
+            "ts_code": "600000.SH",
+            "l1_name": "银行",
+            "in_date": "20211213",
+        }]),
+    )
+
+    observations = repository.load_dataset_current_observations("sw_member")
+
+    assert observations[["ts_code", "l1_name"]].to_dict("records") == [{
+        "ts_code": "600000.SH",
+        "l1_name": "银行",
+    }]
+    assert observations["_row_key"].notna().all()
+    assert observations["_updated_at"].notna().all()
+
+
+def test_append_dataset_versions_does_not_mutate_current_rows(tmp_path):
+    database = Database(tmp_path / "my_trade.sqlite3", code_version="test")
+    database.initialize()
+    repository = TushareRepository(database)
+    original = {
+        "ts_code": "600000.SH",
+        "l1_code": "801780.SI",
+        "l1_name": "银行",
+        "in_date": "20211213",
+        "out_date": None,
+    }
+    repository.upsert_dataset("sw_member", pd.DataFrame([original]))
+    before = repository.load_dataset_current_observations("sw_member")
+
+    rows = repository.append_dataset_versions(
+        "sw_member",
+        pd.DataFrame([{**original, "out_date": "20260811"}]),
+        source="tushare/pro:forward-bootstrap",
+    )
+
+    after = repository.load_dataset_current_observations("sw_member")
+    versions = repository.load_dataset_versions("sw_member")
+    assert rows == 1
+    assert len(after) == 1
+    assert after.iloc[0]["out_date"] is None
+    assert after.iloc[0]["_updated_at"] == before.iloc[0]["_updated_at"]
+    assert len(versions) == 2
+    assert versions["_row_key"].nunique() == 1
+    assert set(versions["out_date"].fillna("")) == {"", "20260811"}
+
+
+def test_append_dataset_version_batch_captures_financial_pair_atomically(tmp_path):
+    database = Database(tmp_path / "my_trade.sqlite3", code_version="test")
+    database.initialize()
+    repository = TushareRepository(database)
+
+    counts = repository.append_dataset_version_batch(
+        {
+            "eastmoney_income": pd.DataFrame([{
+                "ts_code": "600000.SH",
+                "ann_date": "20260420",
+                "end_date": "20251231",
+                "report_type": "1",
+                "total_revenue": 100.0,
+                "oper_cost": 60.0,
+            }]),
+            "eastmoney_balancesheet": pd.DataFrame([{
+                "ts_code": "600000.SH",
+                "ann_date": "20260421",
+                "end_date": "20251231",
+                "report_type": "1",
+                "total_assets": 200.0,
+            }]),
+        },
+        source="eastmoney/datacenter",
+    )
+
+    assert counts == {
+        "eastmoney_income": 1,
+        "eastmoney_balancesheet": 1,
+    }
+    income = repository.load_dataset_versions("eastmoney_income")
+    balance = repository.load_dataset_versions("eastmoney_balancesheet")
+    assert income.iloc[0]["total_revenue"] == 100.0
+    assert balance.iloc[0]["total_assets"] == 200.0
+    assert income.iloc[0]["_captured_at"] == balance.iloc[0]["_captured_at"]
+
+
+def test_financial_statement_key_preserves_distinct_report_types(tmp_path):
+    database = Database(tmp_path / "my_trade.sqlite3", code_version="test")
+    database.initialize()
+    repository = TushareRepository(database)
+
+    rows = repository.upsert_dataset(
+        "income",
+        pd.DataFrame([
+            {
+                "ts_code": "000001.SZ",
+                "ann_date": "20260420",
+                "f_ann_date": "20260420",
+                "end_date": "20251231",
+                "report_type": "1",
+                "total_revenue": 100.0,
+            },
+            {
+                "ts_code": "000001.SZ",
+                "ann_date": "20260420",
+                "f_ann_date": "20260420",
+                "end_date": "20251231",
+                "report_type": "2",
+                "total_revenue": 25.0,
+            },
+        ]),
+    )
+
+    assert rows == 2
+    loaded = repository.load_dataset("income", ts_code="000001.SZ")
+    assert set(loaded["report_type"]) == {"1", "2"}
+
+
 def test_tushare_daily_kline_loader_normalizes_codes_and_filters_future_rows(tmp_path):
     database = Database(tmp_path / "my_trade.sqlite3", code_version="test")
     database.initialize()

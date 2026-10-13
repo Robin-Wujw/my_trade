@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import sys
 from collections import defaultdict
@@ -14,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from apps.portfolio_backtest import load_candidate_snapshots, load_price_frames
+from stock_research.backtesting.workflow import load_candidate_snapshots, load_price_frames
 from stock_research.core.paths import PATHS
 from stock_research.strategies.candidate_interface import normalize_candidate_snapshots
 

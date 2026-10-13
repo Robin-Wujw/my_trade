@@ -12,6 +12,10 @@
 
 ## 边界
 
+2026-09-21 更新：估值优先使用 `raw_close`，不向过去回填未来报价；回撤高点包含初始净值 1.0。当前 `from_orders` 适配器不能在撮合过程中按派息日注入现金，遇到现金分红或应收股利事件时明确返回 `unsupported_corporate_action_cash_flow`，不再事后加现金冒充完整验证。
+
+包含公司行动的账户由 `stock_research/reporting/portfolio_accounting_audit.py` 从原始权益、成交价、数量和费率独立重建现金及股份，核对逐日资产和期末库存。`apps/portfolio_frozen_replay.py` 将该结果作为验收门禁；运行结束、账本差异、数据限制分别记录。详见[框架审计](backtest-framework-audit-2026-09-21.md)。
+
 现有策略引擎继续负责：
 
 - 时点化候选池和Formula33状态；

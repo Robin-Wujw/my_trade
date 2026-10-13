@@ -135,38 +135,10 @@ def time_limit(seconds):
         signal.signal(signal.SIGALRM, previous_handler)
 
 
-def parse_yi(value):
-    try:
-        value = str(value).strip()
-        if not value or value.lower() == "nan" or value in {"--", "False"}:
-            return None
-        if "亿" in value:
-            return float(value.replace("亿", "")) * 1e8
-        if "万" in value:
-            return float(value.replace("万", "")) * 1e4
-        return float(value)
-    except Exception:
-        return None
 
 
-def parse_pct(value):
-    try:
-        value = str(value).replace("%", "").strip()
-        if not value or value.lower() == "nan" or value == "--":
-            return None
-        return float(value) / 100
-    except Exception:
-        return None
 
 
-def parse_float(value):
-    try:
-        value = str(value).replace(",", "").strip()
-        if not value or value.lower() == "nan" or value in {"--", "False"}:
-            return None
-        return float(value)
-    except Exception:
-        return None
 
 
 def first_existing_value(row, names):
@@ -380,36 +352,12 @@ def get_excl_eps_yoy(df_q, latest):
     return None
 
 
-def clamp(value, low=0, high=100):
-    if value is None or pd.isna(value):
-        return 0
-    return max(low, min(high, value))
 
 
-def score_direct(value, worst, best):
-    if value is None or pd.isna(value):
-        return 0
-    if best == worst:
-        return 0
-    return clamp((value - worst) / (best - worst) * 100)
 
 
-def score_inverse(value, best, worst):
-    if value is None or pd.isna(value):
-        return 0
-    if best == worst:
-        return 0
-    return clamp((worst - value) / (worst - best) * 100)
 
 
-def remove_outliers(values):
-    if len(values) < 3:
-        return values
-    median = np.median(values)
-    if median <= 0:
-        return values
-    filtered = [v for v in values if 0.5 * median <= v <= 2.0 * median]
-    return filtered if len(filtered) >= 3 else values
 
 
 def infer_theme(name, industry):
@@ -1394,26 +1342,6 @@ def is_high_quality_candidate(row):
     return valuation_ok and row["trend_score"] >= QUALITY_MIN_TREND_SCORE
 
 
-def classify_selection_bucket(row):
-    is_low_value = is_low_value_candidate(row)
-    is_high_quality = is_high_quality_candidate(row)
-
-    if is_low_value and is_high_quality:
-        if row["method"] == "VALUE" and row.get("price_to_value") is not None and row["price_to_value"] <= VALUE_UNDERVALUED_RATIO:
-            return CORE_BUCKET, "深度低估且高质量"
-        return CORE_BUCKET, "低估且高质量"
-
-    if is_low_value:
-        if row["method"] == "VALUE" and row.get("price_to_value") is not None and row["price_to_value"] <= VALUE_UNDERVALUED_RATIO:
-            return LOW_VALUE_BUCKET, "深度低估"
-        return LOW_VALUE_BUCKET, "价值线内/历史低位"
-
-    if is_high_quality:
-        if row["method"] == "RIGHT":
-            return HIGH_QUALITY_BUCKET, "右侧高质量"
-        return HIGH_QUALITY_BUCKET, "估值有约束的高质量"
-
-    return WATCH_BUCKET, "未达主策略"
 
 
 def get_effective_valuation_score(method, valuation_score, extra):
@@ -1570,87 +1498,16 @@ def get_score_gate(row, quality_min_score, low_min_score, core_min_score):
     return low_min_score if row.get("selection_bucket") == LOW_VALUE_BUCKET else quality_min_score
 
 
-def build_risk_flags(row):
-    flags = []
-    if row.get("method") != "RIGHT" and row["valuation_score"] < 45 and row.get("selection_bucket") != LOW_VALUE_BUCKET:
-        flags.append("估值优势弱")
-    if row["quality_score"] < 45:
-        flags.append("质量偏弱")
-    if row["trend_score"] < 45:
-        flags.append("趋势未确认")
-    if row["liquidity_score"] < 35:
-        flags.append("流动性偏弱")
-    if row.get("price_to_value") is not None and row["price_to_value"] < 0.30:
-        flags.append("价值线折价异常需复核")
-    flags.extend(row.get("technical_flags_list", []))
-    return "、".join(flags) if flags else "正常"
 
 
-def calc_low_value_score(method, valuation_score, quality_score, trend_score, liquidity_score):
-    if method in {"PE", "PB"}:
-        return (
-            valuation_score * 0.55
-            + quality_score * 0.25
-            + trend_score * 0.10
-            + liquidity_score * 0.10
-        )
-    return (
-        valuation_score * 0.50
-        + quality_score * 0.30
-        + trend_score * 0.10
-        + liquidity_score * 0.10
-    )
 
 
-def calc_high_quality_score(method, valuation_score, quality_score, trend_score, liquidity_score):
-    if method == "RIGHT":
-        return quality_score * 0.35 + trend_score * 0.45 + liquidity_score * 0.20
-    return (
-        valuation_score * 0.05
-        + quality_score * 0.45
-        + trend_score * 0.35
-        + liquidity_score * 0.15
-    )
 
 
 def calc_core_score(low_value_score, high_quality_score):
     return low_value_score * 0.50 + high_quality_score * 0.50
 
 
-def calc_total_score(method, valuation_score, quality_score, trend_score, liquidity_score):
-    """旧验收脚本兼容函数；主流程使用低估/高质量两套独立打分。"""
-    if method == "RIGHT":
-        score = quality_score * 0.20 + trend_score * 0.55 + liquidity_score * 0.25
-        return score, "右侧趋势"
-
-    value_reversion = (
-        valuation_score * 0.40
-        + quality_score * 0.25
-        + trend_score * 0.25
-        + liquidity_score * 0.10
-    )
-    if method in {"PE", "PB"}:
-        return value_reversion, "估值修复"
-
-    quality_value = (
-        valuation_score * 0.30
-        + quality_score * 0.45
-        + trend_score * 0.10
-        + liquidity_score * 0.15
-    )
-    growth_momentum = (
-        valuation_score * 0.10
-        + quality_score * 0.35
-        + trend_score * 0.40
-        + liquidity_score * 0.15
-    )
-    scores = {
-        "估值修复": value_reversion,
-        "高质量折价": quality_value,
-        "成长动量": growth_momentum,
-    }
-    mode, score = max(scores.items(), key=lambda item: item[1])
-    return score, mode
 
 
 def score_stock(code, name, industry, method, today_str, year, quarter, value_min_mktcap=VALUE_MIN_MKTCAP):
@@ -2003,7 +1860,7 @@ def print_diagnostic_summary(all_rows, skipped, top):
 
     watch = df[(~df["selected"].astype(bool)) & (df["diagnostic_candidate"].astype(bool))].copy()
     if watch.empty:
-        print(f"\n--- 观察候选(0只) ---")
+        print("\n--- 观察候选(0只) ---")
         return
     watch = watch.sort_values(["total_score", "mainline_score"], ascending=False).head(top)
     cols = [

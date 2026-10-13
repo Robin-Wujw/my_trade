@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-import sqlite3
 from threading import RLock
 import time
 from typing import Optional
@@ -359,7 +358,7 @@ class KlineRepository:
                 placeholders = ", ".join("?" for _ in normalized_codes)
                 params.extend(normalized_codes)
                 return connection.execute(
-                    f"""
+                    """
                     SELECT stored.trade_date, stored.code, stored.open, stored.high,
                            stored.low, stored.close, stored.volume, stored.amount,
                            stored.tradestatus

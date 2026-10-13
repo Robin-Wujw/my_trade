@@ -13,7 +13,6 @@ import pandas as pd
 from stock_research.api import tushare as tushare_api
 from stock_research.core.paths import PATHS
 from stock_research.data.zer0share_manifest import (
-    ZER0SHARE_DATASET_MAP,
     ZER0SHARE_DATASETS,
     Zer0shareDataset,
     enabled_datasets,

@@ -1864,9 +1864,6 @@ def build_historical_candidate_snapshots(
                 market_cap,
                 value_industry_allowed=value_industry_allowed,
             )
-            value_nonselection_reasons = _value_nonselection_reasons(
-                price_to_value, value_falsification_reasons,
-            )
             base = {
                 "date": date.strftime("%Y-%m-%d"),
                 "code": full_code,

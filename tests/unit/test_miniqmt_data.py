@@ -1,7 +1,6 @@
 import pandas as pd
 import pytest
 
-from stock_research.market import miniqmt_data
 from stock_research.market.miniqmt_data import (
     compare_price_frames,
     load_cached_miniqmt_frame,

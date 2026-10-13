@@ -463,18 +463,6 @@ def render_selection_changes(selection_diff, strategy_part=None):
     return "".join(parts)
 
 
-def _risk_label(row):
-    explicit = text(row.get("risk"), "")
-    if explicit:
-        return explicit[:60]
-    reason = text(row.get("selection_reason"), "")
-    if "风险：" in reason:
-        return reason.split("风险：", 1)[1][:60]
-    if "待核验" in reason:
-        return "存在待核验项"
-    return "未见额外风险标签"
-
-
 def _divergence_label(value):
     number = pd.to_numeric(value, errors="coerce")
     if pd.isna(number) or int(number) == 0:
@@ -558,8 +546,6 @@ def _push_style():
 
 
 def _kd_compact(row):
-    k_value = pd.to_numeric(row.get("kd_k_close"), errors="coerce")
-    d_value = pd.to_numeric(row.get("kd_d_close"), errors="coerce")
     gap = pd.to_numeric(row.get("kd_gap"), errors="coerce")
     warnings = []
     if pd.notna(gap) and abs(float(gap)) >= 20:
