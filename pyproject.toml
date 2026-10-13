@@ -27,6 +27,10 @@ test = [
 vectorbt = [
     "vectorbt==1.1.0; python_version >= '3.11'",
 ]
+dashboard = [
+    "streamlit>=1.36,<2",
+    "plotly>=5.22,<7",
+]
 
 [tool.setuptools]
 

@@ -15,6 +15,7 @@
 
 ## 本机与运维
 
+- [Windows 研究工作台](dashboard-windows.md)：本地 Streamlit 回测浏览、任务启动和安装说明。
 - [本机环境与常见坑处理手册](knowledge/local-environment-runbook.md)：PowerShell、`rg` 权限、AkShare SSL/限流、MiniQMT 只读边界、`var/` 产物和提交前检查。
 - [统一数据层架构](knowledge/unified-data-layer.md)：MiniQMT/Tushare/AKShare/SQLite 的职责边界、同步入口和缓存表。
 - [每日流水线运维](knowledge/operations-runbook.md)：完整运行、增量续跑、结果验收、故障处理和正式推送门禁。

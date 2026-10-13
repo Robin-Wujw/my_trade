@@ -131,6 +131,17 @@ var/secrets/               本地凭据，不提交
 
 `var/` 是运行数据目录，不应提交到仓库。代码、配置、测试和文档才是仓库主体。
 
+## Windows 研究工作台
+
+安装可选界面依赖并启动本地回测浏览器：
+
+```powershell
+.\scripts\install_dashboard.ps1
+.\scripts\start_dashboard.ps1
+```
+
+界面只读取回测产物或启动本地研究回测，不连接券商、不自动下单。完整说明见 [Windows 研究工作台](docs/dashboard-windows.md)。
+
 ## 项目结构
 
 ```text
