@@ -35,10 +35,10 @@
 
 ## 本机与运维
 
-- [量化复盘问题与修复进度](plan/quant-review-issues-2026-10-14.md)：问题证据、建议顺序及按问题编号记录的实现和验收状态。
-- [完整计划执行台账](plan/full-plan-execution-2026-10-14.md)：原计划全部目标、逐项验收证据和真实未完成项。
+- [计划行动总结](plan/action-summary-2026-10-14.md)：已完成优化、分支处理、验证依据、运行中任务和未完成项；完成的独立计划已清理。
+- [量化复盘问题与修复进度](plan/quant-review-issues-2026-10-14.md)：原始问题证据及历史阶段的修复记录，当前进展以行动总结和未完成台账为准。
+- [未完成计划执行台账](plan/full-plan-execution-2026-10-14.md)：仍需验收的目标、逐项证据和运行队列。
 - [生产前向接入与实机阻断](plan/p0-forward-closure-2026-10-14.md)：每日冻结候选、Formula33、真实左侧来源、纸面意图与401/权限阻断收据。
-- [分支审查与兼容合并](plan/branch-review-2026-10-14.md)：旧分支取舍、遗漏研究模块恢复、时点缺陷修复与历史文档边界。
 - [Windows 研究工作台](dashboard-windows.md)：本地 Streamlit 回测浏览、任务启动和安装说明。
 - [本机环境与常见坑处理手册](knowledge/local-environment-runbook.md)：PowerShell、`rg` 权限、AkShare SSL/限流、MiniQMT 只读边界、`var/` 产物和提交前检查。
 - [统一数据层架构](knowledge/unified-data-layer.md)：MiniQMT/Tushare/AKShare/SQLite 的职责边界、同步入口和缓存表。
