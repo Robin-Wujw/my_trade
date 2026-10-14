@@ -4,7 +4,7 @@
 
 ## 候选来源
 
-右侧使用 `playbook_low_corr_network_cap1_price_only_residual_volatility_liquidity_30m`，六因子在观察日可交易全市场截面等权合成，要求可见ADV20至少3000万元，再保留Top50。完整定义见[模型与因子](current-models-and-factors.md)。数据仅截至观察日，排除未来上市、退市后、无有效成交、风险警示及历史不足的股票；缺复权因子不能以1替代。
+右侧使用 `playbook_low_corr_network_cap1_price_only_residual_volatility_liquidity_30m`，六因子先在观察日可交易全市场截面计算分位并等权合成，部分因子缺失时按可用权重归一；随后要求可见ADV20至少3000万元，再保留Top50。完整定义见[模型与因子](current-models-and-factors.md)。数据仅截至观察日，排除未来上市、退市后、无有效成交、风险警示及历史不足的股票；缺复权因子不能以1替代。
 
 左侧使用 `value_model`，要求行业白名单、公告日可见财务、有效价值线和安全门槛。右侧不继承旧基本面模型的市值、质量和增长门槛。两路分数不相加，同股合并权限后进入统一引擎；旧 `factor_quant` 仅供历史诊断。
 

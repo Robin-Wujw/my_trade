@@ -2,9 +2,14 @@
 
 本目录只保留与当前代码口径一致、仍能指导生产或审计的文档。旧参数扫表、低收益诊断、临时候选分析和单票复盘已清理，避免和最终策略混在一起。
 
-业务口径以仓库根目录的 [STRATEGY.md](../STRATEGY.md) 为总纲；当前自动候选和买卖细则以 [当前选股策略（完全版）与买卖策略（详细版）](current-selection-entry-exit-strategy.md) 为准。
+业务口径以仓库根目录的 [STRATEGY.md](../STRATEGY.md) 为总纲；参数及唯一审计收益引用见[当前冻结基线](current-baseline.md)，候选和买卖细则见[当前选股与买卖策略](current-selection-entry-exit-strategy.md)。
 
 ## 当前策略
+
+- [当前冻结基线](current-baseline.md)：从进git的策略配置生成，明确执行参数、输入单位和研究边界。
+- [截至7月21日的历史闭环](historical-closure-2026-07-21.md)：离线冻结、成交回放、独立验账、候选标签和重复运行收据。
+- [同股票池选股对照](research-controls.md)：固定种子、真实回放与验账收据、2021试跑及等价性能优化。
+- [试验预注册与前向治理](research-registry.md)：已观察历史、试验计数限制、冻结假设和前向验收。
 
 - [当前模型与因子清单](current-models-and-factors.md)：现行左右双通道模型、13 个已实现源因子、组合与研究模型、时点/复权边界和当前回测基线的权威索引。
 - [当前选股策略（完全版）与买卖策略（详细版）](current-selection-entry-exit-strategy.md)：最终候选池、右侧多因子模型、语义高盈亏比买入门、仓位、止损、止盈和白名单符合度审查。
