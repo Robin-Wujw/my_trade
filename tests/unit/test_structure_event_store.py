@@ -59,7 +59,7 @@ def test_zero_event_day_is_retained_without_fabricating_outcomes_and_tampering_f
         store.load_structure_session(root)
 
 
-@pytest.mark.parametrize("change", ["backfill", "before_close", "no_factor", "duplicate_bar", "missing_member", "missing_old_bar"])
+@pytest.mark.parametrize("change", ["backfill", "before_close", "no_factor", "duplicate_bar", "missing_member", "missing_old_bar", "unknown_date"])
 def test_incomplete_or_backfilled_capture_cannot_enter_forward_store(tmp_path, monkeypatch, change):
     kwargs = inputs(tmp_path, monkeypatch)
     if change == "backfill":
@@ -73,8 +73,10 @@ def test_incomplete_or_backfilled_capture_cannot_enter_forward_store(tmp_path, m
         kwargs["price_frames"]["sz.000001"] = pd.concat([frame, frame.iloc[[-1]]])
     elif change == "missing_member":
         kwargs["price_frames"].pop("sz.000002")
-    else:
+    elif change == "missing_old_bar":
         kwargs["price_frames"]["sz.000001"].loc[0, "high"] = float("nan")
+    else:
+        kwargs["price_frames"]["sz.000001"].loc[0, "date"] = pd.NaT
     with pytest.raises(ValueError):
         store.capture_structure_session(tmp_path / "capture", **kwargs)
     assert not (tmp_path / "capture/manifest.json").exists()

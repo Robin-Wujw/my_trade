@@ -126,6 +126,8 @@ def build_right_snapshot(prices, stock_basic, stock_st, observation_date, *, ret
     day = pd.Timestamp(observation_date).normalize()
     prices = prices.copy()
     prices["date"] = pd.to_datetime(prices["date"], errors="coerce")
+    if prices["date"].isna().any():
+        raise ValueError("right source contains unknown price dates")
     prices = prices.loc[prices["date"].le(day)].copy()
     if prices.empty or prices["date"].max() != day:
         raise ValueError("observation-date prices are missing")

@@ -202,3 +202,56 @@ def test_formula_sizing_ablation_preserves_observed_down_streak_exit_horizon(mon
                 for row in value["events"] if row["trade_side"] == "卖出"]
     assert exits(result) and exits(result) == exits(baseline)
     assert set(seen) == {8}
+
+
+def test_nav_minimum_trimmed_entry_uses_current_nav_when_cash_is_insufficient(monkeypatch):
+    codes = ["sz.000001", "sz.000002", "sz.000003", "sz.000004"]
+    dates = pd.bdate_range("2023-01-02", periods=140)
+    signal_dates = dict(zip(codes, [70, 85, 100, 130]))
+    frames = {}
+    for code in codes:
+        frame = pd.DataFrame({"date": dates, "open": 10., "high": 10.1, "low": 9.9,
+                              "close": 10., "volume": 1_000_000, "test_code": code})
+        if code != codes[-1]:
+            frame.loc[signal_dates[code] + 5:, ["open", "high", "low", "close"]] = [11., 11.1, 10.9, 11.]
+            frame.loc[120:, ["open", "high", "low", "close"]] = [20., 20.1, 19.9, 20.]
+        frames[code] = frame
+
+    def signal(data, index, plan=None, **kwargs):
+        code = data.iloc[index]["test_code"]
+        if data.iloc[index]["date"] != dates[signal_dates[code]]:
+            return None
+        return {"rank": 4, "trigger": 10., "stop": 9.5, "order_type": "close",
+                "reason": "visible NAV capacity", "known_volume_ratio": 1.,
+                "signal_type": "consolidation_breakout"}
+
+    def gate(data, index, candidate, signal, **kwargs):
+        return True, {**signal, "semantic_entry_ok": True, "entry_risk_pct": 5.,
+                      "entry_reward_risk": 8., "entry_target_price": 14.}, "ok"
+
+    monkeypatch.setattr(engine, "_right_signal", signal)
+    monkeypatch.setattr(engine, "_semantic_right_entry_gate", gate)
+    monkeypatch.setattr(engine, "position_exit_snapshot", lambda *a, **k: {})
+    monkeypatch.setattr(engine, "_active_profit_trigger_ids", lambda *a: set())
+    start = str(dates[5].date())
+    candidates = [{"code": code, "candidate_score": 99, "allow_right": True, "allow_left": False,
+                   "signal_eligible": True, "selected_for_trading": True} for code in codes]
+    kwargs = dict(price_frames=frames, candidate_snapshots={start: candidates},
+                  formula_phases={start: {"phase": "active", "window_up_streak": 5, "window_down_streak": 0}},
+                  requested_start=start, end_date=str(dates[-1].date()),
+                  close_confirmed_execution="next_open", signals_effective_next_day=True,
+                  commission_rate=0, minimum_commission=0, estimated_slippage_rate=0,
+                  sell_stamp_duty_rate=0, right_entry_size_multiplier=5 / 6)
+    result = run_portfolio_research(research_policy={"sizing_basis": "visible_nav"}, **kwargs)
+    assert [row["trade_amount"] for row in _buys(result)] == [250_000., 256_000., 262_000.]
+    decision = next(row for row in result["research_risk_decisions"] if row["code"] == codes[-1])
+    assert decision["research_observed_nav"] == 1_768_000.
+    assert decision["approved_notional_before_execution"] == 442_000.
+    # Cash 232k is above 20% of initial capital but below the 353.6k NAV floor.
+    assert result["final_cash"] == 232_000.
+    assert any(row["code"] == codes[-1] and row["reason"] == "gross_exposure_cap"
+               for row in result["entry_blocks"])
+    production = engine.run_portfolio_backtest(**kwargs)
+    inactive = run_portfolio_research(research_policy={}, **kwargs)
+    assert _buys(production, codes[-1])[0]["trade_amount"] == 250_000.
+    assert all(inactive[key] == value for key, value in production.items())

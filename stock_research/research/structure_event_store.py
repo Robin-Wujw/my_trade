@@ -86,6 +86,8 @@ def capture_structure_session(output_directory, price_frames, eligible_members, 
     if "date" not in members or "code" not in members:
         raise ValueError("Full dated structure membership required")
     members["date"] = pd.to_datetime(members["date"], errors="coerce")
+    if members.date.isna().any():
+        raise ValueError("Structure membership date coverage incomplete")
     members = members.loc[members.date.eq(day)].sort_values("code").reset_index(drop=True)
     if members.empty or members.code.duplicated().any():
         raise ValueError("Full dated structure membership must be unique and nonempty")
@@ -101,6 +103,8 @@ def capture_structure_session(output_directory, price_frames, eligible_members, 
         if {"date", "open", "high", "low", "close", "volume", "raw_to_qfq_factor"} - set(data):
             raise ValueError(f"Structure source lacks raw prices/adjustment evidence: {code}")
         data["date"] = pd.to_datetime(data["date"], errors="coerce")
+        if data.date.isna().any():
+            raise ValueError(f"Structure source date coverage incomplete: {code}")
         data = data.loc[data.date.le(day), [name for name in BAR_COLUMNS if name in data]].sort_values("date")
         if data.empty or data.date.duplicated().any() or data.date.max() != day:
             raise ValueError(f"Structure source requires unique same-day prices: {code}")

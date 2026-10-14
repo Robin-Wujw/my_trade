@@ -70,6 +70,9 @@ def test_full_membership_events_include_non_top50_and_ignore_future_prices(monke
     assert all(row["planned_r"] == 3 for row in rows)
     membership[1]["is_st"] = True
     assert len(events.observed_structure_events(frames, membership, "2026-10-14", captured_at="2026-10-14T17:00:00+08:00", source_sha256="a" * 64)) == 1
+    frames["sz.000001"].loc[0, "date"] = pd.NaT
+    with pytest.raises(ValueError, match="unknown price dates"):
+        events.observed_structure_events(frames, membership, "2026-10-14", captured_at="2026-10-14T17:00:00+08:00", source_sha256="a" * 64)
 
 
 def test_actual_capture_sessions_remain_visible_without_mature_labels_and_event_sources_must_match():

@@ -53,6 +53,8 @@ def observed_structure_events(price_frames, eligible_members, observation_date, 
     if required - set(members):
         raise ValueError("Full dated membership eligibility fields are required")
     members["date"] = pd.to_datetime(members.date, errors="coerce")
+    if members.date.isna().any():
+        raise ValueError("Dated full membership contains unknown dates")
     members = members.loc[members.date.eq(day)].copy()
     if members.empty or members.code.duplicated().any():
         raise ValueError("Dated full membership must be nonempty and unique")
@@ -83,6 +85,8 @@ def observed_structure_events(price_frames, eligible_members, observation_date, 
             raise ValueError(f"Eligible member lacks observed prices: {code}")
         frame = price_frames[code].copy()
         frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+        if frame.date.isna().any():
+            raise ValueError(f"Eligible member contains unknown price dates: {code}")
         frame = frame.loc[frame.date.le(day)].sort_values("date").reset_index(drop=True)
         frame.attrs = {}
         if frame.empty or frame.date.duplicated().any() or frame.iloc[-1].date != day:

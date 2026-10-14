@@ -2704,11 +2704,14 @@ def _run_portfolio_backtest(
                     )
             if entry_gross_exposure() + size > entry_capital_limit() + 1e-9:
                 available_size = max(0.0, entry_capital_limit() - entry_gross_exposure())
+                # Ledger sizes remain in initial-capital units; the research
+                # policy's minimum entry fractions refer to visible NAV.
+                minimum_size_basis = entry_capital_limit()
                 minimum_trimmed_size = _minimum_trimmed_entry_size(
-                    size,
+                    size / minimum_size_basis if minimum_size_basis > 0 else 0.0,
                     starting_new_right_campaign=starting_new_right_campaign,
                     pullback_pilot=pullback_pilot,
-                )
+                ) * minimum_size_basis
                 if available_size + 1e-9 < minimum_trimmed_size:
                     record_entry_block(date, code, candidate, signal, "gross_exposure_cap")
                     continue
