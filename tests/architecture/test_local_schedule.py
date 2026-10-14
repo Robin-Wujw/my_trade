@@ -5,13 +5,16 @@ ROOT = Path(__file__).parents[2]
 
 
 def test_local_scheduled_task_is_daily_and_checkout_portable():
-    text = (ROOT / "scripts/setup_scheduled_task.bat").read_text(
+    launcher = (ROOT / "scripts/setup_scheduled_task.bat").read_text(
+        encoding="utf-8"
+    )
+    installer = (ROOT / "scripts/setup_scheduled_task.ps1").read_text(
         encoding="utf-8"
     )
 
-    assert "New-ScheduledTaskTrigger -Daily -At '20:30'" in text
-    assert "%~dp0" in text
-    assert r"D:\MyCodes\my_trade" not in text
+    assert "New-ScheduledTaskTrigger -Daily -At '20:30'" in installer
+    assert "%~dp0setup_scheduled_task.ps1" in launcher
+    assert r"D:\MyCodes\my_trade" not in launcher + installer
 
 
 def test_strategy_uses_only_rolling_21_day_formula33_breadth():

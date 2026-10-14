@@ -223,6 +223,7 @@ def test_default_steps_use_production_formula_filters_and_no_push_alerts(monkeyp
 
     steps = build_default_steps(config, no_push=True)
     steps["formula33"]()
+    steps.artifacts["observation_date"] = "2026-07-10"
     steps["fundamental_update"]()
 
     formula_args = captured["formula33"]
@@ -230,6 +231,61 @@ def test_default_steps_use_production_formula_filters_and_no_push_alerts(monkeyp
     assert formula_args[formula_args.index("--missing-mktcap-policy") + 1] == "exclude"
     assert formula_args[formula_args.index("--maxtasksperchild") + 1] == "1000"
     assert "--alert" not in captured["update"]
+
+
+@pytest.mark.parametrize(
+    "observation_date, expected_period",
+    [
+        ("2026-01-05", "2025-09-30"),
+        ("2026-04-29", "2025-09-30"),
+        ("2026-04-30", "2026-03-31"),
+        ("2026-08-28", "2026-03-31"),
+        ("2026-08-31", "2026-06-30"),
+        ("2026-10-30", "2026-06-30"),
+        ("2026-11-02", "2026-09-30"),
+    ],
+)
+def test_financial_steps_share_formula_observation_date_and_period(
+    monkeypatch, observation_date, expected_period,
+):
+    from stock_research.core.config import load_pipeline_config
+    from stock_research.core.paths import PATHS
+
+    monkeypatch.delenv("FINANCIAL_UPDATES", raising=False)
+    # Even a stale environment override cannot replace the explicit per-run period.
+    monkeypatch.setenv("REPORT_PERIOD", "2099-12-31")
+    config = load_pipeline_config(PATHS.project_root / "config/pipeline.toml")
+    captured = {}
+    monkeypatch.setattr(
+        daily_pipeline.fundamental_update, "main",
+        lambda args: captured.setdefault("update", args),
+    )
+    monkeypatch.setattr(
+        daily_pipeline.fundamental_selection, "main",
+        lambda args: captured.setdefault("selection", args),
+    )
+    steps = build_default_steps(config, no_push=True)
+    steps.artifacts["observation_date"] = observation_date
+    steps["fundamental_update"]()
+    steps["fundamental_selection"]()
+    update, selection = captured["update"], captured["selection"]
+    assert update[update.index("--max-updates") + 1] == "0"
+    assert update[update.index("--as-of-date") + 1] == observation_date
+    assert selection[selection.index("--observation-date") + 1] == observation_date
+    for args in (update, selection):
+        assert args[args.index("--report-period") + 1] == expected_period
+    assert "--require-target-financial-coverage" in update
+
+
+def test_formula_failure_skips_date_dependent_financial_update():
+    calls = []
+    steps = {
+        name: lambda name=name: calls.append(name) or (1 if name == "formula33" else 0)
+        for name in STEP_NAMES
+    }
+    result = run_daily_pipeline(steps=steps, no_push=True)
+    assert "fundamental_update" not in calls
+    assert "fundamental_update" in result.skipped_steps
 
 
 def test_default_pipeline_captures_only_outputs_from_current_run(

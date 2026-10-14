@@ -1,3 +1,5 @@
+import pytest
+
 from stock_research.strategies.ohlc_execution import (
     daily_limit_pct,
     fill_buy_stop,
@@ -38,6 +40,83 @@ def test_one_price_limit_down_blocks_sell_stop():
 def test_st_limit_changes_from_five_to_ten_percent_on_2026_07_06():
     assert daily_limit_pct("sh.600000", trade_date="2026-07-03", is_st=True) == 0.05
     assert daily_limit_pct("sh.600000", trade_date="2026-07-06", is_st=True) == 0.10
+
+
+@pytest.mark.parametrize("code", ["bj.920001", "920001", "920001.BJ", "BJ.920001", "bj.430001", "bj.830001"])
+@pytest.mark.parametrize("is_st", [False, True])
+def test_beijing_limit_is_thirty_percent_even_for_st(code, is_st):
+    for date in (None, "2026-07-03", "2026-07-06"):
+        assert daily_limit_pct(code, trade_date=date, is_st=is_st) == 0.30
+
+
+@pytest.mark.parametrize("side,price", [("buy", 11.0), ("sell", 9.0)])
+@pytest.mark.parametrize("is_st", [False, True])
+def test_beijing_ten_percent_opening_move_does_not_block_a_market_order(side, price, is_st):
+    result = fill_market_on_open(
+        {"date": "2024-01-02", **bar(price, price, price, price)},
+        side=side, previous_close=10, code="bj.920001", is_st=is_st,
+    )
+    assert result == {"filled": True, "status": "open_fill", "price": price}
+
+
+@pytest.mark.parametrize(
+    "side,row,status",
+    [
+        ("buy", bar(13, 13, 12, 12.5), "locked_limit_up"),
+        ("sell", bar(7, 8, 7, 7.5), "locked_limit_down"),
+    ],
+)
+def test_beijing_opening_thirty_percent_limit_ignores_later_unlocking(side, row, status):
+    result = fill_market_on_open(row, side=side, previous_close=10, code="920001")
+    assert result == {"filled": False, "status": status, "price": None}
+
+
+@pytest.mark.parametrize(
+    "price,side,filled,status",
+    [
+        (13, "buy", False, "locked_limit_up"),
+        (13, "sell", True, "gap_or_open_fill"),
+        (7, "sell", False, "locked_limit_down"),
+        (7, "buy", True, "gap_or_open_fill"),
+    ],
+)
+def test_beijing_one_price_board_limit_blocks_only_the_unfillable_side(price, side, filled, status):
+    result = fill_limit_order(
+        bar(price, price, price, price), side=side, limit_price=price,
+        previous_close=10, code="920001.BJ",
+    )
+    assert result == {"filled": filled, "status": status, "price": price if filled else None}
+
+
+def test_beijing_stops_fill_at_ten_percent_but_remain_blocked_at_thirty_percent():
+    assert fill_buy_stop(
+        bar(11, 11, 11, 11), trigger_price=10.8, previous_close=10,
+        code="bj.920001", is_st=True,
+    ) == {"filled": True, "status": "gap_breakout", "price": 11}
+    assert fill_sell_stop(
+        bar(9, 9, 9, 9), stop_price=9.5, previous_close=10,
+        code="bj.920001", is_st=True,
+    ) == {"filled": True, "status": "gap_stop", "price": 9}
+    assert fill_buy_stop(
+        bar(13, 13, 13, 13), trigger_price=12.8, previous_close=10,
+        code="bj.920001", is_st=True,
+    )["status"] == "locked_limit_up"
+    assert fill_sell_stop(
+        bar(7, 7, 7, 7), stop_price=9.5, previous_close=10,
+        code="bj.920001", is_st=True,
+    )["status"] == "locked_limit_down"
+
+
+@pytest.mark.parametrize("previous_close", [10, None])
+def test_beijing_exact_limits_override_the_fallback_in_both_directions(previous_close):
+    for side, price, status in [("buy", 11, "locked_limit_up"), ("sell", 9, "locked_limit_down")]:
+        row = {"up_limit": 11, "down_limit": 9, **bar(price, price, price, price)}
+        result = fill_market_on_open(row, side=side, previous_close=previous_close, code="bj.920001")
+        assert result["status"] == status
+    for side, price in [("buy", 13), ("sell", 7)]:
+        row = {"up_limit": 14, "down_limit": 6, **bar(price, price, price, price)}
+        result = fill_market_on_open(row, side=side, previous_close=previous_close, code="bj.920001", is_st=True)
+        assert result == {"filled": True, "status": "open_fill", "price": price}
 
 
 def test_old_five_percent_st_one_price_limit_up_blocks_buy():

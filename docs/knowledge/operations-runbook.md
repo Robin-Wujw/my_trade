@@ -14,7 +14,7 @@ $Python = 'D:\ActionsRunner\my-trade\python\python.exe'
 .\scripts\run_daily_analysis.ps1
 ```
 
-脚本设置 UTF-8、选择财报期、处理代理环境变量并调用 `python -m apps.daily_pipeline`。不要手工串联多个单步命令替代生产入口。
+脚本设置 UTF-8、处理代理环境变量并调用 `python -m apps.daily_pipeline`。财报期在 Python 中按 Formula33 本轮观察日和统一法定披露截止日规则确定；PowerShell 不再按月份写入 `REPORT_PERIOD`。不要手工串联多个单步命令替代生产入口。
 
 ## 2. 七步顺序
 
@@ -28,7 +28,7 @@ $Python = 'D:\ActionsRunner\my-trade\python\python.exe'
 7. daily_report          四项日报、CSV/HTML 和可选推送
 ```
 
-`fundamental_update` 失败时必须跳过 `fundamental_selection`。六个上游步骤任一失败时必须跳过正式日报推送。日报还会校验 Formula33 完成清单、样例标记、必需产物数量和三个输入的观察日。
+`formula33` 失败时，财务更新和筛选都跳过，避免失去本轮观察日后使用系统日期继续运行。`fundamental_update` 失败时必须跳过 `fundamental_selection`。六个上游步骤任一失败时必须跳过正式日报推送。日报还会校验 Formula33 完成清单、样例标记、必需产物数量和三个输入的观察日。
 
 ## 3. 推荐运行流程
 
@@ -126,6 +126,12 @@ SMTP 必需变量为 `SMTP_HOST`、`SMTP_USERNAME`、`SMTP_PASSWORD` 和 `REPORT
 目标财务覆盖率       95%
 ```
 
+生产配置 `config/pipeline.toml` 的 `fundamental.max_updates=0` 表示本轮补抓全部缺失股票，解决换报告期后每天只补100只造成的长期阻断；仍使用已有有效缓存、有限并发和单股重试退避。网络失败保留错误与成功断点，重跑只补缺失项，不降低覆盖率。全市场换期补抓可能耗时较长，接口不可用时仍失败关闭，不能保证换期当日一定成功。
+
+`FINANCIAL_UPDATES` 可显式限制诊断运行的补抓数量，限制后仍须通过95%门禁。`REPORT_PERIOD` 是人工覆盖值，只允许观察日法定规则已经可见的季度末；默认按 `latest_visible_report_period` 选期，1月至4月29日使用上年三季报，4月30日、8月31日、10月31日分别切到当年一季报、半年报和三季报。周末按 Formula33 实际交易观察日选期。
+
+财务更新传入 `--as-of-date`，筛选传入相同的 `--observation-date` 和 `--report-period`。筛选只读取 `fundamental_snapshot_<报告期>_<观察日>.csv`，不按文件修改时间挑最新文件；单步诊断可传 `--snapshot-path`，但 sidecar 的 `as_of_date` 和 `report_period` 仍须匹配。法定截止日和覆盖率不是完整财务修订时点证据，历史结果仍须按数据限制标为研究用途。
+
 `fundamental_selection` 必须生成：
 
 - 基本价值线或附近全量；
@@ -194,7 +200,16 @@ SMTP 必需变量为 `SMTP_HOST`、`SMTP_USERNAME`、`SMTP_PASSWORD` 和 `REPORT
 
 ## 12. 计划任务
 
-`scripts/setup_scheduled_task.bat` 创建每天 20:30 的 `StockSelection-Daily` 任务，工作目录为项目根目录。定时任务应使用与手工验证相同的解释器和环境变量，并保留 `var/logs` 中的完整日志。
+`scripts/setup_scheduled_task.bat` 调用 `scripts/setup_scheduled_task.ps1`，创建或原位更新每天20:30的 `StockSelection-Daily` 任务，工作目录为项目根目录。安装器为 `-File` 路径使用双引号，兼容 Windows PowerShell 5.1 和含空格路径，不先删除原任务。安装失败返回非零退出码，日志为 `var/logs/scheduled_task_setup_*.log`；安装成功不等于流水线运行成功。
+
+更新仓库脚本不会自动更改 Windows 中已经注册的错误 action，需要执行安装器：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\setup_scheduled_task.ps1"
+Get-ScheduledTask -TaskName 'StockSelection-Daily' | Get-ScheduledTaskInfo
+```
+
+定时任务应使用与手工验证相同的解释器和环境变量，并保留 `var/logs/daily_analysis_*.log`。Python 启动失败及流水线非零退出码都会写入 transcript，并原样传递流水线退出码。正式验收仍需真实任务运行的 `LastTaskResult=0` 和七步产物完整；隔离 stub 的启动成功不能替代这一验收。修复代码的测试不会发送外部告警、推送或调用券商接口。
 
 ## 13. GP/A 独立前向研究采集
 

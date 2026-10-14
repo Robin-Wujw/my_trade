@@ -17,7 +17,7 @@ from stock_research.api import akshare as ak
 
 from stock_research.api.pushplus import send_pushplus
 from stock_research.core.as_of import write_metadata
-from stock_research.core.financial_period import latest_visible_report_period
+from stock_research.core.financial_period import resolve_report_period
 from stock_research.core.paths import PATHS
 from stock_research.indicators.factors import score_direct
 from stock_research.pipelines.factor_selection import (
@@ -45,7 +45,7 @@ INDUSTRY_DIR = str(PATHS.cache / "reference")
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="全市场财务缓存增量更新与动态基础截面")
-    parser.add_argument("--report-period", default="", help="默认使用财务缓存中的最新报告期")
+    parser.add_argument("--report-period", default="", help="默认按观察日和法定披露截止日选择报告期")
     parser.add_argument("--as-of-date", default=pd.Timestamp.today().strftime("%Y-%m-%d"))
     parser.add_argument("--max-updates", type=int, default=100, help="本次最多补抓多少只；0表示不限制")
     parser.add_argument("--workers", type=int, default=2)
@@ -168,7 +168,7 @@ def update_missing(universe, markets, args):
     if args.max_updates > 0:
         missing = missing[:args.max_updates]
     if args.offline or args.skip_financial_updates or not missing:
-        return 0, 0, len(missing)
+        return 0, 0, 0
     success = failed = 0
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
         jobs = {
@@ -349,7 +349,9 @@ def value_market_cap_eligible_count(snapshot) -> int:
 
 def main(argv=None):
     args = parse_args(argv)
-    args.report_period = args.report_period or os.environ.get("REPORT_PERIOD") or latest_visible_report_period(args.as_of_date)
+    args.report_period = resolve_report_period(
+        args.as_of_date, args.report_period or os.environ.get("REPORT_PERIOD", ""),
+    )
     universe, universe_source = refresh_universe(offline=args.offline)
     markets = {}
     for code in universe["code"].astype(str):

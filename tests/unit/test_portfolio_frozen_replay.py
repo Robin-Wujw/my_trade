@@ -91,7 +91,17 @@ def test_replay_rejects_changed_contract_before_creating_output(tmp_path, damage
     assert not output.exists()
 
 
-def test_cash_only_replay_passes_independent_audit(tmp_path):
+@pytest.mark.parametrize("without_scipy", [False, True])
+def test_cash_only_replay_passes_independent_audit(tmp_path, monkeypatch, without_scipy):
+    if without_scipy:
+        original_version = frozen.importlib.metadata.version
+
+        def version(name):
+            if name == "scipy":
+                raise frozen.importlib.metadata.PackageNotFoundError(name)
+            return original_version(name)
+
+        monkeypatch.setattr(frozen.importlib.metadata, "version", version)
     directory, _ = small_bundle(tmp_path)
     output = tmp_path / "run"
     status = frozen.replay(directory, output)

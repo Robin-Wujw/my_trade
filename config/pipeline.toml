@@ -11,4 +11,6 @@ sleep = 0.3
 retries = 2
 
 [fundamental]
-max_updates = 100
+# 0: backfill every missing stock on report-period rollover; valid caches are reused.
+# FINANCIAL_UPDATES can explicitly bound a diagnostic run; coverage still fails closed.
+max_updates = 0

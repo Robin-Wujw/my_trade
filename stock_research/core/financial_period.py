@@ -41,3 +41,27 @@ def visible_report_periods(start_date, end_date) -> list[str]:
         for date in boundary_dates
         if start <= date <= end
     })
+
+
+def resolve_report_period(as_of_date, report_period: str = "") -> str:
+    """Resolve a daily-production period without accepting a future override.
+
+    Statutory deadlines are a conservative selection rule, not evidence of
+    per-company announcement times or historical revision vintages.
+    """
+    date = pd.Timestamp(as_of_date)
+    if pd.isna(date):
+        raise ValueError(f"invalid observation date: {as_of_date!r}")
+    latest = latest_visible_report_period(date)
+    if not report_period or not report_period.strip():
+        return latest
+    period = pd.Timestamp(report_period)
+    if pd.isna(period) or not period.is_quarter_end:
+        raise ValueError(f"invalid quarterly report period: {report_period!r}")
+    resolved = period.strftime("%Y-%m-%d")
+    if resolved > latest:
+        raise ValueError(
+            f"report period {resolved} is not visible on {date:%Y-%m-%d}; "
+            f"latest permitted period is {latest}"
+        )
+    return resolved

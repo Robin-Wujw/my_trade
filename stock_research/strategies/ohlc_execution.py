@@ -25,16 +25,21 @@ def _untradable_status(row) -> str | None:
 
 
 def daily_limit_pct(code: str, *, trade_date=None, is_st: bool = False) -> float:
+    normalized = str(code).strip().lower()
+    digits = normalized.split(".")[-1]
+    # Beijing keeps its 30% board limit for ST stocks as well. Accept the
+    # exchange-qualified code first, including Tushare's suffix notation.
+    if normalized.startswith("bj.") or normalized.endswith(".bj"):
+        return 0.30
+    if digits.startswith(("4", "8", "920")):
+        return 0.30
     if is_st:
         date = pd.to_datetime(trade_date, errors="coerce")
         if pd.isna(date) or date < pd.Timestamp("2026-07-06"):
             return 0.05
         return 0.10
-    digits = str(code).split(".")[-1]
     if digits.startswith(("300", "301", "688")):
         return 0.20
-    if digits.startswith(("4", "8")):
-        return 0.30
     return 0.10
 
 

@@ -1,0 +1,400 @@
+# 量化复盘问题清单（2026-10-14）
+
+## 0. 范围与口径
+
+- 第0至5节保留原始只读复盘，记录问题、证据和建议的处理顺序；后续代码修复与验收单独记在第6节。MiniQMT 保持只读。
+- 回测统计基于审计版冻结回放 `var/backtests/execution_timing_audit_20260921/repaired_verified`（2021-01-04 至 2026-07-21，累计 +118.712%）。该结果仍是 `research_only / data_limited`。
+- 指数对比使用研究库 `index_daily` 中的沪深300、中证500、中证1000。库里指数行情从 2022-01-04 开始，所以对比区间是 2022-01-04 至 2026-07-21。
+- 复算方法见第 5 节，所有数字都可以用本地 `var/` 产物重算。
+
+## 1. 结论
+
+工程层面（时点数据、公司行动、独立账本、冻结回放）已经比较扎实，回测记账基本可信。主要问题在三处：
+
+1. 前向验证没有运行。项目规定 2026-08-11 之后才是真正的样本外，到今天一天都没有积累。
+2. 历史回测经过反复使用和事后选择，不能证明策略有可复制的优势。
+3. 策略结构内部互相抵消：选股信号弱，持仓却极度集中；盈亏比买入门与实际结果反向；止损不是硬止损；Formula33 择时未经验证；仓位按初始资金计算，不复利。
+
+## 2. 问题总表
+
+| 编号 | 优先级 | 问题 | 主要证据 |
+|---|---|---|---|
+| P0-1 | P0 | 日更计划任务一启动就失败 | `scripts/setup_scheduled_task.bat:17` |
+| P0-2 | P0 | 研究库和前向版本表停更 | 研究库最大交易日 2026-07-21 |
+| P0-3 | P0 | 报告期规则与覆盖率门禁会长期阻断日报 | `scripts/run_daily_analysis.ps1:39`、`config/pipeline.toml:14` |
+| P0-4 | P0 | 日报与研究模型不一致，候选未落盘 | `docs/selection-effectiveness-audit-2026-10-13.md` |
+| P1-1 | P1 | 同一段历史反复使用，模型和门槛事后选定 | 200 多个回测产物、`dce3a3f`、`d762722` |
+| P1-2 | P1 | 参数稍改结果就翻转，不在平台上 | 稳健性文档训练期结果 |
+| P1-3 | P1 | 收益集中在少数股票和少数交易日 | 前三只占已实现净盈利 72% |
+| P1-4 | P1 | 显著性不足，回测报告缺风险调整和基准指标 | alpha t 约 2.4，未做多重检验 |
+| P1-5 | P1 | 缺随机候选对照 | 没有安慰剂测试 |
+| P1-6 | P1 | 弱截面信号配极低持仓广度 | Rank IC 约 0.03，最多持 5 只 |
+| P1-7 | P1 | 右侧六因子实为低换手、低价风格 | Top50 换手率在第 16 百分位 |
+| P1-8 | P1 | 计划盈亏比与实际结果负相关 | Spearman −0.25 |
+| P1-9 | P1 | 收盘确认止损不是硬止损 | 117 笔中 27 笔亏损超过 1R |
+| P1-10 | P1 | Formula33 择时缺乏证据，方向与用法相反 | active 之后指数 20 日偏弱 |
+| P1-11 | P1 | 左侧价值线顺周期，白名单和门槛事后选定 | `engine.py:2005`、`miniqmt_financial.py:291` |
+| P2-1 | P2 | 仓位按初始资金和成本计算，不复利 | `engine.py:2516` |
+| P2-2 | P2 | 回测引擎过度复杂，实验通道混在生产引擎里 | 单函数 5,461 行、77 个参数 |
+| P2-3 | P2 | 默认参数跑不出基线，基线配置没进 git | `cli.py:45`、`defaults.py:16` |
+| P2-4 | P2 | 文档口径互相矛盾 | 多个基线数字、4 篇文档不存在 |
+| P2-5 | P2 | 测试依赖未声明，研究入口引用不存在的模块 | scipy、`three_lane_selection` |
+| P3-1 | P3 | 财务数据只覆盖当前上市股票 | 已退市样本 0/40 有财务记录 |
+| P3-2 | P3 | 北交所 920 代码涨跌停回退比例错误 | `ohlc_execution.py:33` |
+| P3-3 | P3 | 已披露的数据限制仍待补齐 | 回测框架审计文档 |
+
+## 3. 问题详情
+
+### P0-1 日更计划任务一启动就失败
+
+- **现象**：Windows 计划任务 `StockSelection-Daily` 每天 20:30 触发。最近一次（2026-10-13 20:30）的 LastTaskResult 是 `4294770688`，即 0xFFFD0000、−196608。`var/logs` 里没有任何 `daily_analysis_*.log`。
+- **原因**：`scripts/setup_scheduled_task.bat:17` 注册的参数是 `-File '$ScriptPath'`。Windows PowerShell 5.1 的 `-File` 不认单引号，报"不支持给定路径的格式"后直接退出。这时脚本里的 `Start-Transcript` 还没执行，所以不留日志。
+- **复现**：在本机分别用单引号和双引号路径调用 `powershell.exe -File`，单引号退出码 −196608，双引号退出码 0。
+- **其他**：Actions runner 诊断日志里最后一次 job 是 2026-07-10，结果 Failed，之后没有再接到任务。
+- **影响**：日报和所有依赖每日运行的前向记录都没有产生。
+- **建议**：注册参数改用双引号路径，例如：
+
+  ```powershell
+  $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+    -Argument '-NoProfile -ExecutionPolicy Bypass -File "D:\MyCodes\my_trade\scripts\run_daily_analysis.ps1"' `
+    -WorkingDirectory 'D:\MyCodes\my_trade'
+  Set-ScheduledTask -TaskName 'StockSelection-Daily' -Action $action
+  ```
+
+  同时修正 `setup_scheduled_task.bat`，并在任务结果非 0 时发送告警。
+- **验收**：任务 LastTaskResult 为 0，`var/logs` 每个交易日出现一份 `daily_analysis_*.log`。
+
+### P0-2 研究库和前向版本表停更
+
+- **现象**：
+  - `var/data/my_trade.sqlite3` 中 `daily_kline`、`adj_factor`、`daily_basic`、`stk_limit`、`stock_st`、`suspend_d`、`index_daily` 的最大交易日都是 2026-07-21。
+  - `raw_tushare_dataset_row_versions` 共 19,076 行，全部是 2026-08-11 当天写入：`eastmoney_income`、`eastmoney_balancesheet` 各 5,566 行，`sw_member` 7,944 行。之后没有新增。
+  - 运维手册规定的前向产物目录 `var/forward/right_gross_profitability_to_assets` 不存在。
+- **影响**：项目规定"真正未见样本从 2026-08-11 之后开始"，GP/A 前向因子也只认冻结日之后捕获的数据。到 2026-10-14，这两类前向证据都是 0 天。
+- **建议**：研究库至少每周增量同步一次，最好每天；同步后按冻结口径生成当日的右侧 Top50、左侧 `value_model` 候选和 Formula33 状态，并写入数据库。
+- **验收**：研究库最大交易日与最近交易日相差不超过 1 个交易日；财报披露期版本表有新的捕获记录；`var/forward/` 下按日出现前向候选。
+
+### P0-3 报告期规则与覆盖率门禁会长期阻断日报
+
+- **现象**：
+  - `scripts/run_daily_analysis.ps1:39-56` 按月份写死 `REPORT_PERIOD`：1–4 月取上年 12-31，5–8 月取 03-31，9–10 月取 06-30，11–12 月取 09-30。
+  - `apps/daily_pipeline.py` 读取这个环境变量并传给基本面两步。这覆盖了 `stock_research/core/financial_period.py` 里按法定披露截止日选期的 `latest_visible_report_period`；后者在 1–4 月取的是上年 09-30。
+  - 现在是 10 月，脚本取 2026-06-30，但 `var/cache/q1_value` 里这一期一个文件都没有。最新的 2026-03-31 期有 5,465 个文件。
+  - `fundamental_update` 每次最多补 100 只（`config/pipeline.toml:14`）。日更参数又带 `--target-financial-coverage 0.95 --require-target-financial-coverage`，覆盖率不足就以退出码 3 退出（`stock_research/pipelines/fundamental_update.py:414`）。
+- **影响**：
+  - 如果不手工批量补数，按约 5,000 只股票计算，每次换报告期后要约 50 个交易日才能达到 95% 覆盖率，这期间日报全部被阻断。
+  - 1–4 月取年报期时，大部分公司 4 月底前还没披露年报，覆盖率门禁同样过不去。
+  - 即使 P0-1 修好，今天的运行也会在这一步失败。
+- **建议**：删掉脚本里的月份规则，统一用 `latest_visible_report_period`。换期时允许回落到上一期已经完整的缓存，或者把批量补数做成流水线里的一步，而不是每天补 100 只。
+- **验收**：任意日期运行时，选中的报告期与 `latest_visible_report_period` 一致；换期当天日报能正常生成。
+
+### P0-4 日报与研究模型不一致，候选未落盘
+
+- **现象**（引自 10-13 审计）：
+  - `factor_selection` 带 `--akshare-cache-only`，走本地回退评分，用的不是冻结的六因子组合。
+  - `daily_report` 只渲染基本面两组、Formula33 和板块，不使用因子结果。
+  - 生产链路没有保存每日候选快照。
+- **影响**：回测收益没法用来验收日报名单，日报名单也没法事后审计。
+- **建议**：
+  - 日报直接使用冻结模型的当日候选：右侧 `playbook_low_corr_network_cap1_price_only_residual_volatility_liquidity_30m` Top50，加左侧 `value_model`。
+  - 每天落盘以下字段：`observation_date, code, candidate_source, rank, score, signal, 计划价/止损/目标, 是否触发, research_only`。
+  - 用引擎生成纸面订单，只记录，不下单。
+- **验收**：每个交易日都有一份候选和纸面订单记录，可以直接用 `apps.selection_audit` 计算前向收益。
+
+### P1-1 同一段历史反复使用，模型和门槛事后选定
+
+- `var/backtests` 下有 200 多个回测产物，大部分用的是同一段 2021–2026 数据。2021–2023 训练期和 2024 验证期在多轮实验里被重复使用。
+- 右侧组合是看过完整历史之后提出的，`docs/current-models-and-factors.md` 已标注 `selected_before_oos=false`。
+- 左侧行业白名单 `value-industry-allowlist-v1` 是 2026-07-20 在 `dce3a3f` 中加入的，正好覆盖最大赢家所在的"通信网络设备及器件"。
+- 左侧入场门槛在 2026-07-27 的数据层提交 `d762722` 里收紧（`stock_research/backtesting/engine.py:2005-2011`）：价格/价值线 0.88–1.03、质量≥80、扣非增速≥20%、市值≥150 亿。`docs/current-models-and-factors.md` 和 `STRATEGY.md` 里写的仍是 ≤1.08、70、10%、100 亿。
+- **影响**：所有历史收益都带有选择偏差。回测数字越好看，越不能说明前向表现会好。
+- **建议**：
+  - 不再在 2021–2026 上调参或加门槛。
+  - 任何新规则先写进预注册记录（假设、参数、通过门槛、已做过的试验次数），只用前向数据检验。
+  - 策略参数改动单独提交，并同步更新文档。
+- **验收**：有一份试验登记表，记录已做过的试验数量；每个新改动都能对应到一条登记。
+
+### P1-2 参数稍改结果就翻转
+
+训练期（2021–2023）结果见 `docs/right-selection-robustness-research-2026-08-11.md`：
+
+| 设定 | 累计收益 |
+|---|---:|
+| 倍数 2.1，Top10 | −1.985% |
+| 倍数 2.1，Top20 | −1.158% |
+| 倍数 2.1，Top30 | −2.881% |
+| 倍数 2.1，Top50 | +25.565% |
+| 倍数 3.0，Top50（基线） | +29.046% |
+| 倍数 3.0，Top70 | −12.943% |
+| `network_cc` 换成 `network_scc` | −6.383% |
+| 固定提高两个因子的权重 | −6.691% |
+
+- **影响**：稳健的优势应该随参数平滑变化。相邻参数的结果大幅反转，说明基线更像这条路径上的偶然结果。
+- **建议**：评估时报告参数邻域的整体分布，例如 Top40–60、不同起始日、不同的同日排序规则，不再只看单点。
+
+### P1-3 收益集中
+
+- 审计版基线已实现净盈利 1,060,044 元。迅捷兴 337,038 元、新易盛 254,504 元、富佳股份 174,973 元，三只合计占 72.3%。
+- 最好的 10 个交易日贡献了全期对数收益的 59%；去掉最好的 20 个交易日（占 1,343 个交易日的 1.5%），全期累计收益约为 0。
+- 稳健性文档的精确去赢家回放：剔除前三大赢家后累计 +34.671%（年化约 5.5%），最大回撤 −17.172%。
+- **建议**：把"去 Top1/Top3 后的收益"和"去掉最好 N 天后的收益"列为回测报告的常规项。
+
+### P1-4 显著性不足，回测报告缺风险调整和基准指标
+
+审计版基线：年化收益 15.17%，年化波动 15.26%，Sharpe 约 1.04（无风险利率取 0），最大回撤 −13.14%，Calmar 约 1.15。
+
+2022-01-04 至 2026-07-21 的日收益回归（同期策略累计 +92.02%）：
+
+| 基准 | 区间涨跌 | beta | 年化 alpha | alpha t 值 |
+|---|---:|---:|---:|---:|
+| 沪深300 | −3.63% | 0.308 | 15.84% | 2.37 |
+| 中证500 | +6.07% | 0.252 | 15.09% | 2.27 |
+| 中证1000 | −9.06% | 0.234 | 15.84% | 2.40 |
+
+- **影响**：
+  - t 约 2.4 是在大量试验之后挑出来的结果，按多重检验常用的 t>3 标准不显著。
+  - `stock_research/reporting` 和 `stock_research/backtesting` 里没有 Sharpe、beta、基准超额的计算，回测摘要上看不出这些问题。
+- **建议**：
+  - 回测摘要增加年化波动、Sharpe、Sortino、Calmar，以及相对沪深300、中证500、中证1000 的 beta 和超额。
+  - 记录试验次数，并给出 Deflated Sharpe 之类的多重检验修正。
+
+### P1-5 缺随机候选对照
+
+- **现状**：没有用随机候选跑同一个引擎的对照，代码和文档里都检索不到相关实现。
+- **建议**：每个交易日，从同样满足 `ADV20≥3000万` 的时点可交易股票里随机抽 50 只，替换右侧 Top50；左侧、引擎和成本全部不变。至少跑 100 次，看冻结基线落在分布的哪个分位。
+- **判定**：如果基线不在随机分布的前 5%，就认为六因子对组合收益没有可证明的贡献。
+
+### P1-6 弱截面信号配极低持仓广度
+
+- 10-13 选股审计：
+  - 2021 年 T+20 Rank IC 约 0.031。
+  - 2023 年 T+5 约 −0.005，2024 年 T+5 约 −0.019。
+  - 2026 年截至 7 月 21 日，Top10/20/50 的 T+20 收益约 −1.55%、−1.71%、−1.95%。
+- 引擎最多同时持 5 只股票。审计版基线 5.5 年一共只买过 83 只。
+- **影响**：弱因子要靠大量分散的独立下注才能兑现，信息比率大约等于 IC × √独立下注数。从 Top50 里每次挑 1 只、最多持 5 只，因子的统计优势基本被稀释掉了。
+- **建议**：在两条路线里选一条，见第 4 节：分散持仓的因子组合，或者对技术结构单独验证、不依赖因子排名的形态交易。
+
+### P1-7 右侧六因子实为低换手、低价风格
+
+- **抽样结果**：从 2021Q1 到 2026Q3，每季度取首个候选日，共 23 个截面，在全 A `daily_basic` 中排名。Top50 的换手率中位数平均在第 16 百分位，股价在第 31 百分位，总市值在第 59 百分位。
+- **因子重叠**：`network_cc` 与 `low_market_residual_volatility_20` 在训练期的截面相关是 0.9835（稳健性文档数据）。
+- **量纲问题**：
+  - `ma_convergence` 直接用均线和均量的绝对标准差，没有按价格或成交量水平归一（`stock_research/strategies/quantsplaybook_selection.py:1005-1040`）。
+  - 源研究是开源证券量化评论 91，本地副本在 `var/research/QuantsPlaybook-retry`。原文写明"因子构建时未剔除截面上不同个股价格数值的量纲差异"，以及"刻意保留了个股在数据上的量纲差异，导致低成交额个股更容易被选中"。
+- **影响**：六个因子的收益可能主要来自"低换手 + 低波动"这一已知风格，而不是六个独立信号。
+- **建议**：加两个对照，在同一引擎下比较：简单低换手排序 Top50、简单低残差波动排序 Top50。候选 manifest 里记录风格暴露。
+
+### P1-8 计划盈亏比与实际结果负相关
+
+- **机制**：
+  - `_planned_right_target`（`stock_research/backtesting/engine.py:768-804`）从显式目标、波段高点、近 120 日最高价等候选价里取最大值作为目标价。止损一紧，算出来的盈亏比就会极高。
+  - 买入门要求盈亏比≥2.5，支撑拉回要求≥3.0（`engine.py:1039-1057`）。
+- **结果**：审计版基线中带 R 值的卖出共 117 笔（分批卖出，不是独立样本）。计划 R 与实际 R 的 Spearman 相关为 −0.25。按计划 R 三等分：
+
+  | 分组 | 笔数 | 计划 R 中位 | 实际 R 均值 | 实际 R 中位 | 胜率 |
+  |---|---:|---:|---:|---:|---:|
+  | 低 | 39 | 3.24 | 1.45 | 0.34 | 56% |
+  | 中 | 39 | 4.85 | 1.50 | 1.11 | 67% |
+  | 高 | 39 | 13.08 | 0.84 | −0.49 | 36% |
+
+- **影响**：买入的核心依据"高盈亏比门"没有正向区分能力，计划 R 最高的一组反而最差。
+- **建议**：
+  - 目标价不再取多个候选价的最大值。
+  - 用历史同类结构的实测期望（胜率 × 平均盈利 − 败率 × 平均亏损）代替计划盈亏比。
+  - 在前向样本里持续跟踪计划 R 与实际 R 的相关性。
+
+### P1-9 收盘确认止损不是硬止损
+
+- **机制**：默认 `close_confirmed_execution=next_open`、`enable_intraday_right_protective_stop=False`。收盘跌破结构止损后，要到次日开盘才卖出。
+- **结果**：117 笔中 27 笔亏损超过 1R，11 笔超过 1.5R，最差 −3.54R。超过 1R 的 27 笔里，23 笔是"收盘条件次日退出"。
+- **影响**：仓位按"入场价 − 止损价"的 1R 风险计算，实际亏损的尾部明显更重。早期 close_proxy 口径下发现的同类问题，换成 next_open 后依然存在。
+- **建议**：对比测试盘中预埋止损（引擎已有这个开关）；或者按"止损距离 + 历史跳空分布"计算单笔风险后再定仓。
+- **验收**：回测报告列出亏损超过 1R 和 1.5R 的比例，定仓公式显式计入实际尾部。
+
+### P1-10 Formula33 择时缺乏证据，方向与用法相反
+
+**方法**：使用 `var/backtests/formula33_tushare_2021_to_20260721.csv` 的阶段数据，信号日次日收盘入场，计算指数之后 20 个交易日的收益，区间 2022-01 至 2026-07。
+
+| 条件 | 天数 | 沪深300 后 20 日 | 中证1000 后 20 日 |
+|---|---:|---:|---:|
+| active | 575 | −0.44% | −0.34% |
+| watch | 84 | +0.67% | +2.13% |
+| exited | 441 | +0.79% | +1.09% |
+| 连续下行≥3 日 | 269 | +0.60% | +0.70% |
+| 全样本 | 1,100 | +0.14% | +0.43% |
+
+- **影响**：系统在 active 时放大首仓，在连续下行时收紧仓位并禁止拉回试错，方向和上表正好相反。窗口有重叠，差异在统计上不显著，但也没有证据支持把它当仓位开关。`var/backtests` 下有 `ignore33_active` 相关产物，但没有对应的结论文档。
+- **建议**：完成择时检验之前，不再新增依赖 Formula33 的规则；补一次"关闭 Formula33 仓位调节"的对照回测，并写出结论。
+
+### P1-11 左侧价值线顺周期，白名单和门槛事后选定
+
+- **公式**：`BPS + 年报扣非EPS × (1 + 最新报告期扣非同比) × 10`，见 `stock_research/market/miniqmt_financial.py:291` 和 `apps/tushare_financial_cache.py:156`。公式对增速不设上限：景气高点时增速最大，价值线也最高。
+- **结果**：再叠加事后定的白名单（P1-1）和"增速≥20%"门槛，审计版基线的左侧只交易过中兴通讯、新易盛、中际旭创 3 只股票。但最初左侧来源贡献了约 46.2 个百分点（回测框架审计文档）。
+- **影响**：左侧本质上是对 2022–2025 光模块行情的成长动量押注，历史收益不能证明"价值"策略有效。
+- **建议**：
+  - 增速封顶，或改用多年平均盈利。
+  - 白名单按前向预注册重新确定。
+  - 文档中把左侧历史结果标注为事后选择。
+
+### P2-1 仓位按初始资金和成本计算，不复利
+
+- **机制**：
+  - `execute_buy` 的下单金额是"仓位比例 × initial_capital"（`stock_research/backtesting/engine.py:2516`）。
+  - 总敞口按各批次成本相对初始资金累加，上限 100%（`engine.py:1605`、`engine.py:3594`）。
+  - 摘要字段为 `gross_exposure_basis=initial_capital_cost_exposure`。
+- **结果**：
+  - 净值翻倍后，敞口上限只相当于约 50% 净值；回撤时，同样的仓位占净值的比例反而上升。
+  - 审计版基线平均股票仓位 30.4%（中位 23.4%），1,343 个交易日中有 256 天空仓。
+  - 回测里闲置现金的收益按 0 计。
+- **影响**：收益目标（如 5 年 3 倍）与仓位机制在结构上就不兼容，不同时期的风险也不可比。
+- **建议**：
+  - 改为按当前净值或风险预算定仓。
+  - 回测计入闲置现金收益（逆回购或货币基金）。
+  - 增加组合层面的波动控制或回撤控制。
+
+### P2-2 回测引擎过度复杂，实验通道混在生产引擎里
+
+- `stock_research/backtesting/engine.py` 共 6,536 行。`run_portfolio_backtest` 一个函数就有 5,461 行、77 个参数，内部约 270 处与数字常量比较。
+- FH 因子周期、低广度反转、紧结构、分散因子 sleeve、PE/PB 左侧等研究通道都在生产引擎里，靠开关控制。之前的"增强字段漏入门控"问题，就是候选画像字段改变了 factor_only 的行为，正是这种结构造成的。
+- **建议**：拆成信号、组合规则、撮合记账三层；已否决的通道移到研究目录或删除；生产引擎只保留冻结口径。
+
+### P2-3 默认参数跑不出基线，基线配置没进 git
+
+- **默认值**：
+  - `--max-left-positions` 默认 1（`stock_research/backtesting/cli.py:45`）。
+  - `--right-entry-size-multiplier` 默认 1.0（`cli.py:73-75`）。
+  - 滑点默认 0.05%（`stock_research/backtesting/defaults.py:16`）。
+- **审计版基线**：左侧 2 只、右侧倍数 3.0、滑点 0.10%。这份配置在 `var/backtests/execution_timing_audit_20260921/baseline_config.json`，没有进版本控制。
+- **建议**：生产和基线的策略配置做成一份进 git 的配置文件，日报、回测和纸面交易共用，并让默认值等于基线。
+
+### P2-4 文档口径互相矛盾
+
+- **基线数字**：同时存在多个"当前基线"：
+  - `docs/current-models-and-factors.md`：+90.015%。
+  - `docs/right-selection-robustness-research-2026-08-11.md`：+117.381%。
+  - `docs/current-selection-entry-exit-strategy.md`：+159.502%。
+  - 审计版修复后：+118.712%。
+- **持仓上限**：
+  - `README.md`：左侧最多 1 只、主交易名额 3 只。
+  - `STRATEGY.md`：左侧默认 2 只、主交易名额 5 只。
+  - `docs/current-selection-entry-exit-strategy.md`：生产默认左侧 1 只。
+- **右侧来源和滑点**：`docs/current-selection-entry-exit-strategy.md` 仍写右侧候选来自 `factor_quant`、滑点 0.05%；`STRATEGY.md` 已说明旧 `factor_quant` 不参与混合候选流。
+- **左侧门槛**：文档与代码不一致，见 P1-1。
+- **数据库**：`docs/knowledge/project-architecture.md` 写的是 DuckDB 和 `var/data/my_trade.duckdb`，实际是 SQLite 的 `var/data/my_trade.sqlite3`。
+- **断链**：`docs/README.md` 和 `docs/current-models-and-factors.md` 引用的 4 篇文档不存在：
+  - `quantsplaybook-diversified-combinations-backtest-2026-07-31.md`
+  - `quantsplaybook-hybrid-low-corr-value-backtest-2026-07-31.md`
+  - `strategy-aligned-selection-backtest-2026-08-02.md`
+  - `three-lane-selection-backtest-2026-08-02.md`
+- **建议**：只保留一个"当前基线"章节，由配置文件和最新冻结回放生成，其他数字一律标为历史。
+
+### P2-5 测试依赖未声明，研究入口引用不存在的模块
+
+- 用 README 指定的解释器 `D:\ActionsRunner\my-trade\python\python.exe` 运行 `pytest -q`，结果是 855 通过、5 失败、1 跳过。5 个失败都在 `tests/unit/test_portfolio_frozen_replay.py`：冻结回放需要 scipy 的包元数据，而 `pyproject.toml` 没有声明 scipy。
+- `apps/three_lane_candidates.py:18` 导入的 `stock_research.strategies.three_lane_selection` 不存在，这个入口没法运行。
+- **建议**：在 `pyproject.toml` 声明冻结回放需要的依赖，或去掉对 scipy 的硬依赖；删除或修复失效入口。
+
+### P3-1 财务数据只覆盖当前上市股票
+
+- `apps/tushare_financial_history_sync.py:61` 和 `apps/tushare_bulk_sync.py:49` 只同步 `list_status == "L"` 的股票。
+- **抽样核对**：从 2021 年后退市的 212 只股票中随机抽 40 只，`income`、`balancesheet`、`fina_indicator` 都是 0/40 有记录；当前上市的股票是 40/40。行情数据（`daily_kline`、`daily_basic`）两类都是 40/40。
+- **影响**：基本面、PE/PB、GP/A 等研究存在幸存者偏差。左侧要求 150 亿以上市值，实际影响有限；纯价格的右侧因子不受影响。
+- **建议**：财务同步覆盖 `L/D/P` 全部上市状态。
+
+### P3-2 北交所 920 代码涨跌停回退比例错误
+
+- `stock_research/strategies/ohlc_execution.py:33-38` 按代码前缀推断涨跌停比例：`4`、`8` 开头按 30%，北交所新代码 `920xxx` 会落到 10%。
+- 研究库 `stk_limit` 已有 329 只 920 代码的精确涨跌停价，所以对现有研究回测影响很小。但缺少精确价时（比如换数据源、遇到新股），会误判封板。
+- **建议**：按交易所（`bj.` 前缀）判断北交所。
+
+### P3-3 已披露的数据限制
+
+以下限制已经在 `docs/backtest-framework-audit-2026-09-21.md` 和稳健性文档中披露，但还没补齐：
+
+- 财务缓存没有完整的修订版本，左侧不能宣称严格时点。
+- 精确涨跌停价覆盖约 83%，其余按板块规则估算。
+- 冻结包里的公司行动全部缺派息日。
+- 2019-05-09 的 `adj_factor` 整日缺失。
+- 研究库 `index_daily` 从 2022-01-04 才开始，2021 年没法做基准对比。
+
+## 4. 建议执行顺序
+
+1. **恢复前向闭环（P0）**：
+   - 修好计划任务。
+   - 统一报告期规则，补齐 2026-06-30 期财务缓存。
+   - 恢复研究库同步。
+   - 每天落盘冻结模型的候选和纸面订单。
+2. **补对照和指标（P1-4、P1-5、P1-7）**：
+   - 随机候选安慰剂测试。
+   - 低换手、低波动的简单排序对照。
+   - 回测摘要增加 Sharpe、beta、基准超额，以及去赢家、去最好 N 天后的结果。
+3. **选定路线（P1-6）**，二选一：
+   - 因子路线：30–50 只分散持仓，按周或按月调仓，加行业和风格约束，相对基准评估。
+   - 形态路线：对每种买点结构在全部流动性足够的股票上做事件研究，用实测期望代替计划盈亏比；因子排名只有在能提高条件期望时才保留。
+4. **修仓位和止损（P1-8、P1-9、P2-1）**：
+   - 按净值或风险预算定仓。
+   - 改用硬止损，或按实际亏损尾部定仓。
+   - 回测计入现金收益。
+5. **治理（P1-1、P2-2 至 P2-5）**：
+   - 建立试验登记表。
+   - 一份进 git 的策略配置。
+   - 文档只保留一个当前基线。
+   - 实验通道移出生产引擎。
+6. **停止在 2021–2026 上继续调参**：新规则只用 2026-08-11 之后的前向数据检验。
+
+## 5. 复算方法
+
+- **风险指标**：
+  - 读取 `repaired_verified/portfolio_2021-01-01_2026-07-21_equity.csv`，只保留 `is_trading_day=True` 的 1,343 行，用 `equity` 计算日收益。
+  - 年化按 252 个交易日计算；Sharpe 的无风险利率取 0。
+- **beta 与 alpha**：
+  - 从研究库 `raw_tushare_dataset_rows`（`dataset='index_daily'`）读取 000300.SH、000905.SH、000852.SH 的收盘价，与策略日收益按日期对齐。
+  - 做 OLS 回归：策略日收益 = a + b × 指数日收益。
+  - 年化 alpha = a × 252；t 值按普通 OLS 残差标准误计算，未做自相关修正。
+- **收益集中**：
+  - 已实现盈亏：取 `portfolio_2021-01-01_2026-07-21_trades.csv` 中 `trade_side=卖出` 的 `profit_loss_amount`，按股票汇总。
+  - 最好 N 天占比：日对数收益最大的 N 天之和，除以全期对数收益之和。
+- **风格暴露**：
+  - 候选目录：`var/backtests/one_network_price_only_low_residual_volatility_liquidity_30m_experiment/candidates/playbook_low_corr_network_cap1_price_only_residual_volatility_liquidity_30m/`。
+  - 每季度取首个候选日，按 `playbook_factor_rank` 取前 50。
+  - 当天全部 `daily_basic` 股票分别按 `total_mv`、`close`、`turnover_rate` 计算百分位，再取 Top50 的中位数。
+- **计划 R 与实际 R**：取 trades 文件中同时有 `planned_reward_r_multiple` 和 `realized_r_multiple` 的卖出行（117 行），计算秩相关，并按计划 R 三等分统计。
+- **Formula33**：
+  - 阶段文件与指数按日期对齐。
+  - 后 20 日收益 = 第 t+21 日收盘 / 第 t+1 日收盘 − 1。
+- **计划任务**：
+  - 用 `Get-ScheduledTask -TaskName 'StockSelection-Daily' | Get-ScheduledTaskInfo` 查看 LastTaskResult。
+  - 在 cmd 中分别用单引号和双引号路径执行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File <路径>`，比较退出码。
+- **研究库时效**：
+  - `select max(trade_date) from raw_tushare_dataset_rows where dataset='daily_kline'`
+  - `select dataset, count(*), max(captured_at) from raw_tushare_dataset_row_versions group by dataset`
+- **退市股财务覆盖**：
+  - 从 `dataset='basic'` 中取 `list_status='D'` 且 `delist_date>=20210101` 的股票，随机抽 40 只，查询 `income`、`balancesheet`、`fina_indicator` 是否有记录。
+  - 当前上市股票同样抽 40 只作为对照。
+
+## 6. 修复进度（2026-10-14）
+
+本轮优先修复运行阻断和确定性的工程缺陷，不重新选择历史策略参数，不补写伪前向数据。下表区分代码验证和真实运行验收。
+
+| 编号 | 本轮修改 | 状态与剩余验收 |
+|---|---|---|
+| P0-1 | 新建 `scripts/setup_scheduled_task.ps1`，batch 仅负责启动和透传退出码；action 使用双引号路径、原位注册、安装失败写日志；日报脚本启动异常返回非零并记录日志 | 隔离 PowerShell 行为测试已验证含空格/单引号路径、启动退出码及注册失败。未修改 Windows 中的现有任务；仍须执行安装器并验证真实 `LastTaskResult=0` 和完整日报日志 |
+| P0-3 | 移除 PowerShell 月份规则；财务更新/筛选绑定 Formula33 观察日及统一报告期，拒绝未来覆盖值；生产默认补抓全部缺失股票，保留95%门禁；截面改为精确日期读取并核验元数据 | 日期边界、批量超过100只、缓存复用、失败重试、日期错配回归通过。没有实际联网补齐2026-06-30缓存，生产换期成功仍待数据源和全量覆盖验收 |
+| P2-5（依赖部分） | 冻结回放不再强制查询未使用的 scipy 包；未安装时记为 `null`，仍严格比较冻结时与回放时的依赖画像 | 已增加缺少 scipy 时的完整离线回放验证；缺失 `three_lane_selection` 的研究入口仍待单独处理 |
+| P3-2 | 涨跌停估算优先识别 `bj.`/`.BJ` 交易所及 `920` 新代码，北交所 ST 保持30%；精确涨跌停价仍优先 | 开盘、整日封板、限价、止损/突破单及精确限价覆盖测试通过；未重算历史收益 |
+
+### 本轮验证范围
+
+- 最终生产解释器 `D:\ActionsRunner\my-trade\python\python.exe -m pytest -q --basetemp=var/tmp/pytest-plan-production`：**920通过、1跳过**。开发解释器在北交所/可选依赖改动前的全量验证为900通过；最终交付以生产解释器结果为准。
+- `stock_research.regression.output_baseline verify tests/regression/legacy-output-v1.json`：**6 baselines verified**；`git diff --check` 通过。
+- 实际执行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_analysis.ps1 --dry-run --no-push`：退出码0，生成 transcript，列出七步入口；仅验证启动，不访问全市场数据或发送日报。
+- 财务和流水线定向测试覆盖报告期法定边界、未来期拒绝、观察日传递、旧/未来截面拒绝、换期补抓与网络失败断点。
+- 计划任务行为测试使用模拟 ScheduledTask cmdlets 和真实 `powershell.exe` 执行隔离脚本，不运行生产推送。本机 ScheduledTask action 构造器在测试环境返回 `Access is denied`，因此不把模拟注册视为实机验收。
+- 财务修订版本和历史行业快照限制仍在，本轮没有提高历史结果的 PIT 声明级别。
+- 未来函数、复权、财报及板块时点按现有边界检查；本轮不调整信号、费用、滑点、T+1、整手或持仓参数。没有调用 MiniQMT 下单接口。
+
+### 后续优先顺序
+
+1. 完成 P0-1/P0-3 的真实本地运行验收；联网失败保留有效缓存和诊断，不降低门禁。
+2. 按 P0-2/P0-4 恢复研究库增量同步、冻结模型逐日候选和纸面订单；当前日报模型不一致仍未解决，不能宣称已恢复前向闭环。
+3. 再处理对照实验、指标和其余治理项；策略参数变化必须登记，不能继续利用2021–2026反复调参。

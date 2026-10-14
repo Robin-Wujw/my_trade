@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from stock_research.core.as_of import audit_source, write_metadata
+from stock_research.core.financial_period import resolve_report_period
 from stock_research.core.paths import PATHS
 from stock_research.indicators.waves import infer_downtrend_recovery, level_price
 from stock_research.indicators.technical_quant import technical_snapshot
@@ -32,7 +33,8 @@ UNIVERSE_PATH = str(PATHS.cache / "stock_universe.csv")
 VALUE_MIN_MARKET_CAP = 100.0
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="生成每日基本价值线和正常基本面两部分选股")
-    parser.add_argument("--report-period", default="", help="财报期YYYY-MM-DD；默认使用缓存中的最新报告期")
+    parser.add_argument("--report-period", default="", help="财报期YYYY-MM-DD；默认按观察日和法定披露截止日选择")
+    parser.add_argument("--snapshot-path", default="", help="显式截面路径；仍须匹配观察日和报告期")
     parser.add_argument(
         "--observation-date",
         required=True,
@@ -42,17 +44,6 @@ def parse_args(argv=None):
     parser.add_argument("--normal-top", type=int, default=30, help="正常基本面部分最多股票数")
     parser.add_argument("--output", default="")
     return parser.parse_args(argv)
-
-
-def latest_report_period():
-    suffixes = []
-    for path in glob.glob(os.path.join(VALUE_CACHE_DIR, "*_????????.json")):
-        suffix = os.path.splitext(path)[0].rsplit("_", 1)[-1]
-        if suffix.isdigit() and len(suffix) == 8:
-            suffixes.append(suffix)
-    if not suffixes:
-        raise SystemExit("没有基本价值线财务缓存")
-    return pd.Timestamp(max(suffixes)).strftime("%Y-%m-%d")
 
 
 def code_from_symbol(symbol):
@@ -148,13 +139,14 @@ def load_names():
         return {}
 
 
-def latest_fundamental_snapshot(report_period):
+def load_fundamental_snapshot(report_period, observation_date, snapshot_path=""):
     suffix = report_period.replace("-", "")
-    full_paths = glob.glob(
-        os.path.join(str(PATHS.cache / "fundamental_snapshots"), f"fundamental_snapshot_{suffix}_*.csv")
+    date_suffix = observation_date.replace("-", "")
+    path = snapshot_path or str(
+        PATHS.cache / "fundamental_snapshots"
+        / f"fundamental_snapshot_{suffix}_{date_suffix}.csv"
     )
-    if full_paths:
-        path = max(full_paths, key=os.path.getmtime)
+    if os.path.isfile(path):
         return pd.read_csv(path, dtype={"code": str}, low_memory=False), path
     return pd.DataFrame(), ""
 
@@ -426,13 +418,18 @@ def main(argv=None):
     if pd.isna(observation_date):
         raise SystemExit(f"无效 observation_date: {args.observation_date!r}")
     observation_date_text = observation_date.strftime("%Y-%m-%d")
-    report_period = args.report_period or latest_report_period()
+    report_period = resolve_report_period(observation_date_text, args.report_period)
     names = load_names()
     mainline_boards = load_mainline_boards()
-    snapshot, snapshot_path = latest_fundamental_snapshot(report_period)
+    snapshot, snapshot_path = load_fundamental_snapshot(
+        report_period, observation_date_text, args.snapshot_path,
+    )
     if snapshot.empty:
         raise SystemExit(f"缺少财报期 {report_period} 的动态基本面截面")
     source_status, source_issues, source_metadata = audit_source(snapshot_path)
+    if (source_metadata.get("as_of_date") != observation_date_text
+            or source_metadata.get("report_period") != report_period):
+        raise SystemExit("动态基本面截面的观察日或报告期与本轮不一致")
     if source_status == "unsafe":
         raise SystemExit(f"动态全市场截面覆盖率不足或时点不安全: {source_issues or source_metadata}")
     pool_metadata = {

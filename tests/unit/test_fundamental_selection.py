@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -12,6 +13,45 @@ from stock_research.strategies.fundamental_selection import (
     value_method_reason,
 )
 from stock_research.pipelines.factor_selection import classify_method
+
+
+def test_snapshot_selection_requires_exact_observation_date(monkeypatch, tmp_path):
+    monkeypatch.setattr(selection_pipeline, "PATHS", SimpleNamespace(cache=tmp_path))
+    directory = tmp_path / "fundamental_snapshots"
+    directory.mkdir()
+    current = directory / "fundamental_snapshot_20260630_20261014.csv"
+    current.write_text("code\nsh.600000\n", encoding="utf-8")
+    # A later-written future snapshot must not replace the requested date.
+    future = directory / "fundamental_snapshot_20260630_20261015.csv"
+    future.write_text("code\nsh.600001\n", encoding="utf-8")
+    snapshot, path = selection_pipeline.load_fundamental_snapshot("2026-06-30", "2026-10-14")
+    assert path == str(current)
+    assert snapshot["code"].tolist() == ["sh.600000"]
+    snapshot, path = selection_pipeline.load_fundamental_snapshot("2026-06-30", "2026-10-13")
+    assert snapshot.empty
+    assert path == ""
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"as_of_date": "2026-10-15", "report_period": "2026-06-30"},
+        {"as_of_date": "2026-10-14", "report_period": "2026-03-31"},
+        {},
+    ],
+)
+def test_selection_rejects_mismatched_snapshot_metadata(monkeypatch, tmp_path, metadata):
+    from stock_research.core.as_of import write_metadata
+
+    snapshot_path = str(tmp_path / "custom.csv")
+    pd.DataFrame({"code": ["sh.600000"]}).to_csv(snapshot_path, index=False)
+    write_metadata(snapshot_path, {"point_in_time_status": "safe", **metadata})
+    monkeypatch.setattr(selection_pipeline, "load_names", lambda: {})
+    monkeypatch.setattr(selection_pipeline, "load_mainline_boards", lambda: [])
+    with pytest.raises(SystemExit, match="观察日或报告期"):
+        selection_pipeline.main([
+            "--observation-date", "2026-10-14", "--snapshot-path", snapshot_path,
+        ])
 
 
 def test_fundamental_explanations_keep_current_wording():

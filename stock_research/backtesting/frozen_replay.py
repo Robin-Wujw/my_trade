@@ -83,8 +83,15 @@ def _readonly_snapshot(path):
 
 
 def _dependency_versions():
-    return {"python": platform.python_version(), **{
-        name: importlib.metadata.version(name) for name in ("pandas", "numpy", "scipy")}}
+    versions = {"python": platform.python_version(), **{
+        name: importlib.metadata.version(name) for name in ("pandas", "numpy")}}
+    # The portfolio engine does not require scipy. Still fingerprint its presence
+    # for optional research tooling and reject a changed environment on replay.
+    try:
+        versions["scipy"] = importlib.metadata.version("scipy")
+    except importlib.metadata.PackageNotFoundError:
+        versions["scipy"] = None
+    return versions
 
 
 @contextmanager

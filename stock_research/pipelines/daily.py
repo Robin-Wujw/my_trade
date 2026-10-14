@@ -8,6 +8,7 @@ from typing import Callable, Mapping
 
 from stock_research.core.config import PipelineConfig
 from stock_research.core.completion_manifest import CompletionManifest
+from stock_research.core.financial_period import resolve_report_period
 from stock_research.pipelines import (
     daily_report,
     factor_selection,
@@ -125,9 +126,10 @@ def _formula_csv_from_completion_manifest():
 class _ArtifactTrackingSteps(dict):
     """Default production steps plus per-run output capture hooks."""
 
-    def __init__(self, *args, report_args, **kwargs):
+    def __init__(self, *args, report_args, report_period="", **kwargs):
         super().__init__(*args, **kwargs)
         self.report_args = list(report_args)
+        self.report_period = report_period
         self.artifacts = {}
         self._snapshots = {}
 
@@ -206,11 +208,23 @@ class _ArtifactTrackingSteps(dict):
                 "daily_fundamental_selection_",
             )
 
-    def fundamental_selection_args(self, selection_args):
+    def financial_context(self):
         observation_date = self.artifacts.get("observation_date")
         if not observation_date:
-            raise RuntimeError("基本面选股缺少 Formula33 本轮 observation_date")
-        return list(selection_args) + ["--observation-date", observation_date]
+            raise RuntimeError("基本面步骤缺少 Formula33 本轮 observation_date")
+        return observation_date, resolve_report_period(observation_date, self.report_period)
+
+    def fundamental_update_args(self, update_args):
+        observation_date, report_period = self.financial_context()
+        return list(update_args) + [
+            "--as-of-date", observation_date, "--report-period", report_period,
+        ]
+
+    def fundamental_selection_args(self, selection_args):
+        observation_date, report_period = self.financial_context()
+        return list(selection_args) + [
+            "--report-period", report_period, "--observation-date", observation_date,
+        ]
 
     def daily_report_args(self):
         required = (
@@ -259,6 +273,11 @@ def run_daily_pipeline(
     failed = []
     skipped = []
     for name in STEP_NAMES:
+        if name == "fundamental_update" and statuses.get("formula33") != 0:
+            statuses[name] = None
+            skipped.append(name)
+            print(f"[daily_pipeline][{name}] skip dependency=formula33")
+            continue
         if name == "fundamental_selection" and any(
             statuses.get(required) != 0
             for required in ("formula33", "fundamental_update")
@@ -331,9 +350,6 @@ def build_default_steps(
         "--require-target-financial-coverage",
     ]
     selection_args = ["--value-ratio", "1.08", "--normal-top", "30"]
-    if report_period:
-        update_args.extend(["--report-period", report_period])
-        selection_args.extend(["--report-period", report_period])
     tracked_steps = None
     step_functions = {
         "formula33": lambda: formula33.main([
@@ -358,7 +374,9 @@ def build_default_steps(
             "--retries", str(config.sector_retries), "--retry-delay", "5",
         ]),
         "factor_selection": lambda: factor_selection.main(factor_args),
-        "fundamental_update": lambda: fundamental_update.main(update_args),
+        "fundamental_update": lambda: fundamental_update.main(
+            tracked_steps.fundamental_update_args(update_args)
+        ),
         "fundamental_selection": lambda: fundamental_selection.main(
             tracked_steps.fundamental_selection_args(selection_args)
         ),
@@ -367,5 +385,6 @@ def build_default_steps(
     tracked_steps = _ArtifactTrackingSteps(
         step_functions,
         report_args=report_args,
+        report_period=report_period,
     )
     return tracked_steps
