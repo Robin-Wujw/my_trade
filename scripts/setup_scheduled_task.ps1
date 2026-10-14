@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
-    [string]$ProjectRoot = (Split-Path -Parent $PSScriptRoot),
-    [string]$TaskName = 'StockSelection-Daily'
+    [string]$ProjectRoot = '',
+    [string]$TaskName = 'StockSelection-Daily',
+    [switch]$NoPush
 )
 
 $ErrorActionPreference = 'Stop'
@@ -9,6 +10,11 @@ $ExitCode = 1
 $TranscriptStarted = $false
 
 try {
+    # Windows PowerShell 5.1 may evaluate parameter defaults before populating
+    # PSScriptRoot. Resolve the default inside the script body instead.
+    if (-not $ProjectRoot) {
+        $ProjectRoot = Split-Path -Parent $PSScriptRoot
+    }
     $ProjectRoot = (Get-Item -LiteralPath $ProjectRoot).FullName
     $LogDir = Join-Path $ProjectRoot 'var\logs'
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -25,6 +31,9 @@ try {
     $PowerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     # Task Scheduler passes a native command line: -File requires double quotes.
     $ActionArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $ScriptPath
+    if ($NoPush) {
+        $ActionArguments += ' --no-push'
+    }
     $Action = New-ScheduledTaskAction -Execute $PowerShellPath -Argument $ActionArguments -WorkingDirectory $ProjectRoot
     $Trigger = New-ScheduledTaskTrigger -Daily -At '20:30'
     $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RunOnlyIfNetworkAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 12)

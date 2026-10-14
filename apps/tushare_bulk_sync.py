@@ -8,6 +8,7 @@ from pathlib import Path
 
 from stock_research.api import tushare as tushare_api
 from stock_research.core.paths import PATHS
+from stock_research.data.financial_universe import financial_stock_codes
 from stock_research.storage import Database, TushareRepository
 
 
@@ -41,14 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _load_stock_codes(repository: TushareRepository) -> list[str]:
-    frame = repository.load_dataset("stock_basic")
-    if frame.empty:
-        raise RuntimeError("stock_basic is not cached; run `python -m apps.data_sync stock_basic` first")
-    if "ts_code" not in frame.columns:
-        raise RuntimeError("cached stock_basic has no ts_code column")
-    if "list_status" in frame.columns:
-        frame = frame[frame["list_status"].fillna("L").astype(str).eq("L")]
-    return sorted(frame["ts_code"].dropna().astype(str).unique())
+    return financial_stock_codes(repository)
 
 
 def _state_path(period: str, state_file: str) -> Path:

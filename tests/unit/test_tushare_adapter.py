@@ -2,8 +2,32 @@ import ssl
 from types import SimpleNamespace
 
 import pytest
+import requests
 
 from stock_research.api import tushare
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+def test_permanent_http_error_is_not_retried(monkeypatch, status):
+    calls = []
+    response = requests.Response()
+    response.status_code = status
+    monkeypatch.setattr(tushare, "get_token", lambda: "secret-token")
+    monkeypatch.setattr(tushare._RATE_LIMITER, "wait", lambda: None)
+    monkeypatch.setattr(
+        tushare._HTTP_SESSION, "post",
+        lambda *_args, **_kwargs: calls.append(1) or response,
+    )
+    with pytest.raises(requests.HTTPError):
+        tushare.query("daily", retries=4, retry_delay=0)
+    assert calls == [1]
+
+
+@pytest.mark.parametrize("status", [408, 425, 429, 500, 502, 503, 504])
+def test_transient_http_errors_keep_retry_policy(status):
+    response = requests.Response()
+    response.status_code = status
+    assert tushare._retryable(requests.HTTPError(response=response))
 
 
 def test_query_builds_standard_frame_without_exposing_token_in_result(monkeypatch):

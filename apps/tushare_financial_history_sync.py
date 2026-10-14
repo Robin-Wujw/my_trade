@@ -9,6 +9,7 @@ import pandas as pd
 
 from stock_research.api import tushare as tushare_api
 from stock_research.core.paths import PATHS
+from stock_research.data.financial_universe import financial_stock_codes
 from stock_research.storage import Database, TushareRepository
 
 
@@ -54,15 +55,7 @@ def _save_state(path: Path, state: dict) -> None:
 
 
 def _load_stock_codes(repository: TushareRepository) -> list[str]:
-    frame = repository.load_dataset("stock_basic")
-    if frame.empty:
-        raise RuntimeError("stock_basic is not cached")
-    work = frame.copy()
-    if "list_status" in work:
-        work = work[work["list_status"].fillna("L").astype(str).eq("L")]
-    if "ts_code" not in work:
-        raise RuntimeError("cached stock_basic has no ts_code column")
-    return sorted(work["ts_code"].dropna().astype(str).unique())
+    return financial_stock_codes(repository)
 
 
 def _filter_periods(frame: pd.DataFrame, start_period: str, end_period: str) -> pd.DataFrame:

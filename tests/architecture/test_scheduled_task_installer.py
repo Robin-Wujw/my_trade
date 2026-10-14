@@ -32,7 +32,7 @@ def checkout(tmp_path):
     return root
 
 
-def run_installer(checkout, *, fail_registration=False):
+def run_installer(checkout, *, fail_registration=False, no_push=False):
     state_path = checkout / "registered-task.json"
     state_path.write_text('{"previous_task": true}', encoding="utf-8")
     harness = checkout / "mock_task_registration.ps1"
@@ -80,7 +80,11 @@ function Unregister-ScheduledTask {
     Set-Content -LiteralPath $env:DELETE_MARKER -Value $TaskName
     throw 'Deleting a task before replacement is forbidden'
 }
-& $env:SETUP_SCRIPT
+if ($env:INSTALL_NO_PUSH -eq '1') {
+    & $env:SETUP_SCRIPT -NoPush
+} else {
+    & $env:SETUP_SCRIPT
+}
 exit $LASTEXITCODE
 """,
         encoding="utf-8",
@@ -90,6 +94,7 @@ exit $LASTEXITCODE
         "TASK_STATE": str(state_path),
         "DELETE_MARKER": str(checkout / "deleted-task.txt"),
         "FAIL_REGISTRATION": "1" if fail_registration else "0",
+        "INSTALL_NO_PUSH": "1" if no_push else "0",
     }
     result = subprocess.run(
         [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
@@ -136,6 +141,12 @@ def test_registration_failure_preserves_previous_task_and_writes_diagnostics(che
     logs = list((checkout / "var" / "logs").glob("scheduled_task_setup_*.log"))
     assert len(logs) == 1
     assert "simulated-registration-denied" in logs[0].read_text(encoding="utf-8-sig")
+
+
+def test_no_push_installer_persists_local_only_pipeline_argument(checkout):
+    result, task = run_installer(checkout, no_push=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert task["arguments"].endswith('" --no-push')
 
 
 def test_missing_pipeline_script_fails_before_registering(checkout):

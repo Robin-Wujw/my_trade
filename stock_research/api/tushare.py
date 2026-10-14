@@ -87,6 +87,11 @@ def get_token() -> str:
 
 
 def _retryable(exc: Exception) -> bool:
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        status = exc.response.status_code
+        # Authentication and malformed requests cannot recover with backoff.
+        # Preserve retries for throttling, request timeouts and server failures.
+        return status in {408, 425, 429} or 500 <= status < 600
     if isinstance(exc, TushareAPIError):
         message = str(exc).lower()
         return any(
