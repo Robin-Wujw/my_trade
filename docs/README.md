@@ -10,6 +10,8 @@
 - [截至7月21日的历史闭环](historical-closure-2026-07-21.md)：离线冻结、成交回放、独立验账、候选标签和重复运行收据。
 - [同股票池选股对照](research-controls.md)：固定种子、真实回放与验账收据、2021试跑及等价性能优化。
 - [试验预注册与前向治理](research-registry.md)：已观察历史、试验计数限制、冻结假设和前向验收。
+- [现有数据能力与缺口](data-sufficiency-2026-10-14.md)：无需追赶新行情即可完成的工程和历史诊断，以及真实前向、财务/行业时点与现金报价缺口。
+- [固定硬止损对照](hard-stop-comparison-2026-10-14.md)：两组全期真实回放与独立验账，不根据历史收益升级冻结策略。
 
 - [当前模型与因子清单](current-models-and-factors.md)：现行左右双通道模型、13 个已实现源因子、组合与研究模型、时点/复权边界和当前回测基线的权威索引。
 - [当前选股策略（完全版）与买卖策略（详细版）](current-selection-entry-exit-strategy.md)：最终候选池、右侧多因子模型、语义高盈亏比买入门、仓位、止损、止盈和白名单符合度审查。
@@ -33,6 +35,8 @@
 ## 本机与运维
 
 - [量化复盘问题与修复进度](plan/quant-review-issues-2026-10-14.md)：问题证据、建议顺序及按问题编号记录的实现和验收状态。
+- [完整计划执行台账](plan/full-plan-execution-2026-10-14.md)：原计划全部目标、逐项验收证据和真实未完成项。
+- [生产前向接入与实机阻断](plan/p0-forward-closure-2026-10-14.md)：每日冻结候选、Formula33、真实左侧来源、纸面意图与401/权限阻断收据。
 - [分支审查与兼容合并](plan/branch-review-2026-10-14.md)：旧分支取舍、遗漏研究模块恢复、时点缺陷修复与历史文档边界。
 - [Windows 研究工作台](dashboard-windows.md)：本地 Streamlit 回测浏览、任务启动和安装说明。
 - [本机环境与常见坑处理手册](knowledge/local-environment-runbook.md)：PowerShell、`rg` 权限、AkShare SSL/限流、MiniQMT 只读边界、`var/` 产物和提交前检查。
@@ -42,7 +46,7 @@
 
 ## 知识库
 
-- [项目架构](knowledge/project-architecture.md)：目录、模块职责、七步调用链和运行数据边界。
+- [项目架构](knowledge/project-architecture.md)：目录、模块职责、八步调用链和运行数据边界。
 - [SQLite 实际结构](knowledge/database-schema.md)：当前迁移真正创建的表和使用限制。
 - [观察日与时点规则](knowledge/point-in-time-data.md)：行情截止、观察日交易资格、财报和板块时点边界。
 - [结果输出阅读指南](knowledge/output-guide.md)：Formula33、每日选股和板块结果如何阅读。
