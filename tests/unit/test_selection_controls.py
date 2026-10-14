@@ -213,3 +213,32 @@ def test_invalid_replay_evidence_is_rejected(inputs, failure):
     write_json(root / "receipts.json", registry)
     with pytest.raises(ValueError):
         evaluate(root / "generated/experiment.json", root / "receipts.json", root / "comparison.json")
+
+
+@pytest.mark.parametrize("substitution", ["common_inputs", "source", "engine"])
+def test_uniform_replay_substitution_cannot_override_frozen_experiment(inputs, substitution):
+    root, _ = inputs
+    experiment = create(root)
+    experiment["common_inputs_sha256"] = "b" * 64
+    experiment["code_sha256"] = {"stock_research/backtesting/engine.py": "e" * 64}
+    write_json(root / "generated/experiment.json", experiment)
+    registry = receipts(root, experiment)
+    for receipt in registry["replays"]:
+        path = root / receipt["summary_path"]
+        summary = json.loads(path.read_text())
+        summary["frozen_run"]["code_sha256"] = experiment["code_sha256"]
+        if substitution == "common_inputs":
+            for key in receipt["shared_input_sha256"]:
+                if key != "left_candidates":
+                    receipt["shared_input_sha256"][key] = "c" * 64
+            summary["selection_control"]["shared_input_sha256"] = receipt["shared_input_sha256"]
+        elif substitution == "source":
+            summary["frozen_run"]["code_sha256"] = {"stock_research/backtesting/engine.py": "f" * 64}
+            summary["frozen_run"]["engine_sha256"] = "f" * 64
+        else:
+            summary["frozen_run"]["engine_sha256"] = "f" * 64
+        write_json(path, summary)
+        receipt["summary_sha256"] = file_sha256(path)
+    write_json(root / "receipts.json", registry)
+    with pytest.raises(ValueError, match="frozen experiment"):
+        evaluate(root / "generated/experiment.json", root / "receipts.json", root / "comparison.json")

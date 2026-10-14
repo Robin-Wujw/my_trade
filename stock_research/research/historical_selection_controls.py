@@ -6,6 +6,8 @@ untrusted uploads. Candidate generation and actual completed runs stay separate.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import gc
 import hashlib
@@ -75,6 +77,21 @@ def _window(start, end):
     if pd.isna(start) or pd.isna(end) or start > end or end > CUTOFF:
         raise ValueError("Historical controls require a valid interval ending on/before 2026-07-21")
     return start, end
+
+
+def _coalesce_style_observations(frame):
+    """Combine wider-field copies only when every observed style value agrees."""
+    keys = ["date", "code"]
+    if not frame.duplicated(keys).any():
+        return frame
+    values = [column for column in frame if column not in keys]
+    grouped = frame.groupby(keys, sort=True, dropna=False)
+    conflicts = grouped[values].nunique(dropna=True).gt(1).any(axis=1)
+    if conflicts.any():
+        examples = list(conflicts.loc[conflicts].index[:5])
+        raise ValueError(f"Conflicting daily_basic style observations: {examples}")
+    # first() fills complementary nulls but never selects between unequal values.
+    return grouped[values].first().reset_index()
 
 
 def _peak_rss_mb():
@@ -321,6 +338,7 @@ def prepare(*, panel_directory, baseline_bundle, price_directory, database, prof
     if coverage.get("old_candidate_pool_used") is not False:
         raise ValueError("Current/prior candidate pools cannot substitute for dated full-market membership")
     factor_hashes, frames, styles, price_hashes = {}, {}, [], {}
+    style_duplicate_rows_coalesced = {}
     warmup = start - pd.Timedelta(days=700)
     original_frames = original["engine_kwargs"].pop("price_frames")
     original_symbols = set(original_frames)
@@ -396,9 +414,10 @@ def prepare(*, panel_directory, baseline_bundle, price_directory, database, prof
             basic["code"] = basic.ts_code.str[-2:].str.lower() + "." + basic.ts_code.str[:6]
             basic["market_cap_yuan"] = pd.to_numeric(basic["market_cap_yuan"], errors="coerce") * 10000
             basic["turnover_rate"] = pd.to_numeric(basic["turnover_rate"], errors="coerce")
-            if basic[["date", "code"]].duplicated().any():
-                raise ValueError("Conflicting daily_basic style observations")
-            panel = panel.merge(basic.drop(columns="ts_code"), on=["date", "code"], how="left", validate="one_to_one")
+            before = len(basic)
+            basic = _coalesce_style_observations(basic.drop(columns="ts_code"))
+            style_duplicate_rows_coalesced[str(year)] = before - len(basic)
+            panel = panel.merge(basic, on=["date", "code"], how="left", validate="one_to_one")
             panel["date"] = panel.date.dt.strftime("%Y-%m-%d")
             panels.append(panel)
             factor_hashes[path.name] = expected
@@ -490,6 +509,7 @@ def prepare(*, panel_directory, baseline_bundle, price_directory, database, prof
                   "baseline_selection_differs_from_old_dates": baseline_differences,
                   "historical_cutoff": "2026-07-21", "source_membership_provenance": coverage,
                   "calendar_trim": calendar_trim,
+                  "style_duplicate_rows_coalesced": style_duplicate_rows_coalesced,
                   "limitations": ["Historical cached membership and financial/industry revisions remain research-only.",
                                   "Factor warm-up NaNs retain original available-factor weight renormalization.",
                                   "Random uses the whole ADV pool; simple controls rank only their available observations.",
@@ -642,7 +662,42 @@ def attest_accounting(experiment_path, control):
     return receipt
 
 
-def run(experiment_path, *, controls=None, profile_execution=False):
+@contextmanager
+def _experiment_run_lock(directory):
+    """OS-owned lock is released on crashes; the marker file is not liveness."""
+    with (directory / "execution.lock").open("a+b") as handle:
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise ValueError("Another coordinator is executing this experiment") from exc
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def run(experiment_path, *, controls=None, profile_execution=False, jobs=1):
+    if isinstance(jobs, bool) or not isinstance(jobs, int) or not 1 <= jobs <= 8:
+        raise ValueError("jobs must be an integer between 1 and 8")
+    with _experiment_run_lock(Path(experiment_path).resolve().parent):
+        return _run_locked(experiment_path, controls=controls,
+                           profile_execution=profile_execution, jobs=jobs)
+
+
+def _run_locked(experiment_path, *, controls, profile_execution, jobs):
     experiment_path = Path(experiment_path).resolve()
     directory = experiment_path.parent
     experiment = _read_json(experiment_path)
@@ -658,7 +713,11 @@ def run(experiment_path, *, controls=None, profile_execution=False):
     known = {row["control_id"] for row in experiment["controls"]}
     if set(selected) - known:
         raise ValueError("Unknown requested control")
-    for control in selected:
+    if len(selected) != len(set(selected)):
+        raise ValueError("Duplicate requested controls")
+    completed_controls = {path.parent.name for path in (directory / "runs").glob("*/receipt.json")}
+
+    def execute(control):
         run_path = directory / "runs" / control / "run_manifest.json"
         receipt_path = run_path.parent / "receipt.json"
         if run_path.exists() and receipt_path.exists():
@@ -683,10 +742,34 @@ def run(experiment_path, *, controls=None, profile_execution=False):
             if process.returncode and not receipt_path.is_file():
                 raise subprocess.CalledProcessError(process.returncode, command)
         attest_accounting(experiment_path, control)
-        receipts = [attest_accounting(experiment_path, path.parent.name)
-                    for path in sorted((directory / "runs").glob("*/receipt.json"))]
+
+    def publish_completed():
+        receipts = [attest_accounting(experiment_path, control) for control in sorted(completed_controls)]
         _write_json(directory / "receipts.json", {"experiment_sha256": file_sha256(experiment_path), "replays": receipts})
         evaluate(experiment_path, directory / "receipts.json", directory / "comparison.json")
+
+    # Only the coordinator publishes aggregate evidence. Workers have disjoint
+    # run directories; bounded scheduling stops new launches on a failed audit.
+    if completed_controls:
+        publish_completed()
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        queue = iter(selected)
+        pending = {}
+        for _ in range(min(jobs, len(selected))):
+            control = next(queue)
+            pending[executor.submit(execute, control)] = control
+        while pending:
+            completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in completed:
+                control = pending.pop(future)
+                future.result()
+                completed_controls.add(control)
+            publish_completed()
+            for _ in range(jobs - len(pending)):
+                control = next(queue, None)
+                if control is None:
+                    break
+                pending[executor.submit(execute, control)] = control
     return 0
 
 
@@ -703,6 +786,8 @@ def main(argv=None):
     execute.add_argument("--experiment", required=True)
     execute.add_argument("--controls", nargs="+")
     execute.add_argument("--profile-execution", action="store_true")
+    execute.add_argument("--jobs", type=int, default=1,
+                         help="Independent replay processes (1-8); budget memory before increasing")
     child = sub.add_parser("worker")
     child.add_argument("--experiment", required=True)
     child.add_argument("--control", required=True)
@@ -715,7 +800,7 @@ def main(argv=None):
                 seed_count=args.seed_count)
         return 0
     if args.action == "run":
-        return run(args.experiment, controls=args.controls, profile_execution=args.profile_execution)
+        return run(args.experiment, controls=args.controls, profile_execution=args.profile_execution, jobs=args.jobs)
     return worker(args.experiment, args.control, profile_execution=args.profile_execution)
 
 

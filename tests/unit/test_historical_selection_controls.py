@@ -158,7 +158,7 @@ def test_resume_supplements_all_legacy_receipts_before_aggregate_evaluation(tmp_
                                    "manifest": "candidates/random_0000/manifest.json",
                                    "manifest_sha256": controls.file_sha256(candidate / "manifest.json")})
     controls._write_json(output / "experiment.json", experiment)
-    controls.run(output / "experiment.json")
+    controls.run(output / "experiment.json", jobs=2)
     before = {}
     for name in ("baseline_six_factor", "random_0000"):
         directory = output / "runs" / name
@@ -166,8 +166,41 @@ def test_resume_supplements_all_legacy_receipts_before_aggregate_evaluation(tmp_
         receipt = controls._read_json(directory / "receipt.json")
         controls._write_json(directory / "receipt.json", {
             key: value for key, value in receipt.items() if not key.startswith("accounting_")})
-    controls.run(output / "experiment.json", controls=["baseline_six_factor"])
+    controls.run(output / "experiment.json", controls=["baseline_six_factor"], jobs=2)
     for name in before:
         assert controls.file_sha256(output / "runs" / name / "summary.json") == before[name]
         assert (output / "runs" / name / "receipt_before_accounting_attestation.json").is_file()
     assert controls._read_json(output / "comparison.json")["completed_random_replays"] == 1
+
+
+def test_style_duplicate_fields_must_agree_before_complementary_nulls_are_filled():
+    frame = pd.DataFrame([
+        {"date": "2026-07-21", "code": "sz.000001", "turnover_rate": 0.9044, "market_cap_yuan": None},
+        {"date": "2026-07-21", "code": "sz.000001", "turnover_rate": 0.9044, "market_cap_yuan": 210360153288.0},
+    ])
+    result = controls._coalesce_style_observations(frame)
+    assert len(result) == 1
+    assert result.iloc[0]["turnover_rate"] == 0.9044
+    assert result.iloc[0]["market_cap_yuan"] == 210360153288.0
+    pd.testing.assert_frame_equal(result, controls._coalesce_style_observations(frame.iloc[::-1]))
+    frame.loc[1, "turnover_rate"] = 0.9
+    with pytest.raises(ValueError, match="Conflicting daily_basic"):
+        controls._coalesce_style_observations(frame)
+
+
+def test_batch_lock_is_exclusive_and_reusable_after_release(tmp_path):
+    with controls._experiment_run_lock(tmp_path):
+        with pytest.raises(ValueError, match="Another coordinator"):
+            with controls._experiment_run_lock(tmp_path):
+                pytest.fail("two coordinators acquired the same experiment")
+    with controls._experiment_run_lock(tmp_path):
+        pass
+
+
+def test_batch_rejects_duplicate_controls_before_starting_workers(tmp_path, monkeypatch):
+    output = experiment_fixture(tmp_path)
+    monkeypatch.setattr(controls.subprocess, "run", lambda *a, **kw: pytest.fail("must not start workers"))
+    with pytest.raises(ValueError, match="Duplicate"):
+        controls.run(output / "experiment.json", controls=["baseline_six_factor"] * 2, jobs=2)
+    with pytest.raises(ValueError, match="jobs"):
+        controls.run(output / "experiment.json", jobs=0)

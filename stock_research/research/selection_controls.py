@@ -308,6 +308,20 @@ def evaluate(experiment_path, receipts_path, output_path, *, metric="final_retur
                 or not isinstance(code_hashes, dict) or not code_hashes
                 or any(not re.fullmatch(r"[a-f0-9]{64}", str(value)) for value in code_hashes.values())):
             raise ValueError("Replay engine/source fingerprint missing")
+        # A historical experiment freezes its inputs and executable source, not
+        # just agreement between replays. Equal substitutions in every receipt
+        # must not turn a different experiment into an accepted comparison.
+        if "common_inputs_sha256" in experiment:
+            if any(shared[key] != experiment["common_inputs_sha256"]
+                   for key in required - {"left_candidates"}):
+                raise ValueError("Replay common inputs differ from the frozen experiment")
+        if "code_sha256" in experiment:
+            expected_code = experiment["code_sha256"]
+            if code_hashes != expected_code:
+                raise ValueError("Replay source differs from the frozen experiment")
+            expected_engine = expected_code.get("stock_research/backtesting/engine.py")
+            if expected_engine is not None and run["engine_sha256"] != expected_engine:
+                raise ValueError("Replay engine differs from the frozen experiment")
         if receipt.get("input_bundle_sha256") != run.get("input_bundle_sha256") or not run.get("input_bundle_sha256"):
             raise ValueError("Replay receipt must bind the actual input bundle")
         if run["input_bundle_sha256"] in used_bundles or receipt["summary_sha256"] in used_summaries:
