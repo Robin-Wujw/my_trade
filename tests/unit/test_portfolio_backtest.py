@@ -486,6 +486,24 @@ def test_right_entry_risk_budget_default_and_size_multiplier_are_exclusive():
         )
 
 
+def test_last_close_emits_paper_intent_without_future_bar_or_fill(monkeypatch):
+    dates, bars = _standard_close_execution_bars()
+    snapshot_date, signal_date, _ = dates[-3:]
+    monkeypatch.setattr(portfolio_engine, "_right_signal", _standard_close_signal_for(signal_date))
+    result = _run_portfolio_backtest(
+        {"sz.000001": bars.loc[bars["date"].le(signal_date)]},
+        {snapshot_date.strftime("%Y-%m-%d"): [_standard_right_candidate()]}, {},
+        requested_start=snapshot_date.strftime("%Y-%m-%d"),
+        end_date=signal_date.strftime("%Y-%m-%d"), close_confirmed_execution="next_open",
+    )
+    assert result["trade_ledger"] == []
+    assert len(result["paper_order_intents"]) == 1
+    intent = result["paper_order_intents"][0]
+    assert intent["code"] == "sz.000001" and intent["quantity"] is None
+    assert intent["signal_detected"] is True and intent["filled"] is False
+    assert intent["stop_price"] < intent["planned_price"]
+
+
 @pytest.mark.parametrize("risk_budget", [0.0, -0.001, 0.0301])
 def test_right_entry_risk_budget_validates_account_fraction(risk_budget):
     bars = breakout_bars()

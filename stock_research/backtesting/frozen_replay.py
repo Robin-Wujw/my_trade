@@ -123,6 +123,7 @@ def _code_hashes():
     paths = sorted((ROOT / "stock_research").rglob("*.py")) + [
         ROOT / "apps/portfolio_backtest.py", ROOT / "apps/portfolio_frozen_replay.py",
         ROOT / "apps/__init__.py", ROOT / "pyproject.toml",
+        ROOT / "config/strategy_baseline.json",
     ]
     return {str(p.relative_to(ROOT)): app.file_sha256(p) for p in paths}
 

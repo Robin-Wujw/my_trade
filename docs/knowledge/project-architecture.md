@@ -20,7 +20,7 @@ var/              本地运行数据根目录，整体忽略提交
 
 - `api`：外部数据接口、PushPlus 和连接处理；
 - `core`：路径、配置、完成清单、控制台和分步日志；
-- `storage`：DuckDB初始化、迁移、K线/板块仓储及研究回测持久化；
+- `storage`：SQLite初始化、迁移、K线/板块仓储及研究回测持久化；
 - `market`：行情、板块和股票数据访问；
 - `indicators`：不联网的指标计算；
 - `strategies`：Formula33、基本面和板块规则；
@@ -77,7 +77,7 @@ Excel/CSV + formula33_completion.json
 
 ## 5. 板块数据流
 
-`sector_stats` 负责板块行情统计和持久化，`sector_watch` 负责主线评分、涨停扩散和主线成分映射。板块名称、代码、历史和来源写入 DuckDB；文件缓存用于接口波动时的受控复用。
+`sector_stats` 负责板块行情统计和持久化，`sector_watch` 负责主线评分、涨停扩散和主线成分映射。板块名称、代码、历史和来源写入 SQLite；文件缓存用于接口波动时的受控复用。
 
 板块步骤必须满足历史新鲜度、最少行数和覆盖率。主线板块成分缺失时不生成可供日报消费的正式产物。
 
@@ -99,13 +99,13 @@ Excel/CSV + formula33_completion.json
 `ProjectPaths` 统一管理运行路径：
 
 - `var/cache`：可复用的增量数据和快照；
-- `var/data/my_trade.duckdb`：当前13张应用表；
+- `var/data/my_trade.sqlite3`：结构化数据与追加版本表，表结构以 migrations 为准；
 - `var/state`：完成清单、断点、日报比较基线和两个月突破追踪状态；
 - `var/exports`：市场、选股和日报导出；
 - `var/logs`：运行日志；
 - `var/secrets`：本地凭证。
 
-当前生产是“文件缓存与导出 + DuckDB结构化持久化”的混合状态。DuckDB已保存Formula33日线、板块、基础运行表、按报告期的财务指标、逐日候选、Formula33阶段、回测运行、逐笔成交和期末持仓；HTML/Markdown报告正文及完整七步生产运行记录仍以文件、完成清单和日志为准。
+当前生产是“文件缓存与导出 + SQLite结构化持久化”的混合状态。SQLite已保存Formula33日线、板块、基础运行表、按报告期的财务指标、逐日候选、Formula33阶段、回测运行、逐笔成交和期末持仓；HTML/Markdown报告正文及生产运行记录仍以文件、完成清单和日志为准。表存在不表示每日前向任务已经运行，验收须检查实际观察日和捕获时间。
 
 ## 8. 生产不变量
 

@@ -4,6 +4,7 @@ import argparse
 from stock_research.core.paths import PATHS
 from stock_research.strategies.historical_candidates import SNAPSHOT_VERSION
 from stock_research.backtesting import workflow
+from stock_research.backtesting.baseline import BaselineArgumentParser, configure_parser_defaults
 from stock_research.backtesting.defaults import (
     DEFAULT_CLOSE_CONFIRMED_EXECUTION,
     DEFAULT_COMMISSION_RATE,
@@ -18,7 +19,7 @@ from stock_research.backtesting.workflow import (
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="候选池、Formula33和五持仓组合回测")
+    parser = BaselineArgumentParser(description="候选池、Formula33和五持仓组合回测", allow_abbrev=False)
     parser.add_argument("--start-date", default="2026-01-01")
     parser.add_argument(
         "--end-date", default="",
@@ -43,7 +44,7 @@ def build_parser():
     )
     parser.add_argument(
         "--max-left-positions", type=int, default=1,
-        help="maximum simultaneous left-side symbols; default 1, use 2 only for sensitivity research",
+        help="maximum simultaneous left-side symbols; audited baseline defaults to 2",
     )
     parser.add_argument(
         "--max-same-industry", type=int, default=2,
@@ -75,7 +76,7 @@ def build_parser():
         default=1.0,
         help=(
             "研究模式：仅放大既有普通右侧首仓和加仓仓位；"
-            "不改变信号、交易日和退出规则，默认1.0"
+            "不改变信号、交易日和退出规则，审计基线默认3.0"
         ),
     )
     parser.add_argument(
@@ -488,7 +489,14 @@ def build_parser():
         "--vectorbt-cross-check", action="store_true",
         help="replay emitted fills with vectorbt shared-cash accounting",
     )
-    return parser
+    parser.add_argument("--max-symbol-exposure", type=float, default=0.70)
+    parser.add_argument("--risk-free-annual", type=float, default=0.0,
+                        help="研究诊断的年化无风险利率，不改变买卖逻辑")
+    parser.add_argument("--trial-count", type=int,
+                        help="DSR使用的已登记有效独立试验次数；缺失则不计算")
+    parser.add_argument("--trial-sharpe-std-annual", type=float,
+                        help="DSR使用的跨试验年化Sharpe标准差；不得由单次回测猜测")
+    return configure_parser_defaults(parser)
 
 
 def main(argv=None):

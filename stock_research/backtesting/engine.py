@@ -1778,6 +1778,7 @@ def run_portfolio_backtest(
         state.right_parts = configured_profit_tranches
     concentration_blocks = []
     entry_blocks = []
+    paper_order_intents = []
     breadth_reversal_observations = []
 
     phase_buy_budget = float(initial_capital)
@@ -5702,6 +5703,23 @@ def run_portfolio_backtest(
                     + float(signal["rank"]) * 8
                     + min(float(signal["known_volume_ratio"]), 5.0) * 2
                 )
+                if date == end:
+                    # Expose the last completed close's plan even when no
+                    # future bar/calendar date exists. This projection does
+                    # not reserve cash, infer a fill or alter replay decisions.
+                    target = _signal_number(signal, "entry_target_price")
+                    paper_order_intents.append({
+                        "observation_date": date.strftime("%Y-%m-%d"),
+                        "code": code, "candidate_source": candidate.get("candidate_source"),
+                        "side": "buy", "signal": signal.get("signal_type"),
+                        "order_type": signal.get("order_type"),
+                        "planned_price": qfq_to_raw_price(data.iloc[index], signal["trigger"]),
+                        "stop_price": qfq_to_raw_price(data.iloc[index], signal["stop"]),
+                        "target_price": qfq_to_raw_price(data.iloc[index], target) if target is not None else None,
+                        "quantity": None, "status": "conditional_next_session_recheck",
+                        "signal_detected": True, "triggered": False, "filled": False,
+                        "research_only": True,
+                    })
                 if signal.get("order_type") != "close":
                     if _signal_number(signal, "structure_proximity_score") is None:
                         proximity = _finite_float(data.iloc[index].get("structure_proximity_score"))
@@ -6258,7 +6276,14 @@ def run_portfolio_backtest(
         localize_breadth_reversal_observation(item)
         for item in breadth_reversal_observations
     ]
+    from stock_research.backtesting.paper_actions import pending_exit_intents
+    paper_order_intents.extend(pending_exit_intents(
+        states, end.strftime("%Y-%m-%d"), candidate_exits=pending_candidate_exits,
+        weak_exits=pending_weak_exits, left_exits=pending_left_exits,
+        left_quota_exits=pending_left_quota_exits,
+    ))
     return {
+        "paper_order_intents": paper_order_intents,
         "requested_start": requested.strftime("%Y-%m-%d"),
         "actual_start": start.strftime("%Y-%m-%d"),
         "end_date": end.strftime("%Y-%m-%d"),

@@ -37,7 +37,7 @@ def test_miniqmt_backtest_wraps_existing_portfolio_replay_with_profile_metadata(
     assert result["commission_rate"] == 0.000085
     assert result["minimum_commission"] == 5.0
     assert result["sell_stamp_duty_rate"] == 0.0005
-    assert result["estimated_slippage_rate"] == 0.0005
+    assert result["estimated_slippage_rate"] == 0.001
     assert result["signals_effective_next_day"] is True
 
 

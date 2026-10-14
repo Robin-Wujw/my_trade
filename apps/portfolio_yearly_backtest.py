@@ -10,6 +10,7 @@ import pandas as pd
 
 from stock_research.backtesting import workflow as portfolio_backtest
 from stock_research.backtesting import cli as portfolio_cli
+from stock_research.backtesting.baseline import configure_parser_defaults
 from stock_research.backtesting.defaults import (
     DEFAULT_CLOSE_CONFIRMED_EXECUTION,
     DEFAULT_COMMISSION_RATE,
@@ -77,7 +78,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--minimum-commission", type=float, default=DEFAULT_MINIMUM_COMMISSION)
     parser.add_argument("--sell-stamp-duty-rate", type=float, default=DEFAULT_SELL_STAMP_DUTY_RATE)
     parser.add_argument("--estimated-slippage-rate", type=float, default=DEFAULT_ESTIMATED_SLIPPAGE_RATE)
-    return parser
+    parser.add_argument("--right-entry-size-multiplier", type=float, default=3.0)
+    return configure_parser_defaults(parser)
 
 
 def yearly_ranges(start_year: int, end_year: int, through_date: str = "") -> list[tuple[int, str, str]]:
@@ -114,6 +116,7 @@ def build_year_argv(args, year: int, start_date: str, end_date: str) -> tuple[li
         "--max-positions", str(args.max_positions),
         "--max-total-held-symbols", str(args.max_total_held_symbols),
         "--max-left-positions", str(args.max_left_positions),
+        "--right-entry-size-multiplier", str(args.right_entry_size_multiplier),
         "--max-same-industry", str(args.max_same_industry),
         "--profit-tranches", str(args.profit_tranches),
         "--profit-tail-min-return", str(args.profit_tail_min_return),

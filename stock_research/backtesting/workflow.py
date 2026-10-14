@@ -16,6 +16,7 @@ from stock_research.reporting.backtest_trade_report import (
     render_trade_report_markdown,
 )
 from stock_research.reporting.trade_reminders import load_trade_plans
+from stock_research.reporting.portfolio_research_audit import audit_frames, render_markdown as render_research_diagnostics
 from stock_research.storage import Database, ResearchRepository, TushareRepository
 from stock_research.market.miniqmt_data import load_miniqmt_price_frames
 from stock_research.backtesting.engine import (
@@ -1205,6 +1206,7 @@ def refresh_backtest_inputs(args):
 
 
 def run_job(args):
+    from stock_research.backtesting.baseline import configuration_record
     if not args.price_kline_directory:
         args.price_kline_directory = str(refresh_price_cache_directory(args.refresh_price_source))
     if not args.end_date:
@@ -1396,6 +1398,7 @@ def run_job(args):
         max_positions=None if args.max_positions == 0 else args.max_positions,
         max_total_held_symbols=args.max_total_held_symbols,
         max_left_positions=args.max_left_positions,
+        max_symbol_exposure=args.max_symbol_exposure,
         max_same_industry=args.max_same_industry,
         same_theme_correlation=args.same_theme_correlation,
         min_entry_evidence_score=args.min_entry_evidence_score,
@@ -1514,6 +1517,7 @@ def run_job(args):
         security_end_dates=security_end_dates,
         price_frames_prepared=args.price_frames_prepared,
     )
+    result["strategy_configuration"] = configuration_record(args)
     result["price_source"] = {
         "kline_directory": str(price_kline_directory),
         "database_enabled": bool(use_price_database),
@@ -1566,6 +1570,14 @@ def run_job(args):
         result,
         TushareRepository(database).load_stock_basic_universe(),
     )
+    result["research_diagnostics"] = audit_frames(
+        pd.DataFrame(result["equity_curve"]), pd.DataFrame(result["trade_ledger"]), database.path,
+        # Engine equity is NAV normalized to the initial capital, not cash yuan.
+        initial_equity=1.0,
+        risk_free_annual=getattr(args, "risk_free_annual", 0.0),
+        trial_count=getattr(args, "trial_count", None),
+        trial_sharpe_std_annual=getattr(args, "trial_sharpe_std_annual", None),
+    )
     research_repository = ResearchRepository(database)
     research_repository.persist_formula_history(formula, version="formula33-phase-v1")
     run_id = research_repository.persist_backtest_result(result)
@@ -1573,6 +1585,9 @@ def run_job(args):
     output = Path(args.output_directory)
     output.mkdir(parents=True, exist_ok=True)
     stem = f"portfolio_{args.start_date}_{args.end_date}"
+    (output / f"{stem}_研究诊断.md").write_text(
+        render_research_diagnostics(result["research_diagnostics"]), encoding="utf-8",
+    )
     pd.DataFrame(result["events"]).to_csv(
         output / f"{stem}_events.csv", index=False, encoding="utf-8-sig",
     )

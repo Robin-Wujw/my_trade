@@ -1,6 +1,6 @@
 # 当前模型与因子清单
 
-> 2026-09-21 审计提示：下文历史收益属于旧研究产物，不能视为修复后框架的验收结论。成交时序、公司行动、独立验账及现有数据缺口见[回测框架审计与基线重建](backtest-framework-audit-2026-09-21.md)；原基线引用保留以供对照。
+> 当前参数和审计收益统一见[当前冻结基线](current-baseline.md)。本文第9节及带日期报告中的其他收益只作历史对照。财务修订版本和历史行业缺口仍在，左侧不能宣称严格PIT；前向记录只能从真实运行日起积累。
 
 本文是当前分支对“用了哪些模型、实现了哪些因子、哪些模型真正进入选股”的权威记录。代码行为与本文冲突时，以代码和候选池 `manifest.json` 为准；带日期的 QuantsPlaybook 文档仅保留为研究过程和审计记录。
 
@@ -10,7 +10,7 @@
 观察日可交易 A 股全集
 ├─ 右侧：价格型低残差波动率组合、ADV20不低于3000万元、每日 Top50
 │        └─ 技术结构、风险距离和盈亏比确认后买入
-└─ 左侧：严格时点 value_model
+└─ 左侧：公告日可见 value_model（历史修订版本不完整）
          └─ 基本价值线网格建仓，可在独立右侧信号成立后不可逆转右
 
 两路候选取并集，不叠加左右分数
@@ -198,7 +198,7 @@ network_cc = (network_scc + network_tcc) / 2
 
 `playbook_strategy_aligned` 是在现行模型冻结后新增的交易语义对照，不参与原 2024 选优。其全周期收益和回撤均差于 `playbook_low_corr`，正式模型保持不变；结果见 `docs/strategy-aligned-selection-backtest-2026-08-02.md`。
 
-三路外部研究对照和 smooth 补位也均未通过。三路等配额全周期收益为 -41.921%，`low_corr Top50 + smooth Top5` 为 +45.346%，都显著落后现行 +90.015% 基线；两轮成交审计违规均为0，因此不以数据错位解释失败。详细公式、时点限制和结果见 `docs/three-lane-selection-backtest-2026-08-02.md`。
+三路外部研究对照和 smooth 补位在当时的研究中均未通过。三路等配额全周期收益为 -41.921%，`low_corr Top50 + smooth Top5` 为 +45.346%，落后当时 +90.015% 的历史基线；不与修复后的审计冻结结果直接比较。详细公式、时点限制和结果见 `docs/three-lane-selection-backtest-2026-08-02.md`。
 
 ### 4.1 严格前向 GP/A 研究
 
@@ -270,7 +270,7 @@ QuantsPlaybook 盘点包含 27 个研究入口，但本项目只把数据条件�
 
 完整入口与阻断原因见 `docs/quantsplaybook-factor-selection-backtest-2026-07-31.md`。
 
-## 9. 当前回测基线
+## 9. 历史 low_corr 回测（非当前基线）
 
 连续区间 `2021-01-01` 至 `2026-07-21`：
 
@@ -284,7 +284,7 @@ QuantsPlaybook 盘点包含 27 个研究入口，但本项目只把数据条件�
 | 交易审计违规 | 0 |
 | 候选覆盖 | 完整 |
 
-基线产物：
+历史产物：
 
 - 候选清单：`var/backtests/quantsplaybook_hybrid_low_corr_value_2021_to_20260721/candidates/hybrid_low_corr_value/manifest.json`
 - 回测摘要：`var/backtests/quantsplaybook_hybrid_low_corr_value_2021_to_20260721/portfolio/hybrid_low_corr_value/portfolio_2021-01-01_2026-07-21_summary.json`
