@@ -319,6 +319,10 @@ def run_sync(
                 or calendar[["exchange", "cal_date"]].duplicated().any()):
             raise ValueError("Invalid or conflicting calendar rows")
         store("trade_cal", calendar, {"exchange": "SSE"})
+        calendar_key = f"trade_cal:{end.date()}"
+        required_receipt_keys.add(calendar_key)
+        complete(calendar_key, {"dataset": "trade_cal"}, len(calendar),
+                 coverage_basis="successful_calendar_interval_query")
         sessions = sorted(calendar_dates[
             calendar["is_open"].astype(str).isin(("1", "True", "true"))
             & calendar["exchange"].eq("SSE") & calendar_dates.between(start, end)
@@ -343,6 +347,10 @@ def run_sync(
             raise ValueError("Missing list/delist dates prevent historical universe coverage")
         for name in ("basic", "stock_basic"):
             store(name, master, {"list_status": "L,D,P"})
+            master_key = f"{name}:{end.date()}"
+            required_receipt_keys.add(master_key)
+            complete(master_key, {"dataset": name}, len(master),
+                     codes=sorted(set(master["ts_code"])), coverage_basis="all_listing_statuses")
         for day in sessions:
             expected = set(master.loc[
                 listing.le(day) & (delisting.isna() | delisting.ge(day)), "ts_code",

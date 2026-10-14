@@ -42,7 +42,7 @@ def test_sync_captures_all_datasets_and_reuses_successful_daily_receipts(tmp_pat
                   start_date="2026-07-20", end_date="2026-07-21", capture_financials=False)
     result = run_sync(**kwargs, query=_query_provider(calls))
     assert result["status"] == "completed"
-    assert len(result["completed"]) == 2 * (len(DAILY_DATASETS) + 1) + 3
+    assert len(result["completed"]) == 2 * (len(DAILY_DATASETS) + 1) + 6
     assert result["completed"]["suspend_d:2026-07-21"]["rows"] == 0
     assert result["historical_backfill_is_forward_evidence"] is False
     assert result["research_only"] is True
@@ -51,6 +51,19 @@ def test_sync_captures_all_datasets_and_reuses_successful_daily_receipts(tmp_pat
     calls.clear()
     assert run_sync(**kwargs, query=_query_provider(calls))["status"] == "completed"
     assert not any(name in ("daily", "adj_factor", "stock_st", "suspend_d") for name, _ in calls)
+
+
+@pytest.mark.parametrize("dataset", ["basic", "stock_basic", "trade_cal"])
+def test_master_and_calendar_changes_invalidate_forward_receipts(tmp_path, dataset):
+    database = Database(tmp_path / "data.sqlite3")
+    result = run_sync(database_path=database.path, state_path=tmp_path / "state.json",
+        start_date="2026-07-21", end_date="2026-07-21", capture_financials=False,
+        query=_query_provider([]))
+    assert f"{dataset}:2026-07-21" in result["completed"]
+    with database.connect() as connection:
+        connection.execute("UPDATE raw.tushare_dataset_rows SET payload_json=json_set(payload_json, '$.name', 'changed') WHERE dataset=?", [dataset])
+    with pytest.raises(ValueError, match="no longer match SQLite"):
+        verify_completed_receipts(result, TushareRepository(database))
 
 
 def test_failed_batch_is_retryable_and_completed_prices_survive(tmp_path):

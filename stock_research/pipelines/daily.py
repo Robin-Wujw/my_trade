@@ -10,6 +10,7 @@ from stock_research.core.config import PipelineConfig
 from stock_research.core.completion_manifest import CompletionManifest
 from stock_research.core.financial_period import resolve_report_period
 from stock_research.pipelines import (
+    daily_forward,
     daily_report,
     factor_selection,
     formula33,
@@ -27,6 +28,7 @@ STEP_NAMES = (
     "factor_selection",
     "fundamental_update",
     "fundamental_selection",
+    "frozen_forward",
     "daily_report",
 )
 
@@ -235,6 +237,7 @@ class _ArtifactTrackingSteps(dict):
             "sector_path",
             "factor_path",
             "fundamental_path",
+            "forward_manifest_path",
         )
         missing = [
             name
@@ -248,7 +251,16 @@ class _ArtifactTrackingSteps(dict):
             "--fundamental-path", self.artifacts["fundamental_path"],
             "--formula-path", self.artifacts["formula_path"],
             "--sector-path", self.artifacts["sector_path"],
+            "--forward-manifest", self.artifacts["forward_manifest_path"],
         ]
+
+    def frozen_forward(self):
+        manifest = daily_forward.run(
+            observation_date=self.artifacts["observation_date"],
+            formula_path=self.artifacts["formula_path"],
+        )
+        self.artifacts["forward_manifest_path"] = str(manifest)
+        return 0
 
 
 def _run_step(name: str, step: Callable[[], int]) -> int:
@@ -273,6 +285,11 @@ def run_daily_pipeline(
     failed = []
     skipped = []
     for name in STEP_NAMES:
+        if name == "frozen_forward" and statuses.get("formula33") != 0:
+            statuses[name] = None
+            skipped.append(name)
+            print(f"[daily_pipeline][{name}] skip dependency=formula33")
+            continue
         if name == "fundamental_update" and statuses.get("formula33") != 0:
             statuses[name] = None
             skipped.append(name)
@@ -298,6 +315,7 @@ def run_daily_pipeline(
                 "factor_selection",
                 "fundamental_update",
                 "fundamental_selection",
+                "frozen_forward",
             )
         ):
             statuses[name] = None
@@ -305,7 +323,7 @@ def run_daily_pipeline(
             print(
                 "[daily_pipeline][daily_report] skip "
                 "dependency=formula33/sector_stats/sector_watch/factor_selection/"
-                "fundamental_update/fundamental_selection"
+                "fundamental_update/fundamental_selection/frozen_forward"
             )
             continue
         print(f"[daily_pipeline][{name}] start")
@@ -381,6 +399,7 @@ def build_default_steps(
             tracked_steps.fundamental_selection_args(selection_args)
         ),
         "daily_report": lambda: daily_report.run(tracked_steps.daily_report_args()),
+        "frozen_forward": lambda: tracked_steps.frozen_forward(),
     }
     tracked_steps = _ArtifactTrackingSteps(
         step_functions,

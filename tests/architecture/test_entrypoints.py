@@ -7,7 +7,7 @@ from stock_research.pipelines.daily import STEP_NAMES
 ROOT = Path(__file__).parents[2]
 
 
-def test_daily_entrypoint_declares_the_seven_production_steps():
+def test_daily_entrypoint_declares_the_eight_production_steps():
     assert STEP_NAMES == (
         "formula33",
         "sector_stats",
@@ -15,6 +15,7 @@ def test_daily_entrypoint_declares_the_seven_production_steps():
         "factor_selection",
         "fundamental_update",
         "fundamental_selection",
+        "frozen_forward",
         "daily_report",
     )
 

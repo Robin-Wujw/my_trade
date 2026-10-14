@@ -43,9 +43,11 @@ def implementation_fingerprint():
             packages[package] = metadata.version(package)
         except metadata.PackageNotFoundError:
             packages[package] = None
+    source_files = [*(root / "stock_research").rglob("*.py"),
+                    root / "apps" / "tushare_financial_cache.py"]
     return {"python": sys.version, "packages": packages,
             "files": {path.relative_to(root).as_posix(): sha256(path)
-                      for path in sorted((root / "stock_research").rglob("*.py"))}}
+                      for path in sorted(source_files)}}
 
 
 def verify_replay_prefix(previous, current, through_date):
@@ -112,14 +114,14 @@ def validate_sync_receipt(state, database, observation_date, captured_at):
     if not state.get("financial_capture_requested"):
         raise ValueError("financial capture was skipped")
     now = pd.Timestamp(captured_at)
-    for dataset in (*DAILY_DATASETS, "dividend"):
+    for dataset in (*DAILY_DATASETS, "dividend", "basic", "stock_basic", "trade_cal"):
         receipt = state.get("completed", {}).get(f"{dataset}:{day}", {})
         timestamp = pd.to_datetime(receipt.get("captured_at"), utc=True, errors="coerce")
         if pd.isna(timestamp) or timestamp > now or timestamp.tz_convert("Asia/Shanghai").strftime("%Y-%m-%d") != day:
             raise ValueError(f"missing actual same-day capture: {dataset}")
 
 
-def build_right_snapshot(prices, stock_basic, stock_st, observation_date):
+def build_right_snapshot(prices, stock_basic, stock_st, observation_date, *, return_context=False):
     """Use the original full tradable cross-section before the ADV filter."""
     day = pd.Timestamp(observation_date).normalize()
     prices = prices.copy()
@@ -132,12 +134,14 @@ def build_right_snapshot(prices, stock_basic, stock_st, observation_date):
     basic = stock_basic.copy()
     for column in ("list_date", "delist_date"):
         basic[column] = pd.to_datetime(basic[column], errors="coerce")
+    if basic["list_date"].isna().any() or set(prices["code"]) - set(basic["code"]):
+        raise ValueError("right security master/listing dates incomplete")
     # IPO/delisting-invalid rows must not contribute to cross-sectional factors.
     bounds = basic[["code", "list_date", "delist_date"]].drop_duplicates("code")
     prices = prices.merge(bounds, on="code", how="inner")
     prices = prices.loc[
         prices["list_date"].notna() & prices["date"].ge(prices["list_date"])
-        & (prices["delist_date"].isna() | prices["date"].le(prices["delist_date"]))
+        & (prices["delist_date"].isna() | prices["date"].lt(prices["delist_date"]))
     ].drop(columns=["list_date", "delist_date"])
     if prices.empty:
         raise ValueError("no listed price history")
@@ -156,6 +160,9 @@ def build_right_snapshot(prices, stock_basic, stock_st, observation_date):
     model = profile["model_id"]
     score = _apply_combination(panel, _one_network_price_only_low_volatility_spec())
     adv = _rolling_average_amount(prices).reindex(panel.index)
+    current_adv = adv.loc[adv.index.get_level_values("date") == day]
+    if current_adv.empty or not current_adv.map(lambda value: pd.notna(value) and math.isfinite(value)).all():
+        raise ValueError("same-day PIT members lack finite ADV20; missing liquidity is not an exclusion")
     panel[model] = score.where(adv.ge(30_000_000))
     snapshots = factor_candidate_snapshots(
         panel, membership, factor_column=model, snapshot_dates=[day],
@@ -166,7 +173,28 @@ def build_right_snapshot(prices, stock_basic, stock_st, observation_date):
         raise ValueError(f"frozen Top50 lacks eligible factors/liquidity: {len(rows)}")
     # Match the frozen model's base candidate contract. Profile enrichment can
     # change execution gates and therefore requires a separate research model.
-    return rows
+    if not return_context:
+        return rows
+    members = membership.loc[membership["date"].eq(day)].copy()
+    history = prices.sort_values(["code", "date"], kind="mergesort").copy()
+    history["history_days"] = history.groupby("code", sort=False).cumcount() + 1
+    members = members.merge(history[["date", "code", "history_days"]], on=["date", "code"], validate="one_to_one")
+    members = members.merge(adv.rename("adv20_yuan").reset_index(), on=["date", "code"], validate="one_to_one")
+    members = members.loc[members["adv20_yuan"].ge(30_000_000)].copy()
+    # These flags describe the actual PIT membership operation above, not invented missing-data defaults.
+    members = members.assign(is_listed=True, is_traded=True, is_st=False)
+    # Scores use the full PIT cross-section above; ranks use exactly the same
+    # liquidity-eligible pool as the actual frozen Top50 candidate selection.
+    all_scores = panel[model].rename("score").reset_index()
+    all_scores = all_scores.loc[
+        all_scores["date"].eq(day) & all_scores["code"].isin(members["code"])
+        & all_scores["score"].map(lambda value: pd.notna(value) and math.isfinite(value))
+    ]
+    all_scores = all_scores.sort_values(["score", "code"], ascending=[False, True], kind="mergesort")
+    ranks = {str(code): rank for rank, code in enumerate(all_scores["code"], 1)}
+    if list(ranks)[:profile["right_top_n"]] != [row["code"] for row in rows]:
+        raise ValueError("full liquidity-eligible ranks differ from frozen Top50 candidates")
+    return rows, {"eligible_members": members, "factor_ranks": ranks, "prices": prices}
 
 
 def load_left_snapshot(directory, observation_date, captured_at):
@@ -186,6 +214,22 @@ def load_left_snapshot(directory, observation_date, captured_at):
     rows = pd.read_csv(candidate_path, dtype={"code": str}).to_dict("records")
     if any(str(row.get("candidate_source", "")).split("+")[0] != "value_model" for row in rows):
         raise ValueError("left input must contain value_model rows only")
+    if manifest.get("version") in {"forward-value-left-v1", "forward-value-left-v2"}:
+        if item.get("candidate_count") != len(rows) or item.get("assessed_count", 0) <= 0:
+            raise ValueError("left capture lacks an assessed universe")
+        sources = ("financial", "industry")
+        if manifest.get("version") == "forward-value-left-v2":
+            sources += ("annual_financial", "eps_adjustment", "value_observations", "r07_diagnostics")
+        for source in sources:
+            source_path = (directory / item[f"{source}_file"]).resolve()
+            if not source_path.is_relative_to(directory) or sha256(source_path) != item.get(f"{source}_sha256"):
+                raise ValueError(f"left {source} source path/hash mismatch")
+        if manifest.get("version") == "forward-value-left-v2":
+            bindings = {"annual_source_sha256": "annual_financial_sha256",
+                        "eps_adjustment_source_sha256": "eps_adjustment_sha256",
+                        "financial_source_sha256": "financial_sha256", "industry_source_sha256": "industry_sha256"}
+            if any(row.get(field) != item.get(key) for row in rows for field, key in bindings.items()):
+                raise ValueError("left candidate/source hash binding mismatch")
     return rows, {"manifest_sha256": sha256(path), "snapshot_sha256": item["sha256"],
                   "captured_at": timestamp.isoformat()}
 
@@ -228,6 +272,22 @@ def replay_paper(price_frames, snapshots, phases, observation_date, *, corporate
     )
     result.update(research_only=True, strict_point_in_time=False, paper_only=True)
     return result
+
+
+def observed_formula_state(formula, observation_date):
+    required = {"date", "phase", "window_up_streak", "window_down_streak", "window_unique_count"}
+    if required - set(formula):
+        raise ValueError("Formula33 history needs date, phase and observed streak/count fields")
+    current = formula.loc[pd.to_datetime(formula["date"]).eq(pd.Timestamp(observation_date))]
+    if len(current) != 1 or current.iloc[0]["phase"] not in {"active", "watch", "exited", "waiting"}:
+        raise ValueError("exactly one valid same-day Formula33 state is required")
+    phase = _safe(current.iloc[0].to_dict())
+    for column in ("window_up_streak", "window_down_streak", "window_unique_count"):
+        value = pd.to_numeric(phase[column], errors="coerce")
+        if pd.isna(value) or not float(value).is_integer() or value < 0:
+            raise ValueError(f"Formula33 requires observed nonnegative integer {column}")
+        phase[column] = int(value)
+    return phase
 
 
 def _run_capture(*, database, sync_state, left_directory, formula_history,
@@ -280,19 +340,14 @@ def _run_capture(*, database, sync_state, left_directory, formula_history,
             raise ValueError(f"forward trading sessions missing or calendar incomplete: {sorted(expected ^ actual)}")
     formula_hash = sha256(formula_history)
     formula = pd.read_csv(formula_history)
-    if "date" not in formula or "phase" not in formula:
-        raise ValueError("Formula33 history needs date and phase")
-    current = formula.loc[pd.to_datetime(formula["date"]).eq(pd.Timestamp(observation_date))]
-    if len(current) != 1 or current.iloc[0]["phase"] not in {"active", "watch", "exited", "waiting"}:
-        raise ValueError("exactly one valid same-day Formula33 state is required")
-    phase = _safe(current.iloc[0].to_dict())
+    phase = observed_formula_state(formula, observation_date)
     phases[observation_date] = phase
     left, left_receipt = load_left_snapshot(left_directory, observation_date, captured_at)
     history_start = (pd.Timestamp(min([observation_date, *snapshots])) - pd.Timedelta(days=750)).strftime("%Y-%m-%d")
     prices = repository.load_market_daily_frame(start_date=history_start, end_date=observation_date)
     basic = repository.load_stock_basic_universe()
     st = repository.load_dataset_for_codes("stock_st", basic["code"], start_date=history_start, end_date=observation_date)
-    right = build_right_snapshot(prices, basic, st, observation_date)
+    right, structure_context = build_right_snapshot(prices, basic, st, observation_date, return_context=True)
     candidates = merge_hybrid_rows(right, left, right_factor=load_baseline()["model_id"])
     snapshots[observation_date] = candidates
     codes = {row["code"] for rows in snapshots.values() for row in rows}
@@ -340,6 +395,21 @@ def _run_capture(*, database, sync_state, left_directory, formula_history,
     verify_completed_receipts(state, repository)
     day_root = output / observation_date
     day_root.mkdir(parents=True, exist_ok=True)
+    from stock_research.research.structure_event_store import capture_structure_session
+    structure_members = structure_context["eligible_members"].assign(membership_as_of=captured_at)
+    structure_frames = dict(_iter_price_frames(structure_context["prices"], codes=set(structure_members["code"])))
+    structure_receipt = capture_structure_session(
+        day_root / "structure_events", structure_frames, structure_members, observation_date,
+        captured_at=captured_at,
+        source_receipts={"sync_state": Path(sync_state), "formula_history": Path(formula_history),
+                         "left_manifest": Path(left_directory) / "manifest.json", "baseline": BASELINE_PATH},
+        factor_ranks=structure_context["factor_ranks"],
+    )
+    del structure_frames, structure_context
+    if (sha256(sync_state) != sync_hash or sha256(formula_history) != formula_hash
+            or implementation_fingerprint() != implementation):
+        raise ValueError("input/code changed during structure event capture")
+    capture_clock(observation_date)
     candidate_path = day_root / "candidates.csv"
     pd.DataFrame(candidates).to_csv(candidate_path, index=False, encoding="utf-8-sig")
     write_json(day_root / "paper_orders.json", {"orders": orders, "paper_only": True,
@@ -351,6 +421,9 @@ def _run_capture(*, database, sync_state, left_directory, formula_history,
              "captured_at": captured_at, "formula33": phase,
              "formula_sha256": formula_hash, "left_receipt": left_receipt,
              "sync_state_sha256": sync_hash,
+             "structure_event_receipt": structure_receipt,
+             "structure_event_manifest": (day_root / "structure_events" / "manifest.json").relative_to(output).as_posix(),
+             "structure_event_manifest_sha256": sha256(day_root / "structure_events" / "manifest.json"),
              "orders_sha256": sha256(day_root / "paper_orders.json"),
              "paper_replay_sha256": sha256(day_root / "paper_replay.json")}
     manifest["snapshots"].append(entry)

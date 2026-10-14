@@ -6,6 +6,18 @@ import pytest
 from stock_research.research import frozen_forward as forward
 
 
+def test_standalone_capture_requires_real_streaks_and_preserves_observed_state():
+    row = {"date": "2026-10-14", "phase": "active", "window_up_streak": 0,
+           "window_down_streak": 3, "window_unique_count": 137, "source": "actual_observation"}
+    assert forward.observed_formula_state(pd.DataFrame([row]), row["date"]) == row
+    with pytest.raises(ValueError, match="observed"):
+        forward.observed_formula_state(pd.DataFrame([{key: value for key, value in row.items()
+                                                     if key != "window_down_streak"}]), row["date"])
+    for value in (None, -1, 2.5, float("inf")):
+        with pytest.raises(ValueError, match="nonnegative integer"):
+            forward.observed_formula_state(pd.DataFrame([{**row, "window_down_streak": value}]), row["date"])
+
+
 def test_capture_clock_refuses_backfills_unfinished_days_and_ambiguous_time():
     assert forward.capture_clock("2026-10-14", "2026-10-14T20:30:00+08:00") == "2026-10-14T12:30:00+00:00"
     for day, now in [("2026-10-13", "2026-10-14T20:30:00+08:00"),
@@ -20,7 +32,7 @@ def test_sync_requires_same_day_capture_and_financials(tmp_path):
     state = {"status": "completed", "latest_session": "2026-10-14", "database": str(tmp_path / "db"),
              "financial_capture_requested": True, "completed": {
                  f"{dataset}:2026-10-14": {"captured_at": "2026-10-14T10:00:00Z"}
-                 for dataset in (*forward.DAILY_DATASETS, "dividend")}}
+                 for dataset in (*forward.DAILY_DATASETS, "dividend", "basic", "stock_basic", "trade_cal")}}
     forward.validate_sync_receipt(state, tmp_path / "db", "2026-10-14", "2026-10-14T12:00:00Z")
     state["completed"]["daily_kline:2026-10-14"]["captured_at"] = "2026-10-15T00:00:00Z"
     with pytest.raises(ValueError, match="same-day"):
@@ -99,7 +111,7 @@ def test_pending_exit_projection_preserves_state():
     assert all(row["side"] == "sell" and row["quantity"] is None and not row["filled"] for row in intents)
 
 
-def test_right_ranks_before_liquidity_and_ignores_future_ipo_and_bars(monkeypatch):
+def test_right_scores_before_liquidity_but_ranks_match_candidates_and_ignore_future(monkeypatch):
     days = pd.bdate_range(end="2026-10-14", periods=85)
     prices = pd.DataFrame([
         {"date": day, "code": code, "open": 10, "high": 11, "low": 9, "close": 10,
@@ -129,3 +141,81 @@ def test_right_ranks_before_liquidity_and_ignores_future_ipo_and_bars(monkeypatc
     assert captured["rank_universe"] == {"A", "B", "C"}
     assert [row["code"] for row in rows] == ["B", "C"]
     assert rows[0]["playbook_factor_score"] == pytest.approx(2 / 3)
+    research_rows, context = forward.build_right_snapshot(prices, master, pd.DataFrame(), "2026-10-14", return_context=True)
+    assert research_rows == rows
+    assert context["factor_ranks"] == {"B": 1, "C": 2}
+    assert list(context["factor_ranks"])[:2] == [row["code"] for row in rows]
+    members = context["eligible_members"].set_index("code")
+    assert set(members.index) == {"B", "C"}
+    assert members.loc["B", "adv20_yuan"] == 50_000_000
+    assert members.loc["B", "history_days"] == 85
+    assert members["is_listed"].all() and not members["is_st"].any()
+    # A remains a valid traded PIT member today, but its rolling liquidity
+    # cannot be computed from an incomplete prior-session amount.
+    prices.loc[prices["code"].eq("A") & prices["date"].eq(days[-2]), "amount"] = float("nan")
+    with pytest.raises(ValueError, match="lack finite ADV20"):
+        forward.build_right_snapshot(prices, master, pd.DataFrame(), "2026-10-14", return_context=True)
+
+
+def test_capture_publishes_and_verifies_full_universe_structure_sidecar(monkeypatch, tmp_path):
+    from stock_research.reporting.forward import load_forward_report
+    from stock_research.research.structure_event_store import load_structure_session
+
+    day, stamp = "2026-10-14", "2026-10-14T10:00:00+00:00"
+    dates = pd.bdate_range(end=day, periods=85)
+    prices = pd.DataFrame([{"date": date, "code": code, "open": 10., "high": 10.1,
+                           "low": 9.9, "close": 10., "volume": 100000., "amount": 50000.,
+                           "raw_to_qfq_factor": 1., "tradestatus": "1"}
+                          for date in dates for code in ("sh.600000", "sh.600001")])
+    basic = pd.DataFrame([{"code": code, "list_date": "2000-01-01", "delist_date": None}
+                          for code in ("sh.600000", "sh.600001")])
+    limits = prices[["date", "code"]].assign(up_limit=11., down_limit=9.)
+    class Repository:
+        def __init__(self, database):
+            pass
+        def load_market_daily_frame(self, **kwargs):
+            return prices.copy()
+        def load_stock_basic_universe(self):
+            return basic.copy()
+        def load_dataset_for_codes(self, dataset, *args, **kwargs):
+            return limits.copy() if dataset == "stk_limit" else pd.DataFrame(columns=["date", "code"])
+        def load_dividend_actions(self, *args, **kwargs):
+            return {}
+    def right(*args, **kwargs):
+        assert kwargs["return_context"] is True
+        members = pd.DataFrame({"date": pd.Timestamp(day), "code": ["sh.600000", "sh.600001"],
+                                "history_days": 85, "adv20_yuan": 50000000., "is_listed": True,
+                                "is_traded": True, "is_st": False})
+        # Only one stock enters the paper portfolio; both must reach R03.
+        rows = [{"code": "sh.600000", "candidate_score": 90., "playbook_factor_rank": 1,
+                 "candidate_source": "quantsplaybook_factor", "allow_right": True, "allow_left": False,
+                 "selected_for_trading": True, "signal_eligible": True}]
+        return rows, {"eligible_members": members, "factor_ranks": {"sh.600000": 1, "sh.600001": 2}, "prices": prices}
+    monkeypatch.setattr(forward, "capture_clock", lambda observation_date: stamp)
+    monkeypatch.setattr(forward, "validate_sync_receipt", lambda *args: None)
+    monkeypatch.setattr(forward, "verify_completed_receipts", lambda *args: None)
+    monkeypatch.setattr(forward, "implementation_fingerprint", lambda: {"isolated_route_test": True})
+    monkeypatch.setattr(forward, "TushareRepository", Repository)
+    monkeypatch.setattr(forward, "build_right_snapshot", right)
+    monkeypatch.setattr(forward, "load_left_snapshot", lambda *args: ([], {"stable_fixture": True}))
+    monkeypatch.setattr(forward, "replay_paper", lambda *args, **kwargs: {
+        "paper_only": True, "research_only": True, "events": [], "equity_curve": [], "trade_ledger": []})
+    state = tmp_path / "sync.json"
+    forward.write_json(state, {})
+    left = tmp_path / "left"
+    left.mkdir()
+    forward.write_json(left / "manifest.json", {"source_fixture": True})
+    formula = tmp_path / "formula.csv"
+    pd.DataFrame([{"date": day, "phase": "active", "window_up_streak": 5,
+                   "window_down_streak": 0, "window_unique_count": 100}]).to_csv(formula, index=False)
+    output = tmp_path / "forward"
+    entry = forward.run_capture(database=tmp_path / "data.sqlite3", sync_state=state,
+                                left_directory=left, formula_history=formula, output_root=output, observation_date=day)
+    document, _ = load_structure_session(output / day / "structure_events")
+    assert document["member_count"] == 2 and entry["candidate_count"] == 1
+    assert entry["structure_event_receipt"] == document
+    bundle = load_forward_report(output / "manifest.json", day, now="2026-10-14T20:30:00+08:00")
+    assert len(bundle["candidates"]) == 1
+    (output / day / "structure_events" / "factor_ranks.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="archive changed"):
+        load_forward_report(output / "manifest.json", day, now="2026-10-14T20:30:00+08:00")

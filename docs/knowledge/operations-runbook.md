@@ -16,7 +16,7 @@ $Python = 'D:\ActionsRunner\my-trade\python\python.exe'
 
 脚本设置 UTF-8、处理代理环境变量并调用 `python -m apps.daily_pipeline`。财报期在 Python 中按 Formula33 本轮观察日和统一法定披露截止日规则确定；PowerShell 不再按月份写入 `REPORT_PERIOD`。不要手工串联多个单步命令替代生产入口。
 
-## 2. 七步顺序
+## 2. 八步顺序
 
 ```text
 1. formula33             21 日市场结构和观察日资格
@@ -25,10 +25,13 @@ $Python = 'D:\ActionsRunner\my-trade\python\python.exe'
 4. factor_selection      独立因子候选
 5. fundamental_update    财务增量与动态截面
 6. fundamental_selection 价值线和正常基本面候选
-7. daily_report          四项日报、CSV/HTML 和可选推送
+7. frozen_forward       当日同步、价值左侧、冻结候选与本地纸面回放
+8. daily_report          四项日报、本地冻结策略附录、CSV/HTML 和可选推送
 ```
 
-`formula33` 失败时，财务更新和筛选都跳过，避免失去本轮观察日后使用系统日期继续运行。`fundamental_update` 失败时必须跳过 `fundamental_selection`。六个上游步骤任一失败时必须跳过正式日报推送。日报还会校验 Formula33 完成清单、样例标记、必需产物数量和三个输入的观察日。
+`formula33` 失败时，财务更新、筛选和冻结前向步骤都跳过，避免失去本轮观察日后使用系统日期继续运行。`fundamental_update` 失败时必须跳过 `fundamental_selection`。七个上游步骤任一失败时必须跳过正式日报推送。日报还会校验 Formula33 完成清单、样例标记、必需产物数量、三个观察输入的日期和冻结前向 manifest。
+
+`frozen_forward` 只接受实际当地交易日 16:30 后的完整数据和当日回执。它独立采集财报/行业来源生成 `value_model` 左侧，使用冻结六因子右侧 Top50，归档候选及未成交的条件纸面意图。旧的 cache-only 因子观察文件不能替代冻结模型。产物位于 `var/forward/frozen_strategy`；同日重跑只复用哈希一致的不可变记录。失败原因写入 `daily_status.json`，缺数或旧日期不算当天成功；历史诊断与真实前向捕获分开。当前结果仍是研究用途，不代表完整历史 PIT 或可下实盘单。详细实机状态见 [P0 接入验收](../plan/p0-forward-closure-2026-10-14.md)。
 
 ## 3. 推荐运行流程
 
@@ -44,7 +47,7 @@ $Python = 'D:\ActionsRunner\my-trade\python\python.exe'
 & $Python -m apps.daily_pipeline --no-push
 ```
 
-逐项确认七步退出码、结果数量、日期和产物后，才执行正式推送：
+逐项确认八步退出码、结果数量、日期和产物后，才执行正式推送：
 
 ```powershell
 & $Python -m apps.daily_pipeline
@@ -118,7 +121,7 @@ SMTP 必需变量为 `SMTP_HOST`、`SMTP_USERNAME`、`SMTP_PASSWORD` 和 `REPORT
 
 ## 7. 基本面与选股验收
 
-`fundamental_update` 输出本轮观察日、报告期、行情覆盖率和财务覆盖率。生产门槛由七步入口传入：
+`fundamental_update` 输出本轮观察日、报告期、行情覆盖率和财务覆盖率。生产门槛由八步入口传入：
 
 ```text
 最低行情覆盖率       90%
@@ -194,7 +197,7 @@ SMTP 必需变量为 `SMTP_HOST`、`SMTP_USERNAME`、`SMTP_PASSWORD` 和 `REPORT
 
 ## 11. DuckDB 检查边界
 
-当前迁移只包含 7 张应用表：3 张基础运维表、1 张事件表、2 张板块表和 1 张股票日线表。顶层七步生产成功不能通过查询一个不存在的全链路运行表来判断；以退出码、完成清单、覆盖率、产物和 PushPlus 返回值共同验收。
+当前迁移只包含 7 张应用表：3 张基础运维表、1 张事件表、2 张板块表和 1 张股票日线表。顶层八步生产成功不能通过查询一个不存在的全链路运行表来判断；以退出码、完成清单、覆盖率、产物和 PushPlus 返回值共同验收。
 
 数据库备份应在没有活跃写事务时进行。由于财务和部分生产数据仍在文件缓存中，当前灾备范围还必须包含 `var/cache` 和 `var/state`。
 
@@ -209,11 +212,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\setup_schedul
 Get-ScheduledTask -TaskName 'StockSelection-Daily' | Get-ScheduledTaskInfo
 ```
 
-定时任务应使用与手工验证相同的解释器和环境变量，并保留 `var/logs/daily_analysis_*.log`。Python 启动失败及流水线非零退出码都会写入 transcript，并原样传递流水线退出码。正式验收仍需真实任务运行的 `LastTaskResult=0` 和七步产物完整；隔离 stub 的启动成功不能替代这一验收。修复代码的测试不会发送外部告警、推送或调用券商接口。
+定时任务应使用与手工验证相同的解释器和环境变量，并保留 `var/logs/daily_analysis_*.log`。Python 启动失败及流水线非零退出码都会写入 transcript，并原样传递流水线退出码。正式验收仍需真实任务运行的 `LastTaskResult=0` 和八步产物完整；隔离 stub 的启动成功不能替代这一验收。修复代码的测试不会发送外部告警、推送或调用券商接口。
 
 ## 13. GP/A 独立前向研究采集
 
-GP/A 不属于七步生产流水线，不参与日报推送，也不能替换当前右侧候选。它从 `2026-08-11` 以后真实捕获的财报版本开始独立积累证据。
+GP/A 不属于八步生产流水线，不参与日报推送，也不能替换当前右侧候选。它从 `2026-08-11` 以后真实捕获的财报版本开始独立积累证据。
 
 先同步当时最新完整年报。下面以2025年报为例；后续年度必须显式修改 `--period`：
 

@@ -56,9 +56,18 @@ def observed_structure_events(price_frames, eligible_members, observation_date, 
     members = members.loc[members.date.eq(day)].copy()
     if members.empty or members.code.duplicated().any():
         raise ValueError("Dated full membership must be nonempty and unique")
-    available = pd.to_datetime(members.membership_as_of, errors="coerce")
-    if available.isna().any() or available.gt(day).any():
-        raise ValueError("Future or unknown membership is not allowed")
+    for value in members.membership_as_of:
+        available = pd.Timestamp(value)
+        if pd.isna(available):
+            raise ValueError("Future or unknown membership is not allowed")
+        if available.tzinfo is not None:
+            local = available.tz_convert("Asia/Shanghai")
+            if local > captured or local.tz_localize(None).normalize() > day:
+                raise ValueError("Future or unknown membership is not allowed")
+        elif available != available.normalize():
+            raise ValueError("Intraday membership availability requires a timezone")
+        elif available > day:
+            raise ValueError("Future or unknown membership is not allowed")
     for column in ("is_listed", "is_traded", "is_st"):
         if not members[column].map(lambda value: isinstance(value, (bool, np.bool_))).all():
             raise ValueError("Membership flags must be explicit booleans")
@@ -112,20 +121,33 @@ class EventExpectancy:
     dataset_sha256: str
 
 
-def visible_expectancy(events, labels, captures, *, as_of, signal_type, horizon=60,
-                       forward_only=True):
-    """Require 252 real captured sessions and 100 nonoverlapping campaigns.
+def _true(value):
+    return isinstance(value, (bool, np.bool_)) and bool(value)
 
-    Exit R must include actual executable costs. Close-return labels are not
-    admitted as executable outcomes. A pending endpoint is never filled with 0.
-    """
+
+def _visible_campaigns(events, labels, captures, *, as_of, signal_type, horizon, forward_only):
     if horizon not in HORIZONS:
         raise ValueError("Only registered T+20/T+60 horizons are allowed")
     cutoff = _local_time(as_of)
     event_frame, label_frame, capture_frame = map(pd.DataFrame, (events, labels, captures))
+    sessions, captured_sources = 0, set()
+    if not capture_frame.empty:
+        if {"observation_date", "captured_at", "source_sha256", "is_trading_day"} - set(capture_frame):
+            raise ValueError("Captured-session receipts are required")
+        times = pd.Series(_observed_times(capture_frame.captured_at), index=capture_frame.index)
+        days = pd.to_datetime(capture_frame.observation_date, errors="coerce")
+        local = times.dt.tz_convert("Asia/Shanghai")
+        hashes = capture_frame.source_sha256.astype(str).str.fullmatch(r"[0-9a-f]{64}")
+        valid = (times.le(cutoff) & local.dt.tz_localize(None).dt.normalize().eq(days) & hashes
+                 & capture_frame.is_trading_day.map(_true)
+                 & (local.dt.hour * 60 + local.dt.minute).ge(16 * 60 + 30))
+        if forward_only:
+            valid &= times.gt(REGISTERED_AT)
+        sessions = int(days.loc[valid].nunique())
+        captured_sources = {(str(days.loc[index].date()), str(times.loc[index]),
+                             str(capture_frame.loc[index, "source_sha256"])) for index in capture_frame.index[valid]}
     if event_frame.empty or label_frame.empty:
-        return EventExpectancy(cutoff.isoformat(), signal_type, horizon, 0, 0, None, None,
-                               "insufficient_visible_campaigns", hashlib.sha256(b"[]").hexdigest())
+        return [], sessions
     required = {"event_id", "code", "observation_date", "captured_at", "signal_type", "source_sha256"}
     if required - set(event_frame) or {"event_id", "horizon", "exit_date", "available_at", "net_r", "executable", "cost_included", "label_source_sha256"} - set(label_frame):
         raise ValueError("Incomplete event/outcome evidence")
@@ -141,14 +163,19 @@ def visible_expectancy(events, labels, captures, *, as_of, signal_type, horizon=
     selected["net_r"] = pd.to_numeric(selected.net_r, errors="coerce")
     valid = (selected.start.notna() & selected.exit.notna() & selected.exit.ge(selected.start)
              & selected.exit.le(cutoff.tz_localize(None).normalize()) & np.isfinite(selected.net_r)
-             & selected.executable.eq(True) & selected.cost_included.eq(True)
+             & selected.executable.map(_true) & selected.cost_included.map(_true)
              & selected.source_sha256.astype(str).str.fullmatch(r"[0-9a-f]{64}")
              & selected.label_source_sha256.astype(str).str.fullmatch(r"[0-9a-f]{64}")
+             & selected.known.ge(selected.capture)
              & selected.known.dt.tz_convert("Asia/Shanghai").dt.tz_localize(None).dt.normalize().ge(selected.exit))
     selected = selected.loc[valid].copy()
     if forward_only:
         day = selected.capture.dt.tz_convert("Asia/Shanghai").dt.tz_localize(None).dt.normalize()
         selected = selected.loc[selected.capture.gt(REGISTERED_AT) & day.eq(selected.start)]
+        matched = pd.Series([(str(row["start"].date()), str(row["capture"]), str(row["source_sha256"]))
+                             in captured_sources for row in selected.to_dict("records")],
+                            index=selected.index, dtype=bool)
+        selected = selected.loc[matched]
     # Keep the first available campaign; repeated signals in a still-open
     # stock campaign cannot inflate the class's evidence count.
     retained, last_exit = [], {}
@@ -157,19 +184,21 @@ def visible_expectancy(events, labels, captures, *, as_of, signal_type, horizon=
             continue
         retained.append(row)
         last_exit[row["code"]] = row["exit"]
-    sessions = 0
-    if not capture_frame.empty:
-        if {"observation_date", "captured_at", "source_sha256", "is_trading_day"} - set(capture_frame):
-            raise ValueError("Captured-session receipts are required")
-        times = pd.Series(_observed_times(capture_frame.captured_at), index=capture_frame.index)
-        days = pd.to_datetime(capture_frame.observation_date, errors="coerce")
-        local_days = times.dt.tz_convert("Asia/Shanghai").dt.tz_localize(None).dt.normalize()
-        hashes = capture_frame.source_sha256.astype(str).str.fullmatch(r"[0-9a-f]{64}")
-        valid = times.le(cutoff) & local_days.eq(days) & hashes & capture_frame.is_trading_day.eq(True)
-        if forward_only:
-            valid &= times.gt(REGISTERED_AT)
-        sessions = int(days.loc[valid].nunique())
-    dataset = [{key: str(row[key]) for key in ("event_id", "source_sha256", "exit", "known", "net_r")} for row in retained]
+    return retained, sessions
+
+
+def visible_expectancy(events, labels, captures, *, as_of, signal_type, horizon=60,
+                       forward_only=True):
+    """Require 252 real captured sessions and 100 nonoverlapping campaigns.
+
+    Exit R must include actual executable costs. Close-return labels are not
+    admitted as executable outcomes. A pending endpoint is never filled with 0.
+    Each forward event must match its actual dated source capture receipt.
+    """
+    cutoff = _local_time(as_of)
+    retained, sessions = _visible_campaigns(events, labels, captures, as_of=as_of,
+        signal_type=signal_type, horizon=horizon, forward_only=forward_only)
+    dataset = [{key: str(row[key]) for key in ("event_id", "source_sha256", "label_source_sha256", "exit", "known", "net_r")} for row in retained]
     fingerprint = hashlib.sha256(json.dumps(dataset, sort_keys=True).encode()).hexdigest()
     values = np.array([row["net_r"] for row in retained], dtype=float)
     enough = len(values) >= 100 and sessions >= 252
@@ -177,6 +206,48 @@ def visible_expectancy(events, labels, captures, *, as_of, signal_type, horizon=
     return EventExpectancy(cutoff.isoformat(), signal_type, horizon, len(values), sessions,
                            float(values.mean()) if len(values) else None,
                            float((values > 0).mean()) if len(values) else None, status, fingerprint)
+
+
+def conditional_factor_gain(events, labels, captures, *, as_of, signal_type, horizon=60,
+                            forward_only=True):
+    """Describe Top50's incremental net R within the same class and date.
+
+    A date contributes once, after averaging its campaigns in each cohort.
+    Unpaired dates and unknown ranks cannot masquerade as zero outcomes. The
+    normal interval describes date clusters; it is not a causal attribution or
+    a serial-dependence correction, and never promotes production parameters.
+    """
+    retained, sessions = _visible_campaigns(events, labels, captures, as_of=as_of,
+        signal_type=signal_type, horizon=horizon, forward_only=forward_only)
+    dated = {}
+    known = 0
+    for row in retained:
+        rank = row.get("factor_rank")
+        if (not isinstance(rank, (int, float, np.integer, np.floating))
+                or isinstance(rank, (bool, np.bool_)) or not math.isfinite(rank)
+                or rank < 1 or float(rank) % 1):
+            continue
+        known += 1
+        day = str(row["start"].date())
+        cohorts = dated.setdefault(day, {"top50": [], "outside_top50": []})
+        cohorts["top50" if rank <= 50 else "outside_top50"].append(float(row["net_r"]))
+    pairs = [{"date": day, "top50_campaigns": len(groups["top50"]),
+              "outside_campaigns": len(groups["outside_top50"]),
+              "incremental_net_r": float(np.mean(groups["top50"]) - np.mean(groups["outside_top50"]))}
+             for day, groups in sorted(dated.items()) if all(groups.values())]
+    values = np.array([row["incremental_net_r"] for row in pairs], dtype=float)
+    mean = float(values.mean()) if len(values) else None
+    se = float(values.std(ddof=1) / math.sqrt(len(values))) if len(values) >= 2 else None
+    return {"as_of": _local_time(as_of).isoformat(), "signal_type": signal_type, "horizon": horizon,
+            "status": "descriptive_only", "captured_sessions": sessions,
+            "nonoverlapping_campaigns": len(retained), "campaigns_with_rank": known,
+            "paired_date_clusters": len(pairs), "unpaired_dates": len(dated) - len(pairs),
+            "mean_incremental_net_r": mean, "date_cluster_standard_error": se,
+            "normal_95_interval": [mean - 1.96 * se, mean + 1.96 * se] if se is not None else None,
+            "date_clusters": pairs, "forward_sample_gate_met": forward_only and sessions >= 252 and len(retained) >= 100,
+            "research_only": True, "production_configuration_changed": False,
+            "limitations": ["Date clusters may remain serially dependent across overlapping horizons.",
+                            "Conditioning on factor rank does not establish causal contribution."]}
 
 
 def expected_target(entry, stop, estimate: EventExpectancy):

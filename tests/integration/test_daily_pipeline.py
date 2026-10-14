@@ -91,6 +91,7 @@ def test_daily_pipeline_skips_report_when_sector_statistics_fails():
         "factor_selection",
         "fundamental_update",
         "fundamental_selection",
+        "frozen_forward",
     ],
 )
 def test_daily_report_requires_every_production_step(failed_step):
@@ -142,6 +143,7 @@ def test_default_steps_only_allow_final_report_to_push(monkeypatch, tmp_path):
         "sector_stats_md_path": tmp_path / "sector_stats.md",
         "sector_path": tmp_path / "sector.csv",
         "factor_path": tmp_path / "factor.csv",
+        "forward_manifest_path": tmp_path / "forward_manifest.json",
     }
     for path in artifact_paths.values():
         path.write_text("current run", encoding="utf-8")
@@ -161,6 +163,7 @@ def test_default_steps_only_allow_final_report_to_push(monkeypatch, tmp_path):
     assert captured["report"][captured["report"].index("--formula-path") + 1] == str(artifact_paths["formula_path"])
     assert captured["report"][captured["report"].index("--sector-path") + 1] == str(artifact_paths["sector_path"])
     assert captured["report"][captured["report"].index("--fundamental-path") + 1] == str(artifact_paths["fundamental_path"])
+    assert captured["report"][captured["report"].index("--forward-manifest") + 1] == str(artifact_paths["forward_manifest_path"])
 
 
 def test_default_steps_forward_actions_report_period(monkeypatch):
@@ -310,6 +313,7 @@ def test_default_pipeline_captures_only_outputs_from_current_run(
     sector_csv = market_dir / "sector_watch_current.csv"
     factor_csv = selection_dir / "factor_selection_current.csv"
     fundamental_csv = selection_dir / "daily_fundamental_selection_current.csv"
+    forward_manifest = state_dir / "forward_manifest.json"
     manifest_path = state_dir / "formula33_completion.json"
     captured = {}
 
@@ -361,6 +365,11 @@ def test_default_pipeline_captures_only_outputs_from_current_run(
     monkeypatch.setattr(daily_pipeline.sector_watch, "main", sector_main)
     monkeypatch.setattr(daily_pipeline.factor_selection, "main", factor_main)
     monkeypatch.setattr(daily_pipeline.fundamental_update, "main", lambda args: 0)
+    def capture_forward(**kwargs):
+        assert kwargs == {"observation_date": "2026-07-10", "formula_path": str(formula_csv.resolve())}
+        forward_manifest.write_text("{}", encoding="utf-8")
+        return forward_manifest
+    monkeypatch.setattr(daily_pipeline.daily_forward, "run", capture_forward)
     monkeypatch.setattr(
         daily_pipeline.fundamental_selection,
         "main",
@@ -392,6 +401,7 @@ def test_default_pipeline_captures_only_outputs_from_current_run(
     assert report_args[report_args.index("--formula-path") + 1] == str(formula_csv.resolve())
     assert report_args[report_args.index("--sector-path") + 1] == str(sector_csv.resolve())
     assert report_args[report_args.index("--fundamental-path") + 1] == str(fundamental_csv.resolve())
+    assert report_args[report_args.index("--forward-manifest") + 1] == str(forward_manifest)
     assert captured["fundamental_args"][-2:] == ["--observation-date", "2026-07-10"]
     assert steps.artifacts["sector_stats_xlsx_path"] == str(sector_stats_xlsx.resolve())
     assert steps.artifacts["sector_stats_md_path"] == str(sector_stats_md.resolve())

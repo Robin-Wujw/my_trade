@@ -25,6 +25,7 @@ from stock_research.reporting.breakout_watch import (
     update_breakout_watch,
 )
 from stock_research.reporting.trade_reminders import build_trade_reminders, load_trade_plans
+from stock_research.reporting.forward import load_forward_report, render_forward_report
 
 
 SELECTION_DIR = str(PATHS.selection_exports)
@@ -77,6 +78,7 @@ def parse_args(argv=None):
     parser.add_argument("--fundamental-path", default="")
     parser.add_argument("--formula-path", default="")
     parser.add_argument("--sector-path", default="")
+    parser.add_argument("--forward-manifest", default="")
     return parser.parse_args(argv)
 
 
@@ -986,6 +988,7 @@ def build_reports(
     fundamental_path="",
     formula_path="",
     sector_path="",
+    forward_manifest="",
 ):
     fundamental_path = _resolve_input_path(
         fundamental_path,
@@ -1019,6 +1022,7 @@ def build_reports(
             "sector_watch": _observation_date(sectors, "板块输入"),
         }
     )
+    forward = load_forward_report(forward_manifest, report_date) if forward_manifest else None
     values = stocks[stocks["strategy_part"] == "1.基本价值线或附近"].copy()
     normal = stocks[stocks["strategy_part"] == "2.正常基本面选股"].copy().head(normal_top)
     for frame in (values, normal):
@@ -1126,6 +1130,8 @@ def build_reports(
                 f"5日/20日量能{num(row.get('amount_5_20'))}，涨停扩散{int(row.get('limit_up_count',0) or 0)}。</li>"
             )
         full_parts.append("</ol>")
+    if forward is not None:
+        full_parts.append(render_forward_report(forward))
     full_html = "".join(full_parts)
 
     push_parts = build_push_reports(
@@ -1166,6 +1172,7 @@ def main(argv=None):
         args.fundamental_path,
         args.formula_path,
         args.sector_path,
+        args.forward_manifest,
     )
     report_date = bundle.report_date
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")

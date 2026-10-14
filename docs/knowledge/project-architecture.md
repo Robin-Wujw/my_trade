@@ -24,7 +24,7 @@ var/              本地运行数据根目录，整体忽略提交
 - `market`：行情、板块和股票数据访问；
 - `indicators`：不联网的指标计算；
 - `strategies`：Formula33、基本面和板块规则；
-- `pipelines`：七步执行、缓存、覆盖率和产物门禁；
+- `pipelines`：八步执行、缓存、覆盖率和产物门禁；
 - `reporting`：日报、差异、HTML/CSV 和推送正文；
 - `regression`：历史输出基线校验。
 
@@ -45,12 +45,15 @@ scripts/run_daily_analysis.ps1
               +-- 4. factor_selection
               +-- 5. fundamental_update
               +-- 6. fundamental_selection
-              +-- 7. daily_report
+              +-- 7. frozen_forward
+              +-- 8. daily_report
 ```
 
 完整生产入口只有 `apps.daily_pipeline`。其他 `apps.*` 命令用于单步诊断和故障恢复，不能改变生产顺序或绕过最终门禁。
 
-日报步骤接收本轮明确捕获的 Formula33、板块观察和基本面筛选路径。它拒绝样例产物、缺失产物、同类型多产物和观察日不一致的输入，不从目录中任意挑选旧结果。
+日报步骤接收本轮明确捕获的 Formula33、板块观察、基本面筛选和冻结前向 manifest 路径。它拒绝样例产物、缺失产物、同类型多产物和观察日不一致的输入，不从目录中任意挑选旧结果。
+
+`frozen_forward` 在同日16:30之后绑定真实同步收据、年度扣非EPS与股数调整、行业来源和完整Formula33观察值；同时保存全部流动性合格股票的结构事件以及增长封顶研究旁表。未成熟的事件收益保持空值。日报只读取通过哈希校验的本地纸面意图，MiniQMT保持只读。生产认证或计划任务权限失败时记录阻断，不能把历史补抓算成前向成功。
 
 ## 4. Formula33 数据流
 

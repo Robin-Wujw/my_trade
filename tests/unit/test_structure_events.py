@@ -70,3 +70,46 @@ def test_full_membership_events_include_non_top50_and_ignore_future_prices(monke
     assert all(row["planned_r"] == 3 for row in rows)
     membership[1]["is_st"] = True
     assert len(events.observed_structure_events(frames, membership, "2026-10-14", captured_at="2026-10-14T17:00:00+08:00", source_sha256="a" * 64)) == 1
+
+
+def test_actual_capture_sessions_remain_visible_without_mature_labels_and_event_sources_must_match():
+    entries, labels, captures = sample()
+    parameters = dict(as_of="2026-12-01T20:00:00+08:00", signal_type="test", horizon=20)
+    pending = events.visible_expectancy(entries, [], captures, **parameters)
+    assert pending.captured_sessions == 2 and pending.campaigns == 0 and pending.mean_net_r is None
+    captures[0]["source_sha256"] = "f" * 64
+    labels[1]["executable"] = False
+    unmatched = events.visible_expectancy(entries, labels, captures, **parameters)
+    assert unmatched.captured_sessions == 2 and unmatched.campaigns == 0
+    labels[0]["cost_included"] = "true"
+    assert events.visible_expectancy(entries, labels, captures, forward_only=False, **parameters).campaigns == 0
+
+
+def test_conditional_gain_weights_dates_once_and_cannot_borrow_future_labels():
+    entries, labels, captures = [], [], []
+    # A large first-date cross-section must not overwhelm the second date.
+    for index, (day, inside, outside, count) in enumerate([
+        ("2026-10-15", 3., 1., 10), ("2026-10-16", -2., 0., 1),
+    ]):
+        captured = f"{day}T17:00:00+08:00"
+        sha = str(index) * 64
+        captures.append({"observation_date": day, "captured_at": captured, "source_sha256": sha,
+                         "is_trading_day": True})
+        for member in range(count + 1):
+            event_id = f"{index}-{member}"
+            entries.append({"event_id": event_id, "code": f"{index}-{member}", "observation_date": day,
+                            "captured_at": captured, "signal_type": "test", "source_sha256": sha,
+                            "factor_rank": 1 if member < count else 500})
+            labels.append({"event_id": event_id, "horizon": 20, "exit_date": "2026-11-15",
+                           "available_at": "2026-11-15T17:00:00+08:00", "net_r": inside if member < count else outside,
+                           "executable": True, "cost_included": True, "label_source_sha256": "a" * 64})
+    parameters = dict(as_of="2026-11-15T20:00:00+08:00", signal_type="test", horizon=20)
+    result = events.conditional_factor_gain(entries, labels, captures, **parameters)
+    assert result["mean_incremental_net_r"] == 0 and result["paired_date_clusters"] == 2
+    assert result["date_cluster_standard_error"] == 2 and result["forward_sample_gate_met"] is False
+    future = {**labels[-1], "event_id": "future", "available_at": "2026-11-16T17:00:00+08:00", "net_r": 999.}
+    assert events.conditional_factor_gain(entries, [*labels, future], captures, **parameters) == result
+    # Missing one cohort is an unpaired date, never a fabricated zero label.
+    reduced = events.conditional_factor_gain(entries, labels[:-1], captures, **parameters)
+    assert reduced["paired_date_clusters"] == 1 and reduced["unpaired_dates"] == 1
+    assert reduced["mean_incremental_net_r"] == 2 and reduced["normal_95_interval"] is None
