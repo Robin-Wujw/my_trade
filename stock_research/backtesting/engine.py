@@ -248,6 +248,99 @@ def run_portfolio_backtest(
     security_end_dates=None,
     price_frames_prepared=False,
 ):
+    """Replay the frozen production behavior with its original public signature."""
+    return _run_portfolio_backtest(**locals())
+
+
+def _run_portfolio_backtest(
+    price_frames,
+    candidate_snapshots,
+    formula_phases,
+    *,
+    requested_start,
+    end_date,
+    trade_plans=None,
+    max_daily_candidates=MAX_DAILY_CANDIDATES,
+    max_positions=5,
+    max_total_held_symbols=5,
+    max_left_positions=1,
+    max_same_industry=2,
+    same_theme_correlation=0.60,
+    min_entry_evidence_score=0,
+    right_entry_priority_mode=ENTRY_PRIORITY_MODE_LEGACY,
+    right_entry_size_multiplier=1.0,
+    right_entry_risk_budget_pct=None,
+    enable_right_inverse_volatility_sizing=False,
+    enable_right_market_volatility_sizing=False,
+    price_amount_multiplier=1.0,
+    factor_only_min_avg_amount=None,
+    max_entry_signal_amount_participation=None,
+    max_entry_avg_amount_participation=None,
+    profit_tranches=5,
+    profit_tail_min_return=0.50,
+    left_grid_unit=0.02,
+    left_grid_step=0.05,
+    left_grid_max_exposure=0.10,
+    pe_pb_left_max_positions=1,
+    pe_pb_left_max_exposure=0.05,
+    max_symbol_exposure=0.70,
+    exit_tail_on_candidate_removal=False,
+    signals_effective_next_day=DEFAULT_SIGNALS_EFFECTIVE_NEXT_DAY,
+    auto_price_structure=True,
+    allow_structure_pullback=True,
+    allow_pullback_pilot=True,
+    enable_breadth_reversal_half_pullback=False,
+    factor_only_breadth_reversal_only=False,
+    breadth_reversal_max_unique_count=DEFAULT_BREADTH_REVERSAL_MAX_UNIQUE_COUNT,
+    breadth_reversal_risk_budget=DEFAULT_BREADTH_REVERSAL_RISK_BUDGET,
+    breadth_reversal_max_position=DEFAULT_BREADTH_REVERSAL_MAX_POSITION,
+    breadth_reversal_max_positions=5,
+    breadth_reversal_time_limit_days=DEFAULT_BREADTH_REVERSAL_TIME_LIMIT_DAYS,
+    enable_factor_horizon_channel=False,
+    factor_horizon_risk_budget=DEFAULT_FACTOR_HORIZON_RISK_BUDGET,
+    factor_horizon_stop_loss_pct=DEFAULT_FACTOR_HORIZON_STOP_LOSS_PCT,
+    factor_horizon_max_position=DEFAULT_FACTOR_HORIZON_MAX_POSITION,
+    factor_horizon_max_positions=5,
+    factor_horizon_holding_days=DEFAULT_FACTOR_HORIZON_HOLDING_DAYS,
+    factor_horizon_trend_management_return=None,
+    factor_horizon_max_return_60d=None,
+    factor_horizon_require_ma20_not_rising=False,
+    factor_horizon_exclude_watch_phase=False,
+    factor_horizon_min_avg_amount=None,
+    enable_compressed_structure_channel=False,
+    factor_only_compressed_structure_only=False,
+    compressed_structure_risk_budget=DEFAULT_COMPRESSED_STRUCTURE_RISK_BUDGET,
+    compressed_structure_stop_loss_pct=DEFAULT_COMPRESSED_STRUCTURE_STOP_LOSS_PCT,
+    compressed_structure_max_position=DEFAULT_COMPRESSED_STRUCTURE_MAX_POSITION,
+    compressed_structure_max_positions=5,
+    compressed_structure_holding_days=DEFAULT_COMPRESSED_STRUCTURE_HOLDING_DAYS,
+    compressed_structure_min_entry_evidence_score=(
+        DEFAULT_COMPRESSED_STRUCTURE_MIN_ENTRY_EVIDENCE_SCORE
+    ),
+    compressed_structure_min_proximity_score=(
+        DEFAULT_COMPRESSED_STRUCTURE_MIN_PROXIMITY_SCORE
+    ),
+    compressed_structure_min_avg_amount=(
+        DEFAULT_COMPRESSED_STRUCTURE_MIN_AVG_AMOUNT
+    ),
+    enable_intraday_right_protective_stop=False,
+    enable_diversified_factor_sleeve=False,
+    diversified_factor_risk_budget=0.01,
+    diversified_factor_max_position=0.20,
+    close_confirmed_execution=DEFAULT_CLOSE_CONFIRMED_EXECUTION,
+    commission_rate=DEFAULT_COMMISSION_RATE,
+    minimum_commission=DEFAULT_MINIMUM_COMMISSION,
+    initial_capital=1_000_000.0,
+    sell_stamp_duty_rate=DEFAULT_SELL_STAMP_DUTY_RATE,
+    sell_stamp_duty_rate_before_2023_08_28=(
+        DEFAULT_SELL_STAMP_DUTY_RATE_BEFORE_2023_08_28
+    ),
+    estimated_slippage_rate=DEFAULT_ESTIMATED_SLIPPAGE_RATE,
+    corporate_actions=None,
+    security_end_dates=None,
+    price_frames_prepared=False,
+    research_policy=None,
+):
     """Replay a portfolio without filling dates before candidate coverage."""
     if close_confirmed_execution not in {"next_open", "close_proxy"}:
         raise ValueError("close_confirmed_execution must be next_open or close_proxy")
@@ -411,6 +504,9 @@ def run_portfolio_backtest(
     current_phase = "waiting"
     current_down_streak = 0
     current_up_streak = 0
+    formula33_rules_enabled = research_policy is None or research_policy.formula33_enabled
+    research_risk_decisions = []
+    research_execution_marks = {}
     next_batch_id = 1
     last_candidate_scores = {}
     last_candidates = {}
@@ -686,6 +782,119 @@ def run_portfolio_backtest(
         state = states[code]
         return sum(float(lot["size"]) for lot in state.left + state.right + corporate_book.lots(code))
 
+    def research_visible_account(date):
+        """Mark holdings using information available in the current execution phase."""
+        symbol_values = {}
+        for held_code in sorted(occupied_codes()):
+            held_index = latest_frame_index(held_code, date)
+            if held_index is None:
+                raise ValueError("Research NAV has an unpriced holding")
+            held_row = frames[held_code].iloc[held_index]
+            if pd.Timestamp(held_row["date"]).normalize() == date and execution_phase != "close":
+                quote = raw_price(held_row, "open")
+                if quote is None or not math.isfinite(quote) or quote <= 0:
+                    held_index = latest_frame_index(held_code, date, inclusive=False)
+                    if held_index is None:
+                        raise ValueError("Research NAV has no visible holding quote")
+                    quote = valuation_price(held_code, frames[held_code].iloc[held_index], date)
+            else:
+                quote = valuation_price(held_code, held_row, date)
+            quote = research_execution_marks.get((date, execution_phase, held_code), quote)
+            if quote is None or not math.isfinite(quote) or quote < 0:
+                raise ValueError("Research NAV has an invalid holding quote")
+            lots = states[held_code].left + states[held_code].right + corporate_book.lots(held_code)
+            symbol_values[held_code] = sum(float(lot["quantity"]) * quote for lot in lots)
+        nav = float(cash_balance) + corporate_book.receivable + sum(symbol_values.values())
+        return nav, symbol_values
+
+    def entry_capital_limit():
+        if research_policy is None or research_policy.sizing_basis != "visible_nav":
+            return 1.0
+        return max(0., research_visible_account(date)[0] / float(initial_capital))
+
+    def entry_gross_exposure():
+        if research_policy is None or research_policy.sizing_basis != "visible_nav":
+            return gross_exposure()
+        return sum(research_visible_account(date)[1].values()) / float(initial_capital)
+
+    def entry_symbol_exposure(code):
+        if research_policy is None or research_policy.sizing_basis != "visible_nav":
+            return symbol_exposure(code)
+        return research_visible_account(date)[1].get(code, 0.) / float(initial_capital)
+
+    def entry_symbol_limit():
+        fraction = float(max_symbol_exposure)
+        if research_policy is not None and research_policy.gap_tail_enabled:
+            fraction = min(fraction, research_policy.max_position)
+        return fraction * entry_capital_limit()
+
+    def research_entry_size(code, date, candidate, signal, size, price, *, initial_entry):
+        if research_policy is None:
+            return size, {}, ""
+        from stock_research.research.portfolio_policy import (
+            gap_tail_estimate, portfolio_entry_scale, tail_budget_notional,
+        )
+        research_execution_marks[(date, execution_phase, code)] = price
+        nav, values = research_visible_account(date)
+        cutoff = date - pd.Timedelta(days=1)
+        metadata = {"research_observed_nav": nav, "research_price_cutoff": str(cutoff.date()),
+                    "research_valuation_phase": execution_phase,
+                    "research_sizing_basis": research_policy.sizing_basis,
+                    "research_observed_symbol_market_value": values.get(code, 0.)}
+        reason = ""
+        if nav <= 0:
+            reason = "research_nonpositive_nav"
+        if research_policy.sizing_basis == "visible_nav" and initial_entry:
+            size *= nav / float(initial_capital)
+        if research_policy.gap_tail_enabled and not reason:
+            stop = frozen_raw_price_on_execution_date(row=frames[code].iloc[frame_index_on_date(code, date)],
+                                                      signal=signal, key="frozen_structure_stop_raw_price")
+            if stop is None:
+                stop = _signal_number(signal, "stop")
+                if stop is not None:
+                    stop = qfq_to_raw_price(frames[code].iloc[frame_index_on_date(code, date)], stop)
+            tail = gap_tail_estimate(frames[code], cutoff, window=research_policy.gap_window,
+                                     quantile=research_policy.gap_quantile)
+            metadata.update(research_gap_observations=tail.observations,
+                            research_gap_loss_quantile=tail.loss_quantile)
+            if tail.status != "ok":
+                reason = tail.status
+            elif stop is None or not 0 <= stop < price:
+                reason = "research_tail_missing_protective_stop"
+            else:
+                budget = tail_budget_notional(equity=nav, entry_price=price, stop_price=stop,
+                                             gap_loss_fraction=tail.loss_quantile,
+                                             risk_budget=research_policy.risk_budget,
+                                             max_position=research_policy.max_position)
+                tail_size = budget["notional"] / float(initial_capital)
+                size = tail_size if initial_entry else min(size, tail_size)
+                metadata.update(research_tail_risk_per_share=budget["risk_per_share"],
+                                research_equity_risk_budget=budget["equity_risk_budget"])
+        scale = 1.0
+        if not reason and (research_policy.annual_volatility_target is not None
+                           or research_policy.maximum_drawdown is not None):
+            control = portfolio_entry_scale(equity_curve, cutoff,
+                                            annual_volatility_target=research_policy.annual_volatility_target,
+                                            volatility_window=research_policy.volatility_window,
+                                            maximum_drawdown=research_policy.maximum_drawdown)
+            scale = control["scale"]
+            metadata.update(research_portfolio_scale=scale,
+                            research_completed_annual_volatility=control.get("annualized_volatility"))
+            if scale <= 0:
+                reason = control["reason"]
+            if research_policy.maximum_drawdown is not None:
+                peak = max([float(initial_capital), nav] +
+                           [float(point["equity"]) * float(initial_capital) for point in equity_curve])
+                drawdown = 1 - nav / peak
+                metadata["research_visible_drawdown"] = drawdown
+                if drawdown >= research_policy.maximum_drawdown:
+                    reason = "drawdown_new_risk_block"
+        size = max(0., size * scale) if not reason else 0.
+        research_risk_decisions.append({"date": str(date.date()), "code": code,
+                                       "approved_notional_before_execution": size * float(initial_capital),
+                                       "reason": reason or "ok", **metadata})
+        return size, metadata, reason
+
     configured_candidate_limit = max(1, int(max_daily_candidates))
     configured_positions = (
         5 if max_positions is None or int(max_positions) <= 0
@@ -883,6 +1092,8 @@ def run_portfolio_backtest(
         return len(occupied) >= configured_total_held_symbols
 
     def right_market_active():
+        if not formula33_rules_enabled:
+            return True
         return current_phase in {"watch", "active"} or current_up_streak >= 3
 
     def left_symbol_limit_reached(code=None):
@@ -1086,7 +1297,7 @@ def run_portfolio_backtest(
         return any(close / lot_signal_cost(lot) - 1 >= float(threshold) for lot in state.right)
 
     def add_on_float_threshold():
-        return 0.20 if current_down_streak >= 3 else 0.10
+        return 0.20 if (current_down_streak >= 3 and formula33_rules_enabled) else 0.10
 
     def right_symbol_returns(date):
         returns = []
@@ -1113,6 +1324,8 @@ def run_portfolio_backtest(
             current_down_streak
             if down_streak is None else int(down_streak)
         )
+        if not formula33_rules_enabled:
+            down_streak = 0
         if not returns:
             return True
         if len(returns) >= configured_positions:
@@ -1130,7 +1343,7 @@ def run_portfolio_backtest(
             return 0.0
         if signal.get("signal_type") != "uptrend_support_pullback":
             return 0.0
-        if not right_market_active() or current_down_streak >= 3:
+        if not right_market_active() or (current_down_streak >= 3 and formula33_rules_enabled):
             return 0.0
         sources = set(str(candidate.get("candidate_source") or "").split("+"))
         factor_only = _factor_only_selection_profile(candidate)
@@ -1546,7 +1759,7 @@ def run_portfolio_backtest(
             or signal.get("semantic_entry_ok") is not True
         ):
             return []
-        needed = gross_exposure() + float(required_size) - 1.0
+        needed = entry_gross_exposure() + float(required_size) - entry_capital_limit()
         if needed <= 1e-9:
             return []
         weak = []
@@ -1662,7 +1875,11 @@ def run_portfolio_backtest(
                     replacement_risk_pct=signal.get("entry_risk_pct"),
                     **lot_risk_metadata(lot, quantity),
                 )
-                needed -= float(lot["size"])
+                needed -= (
+                    quantity * sell / float(initial_capital)
+                    if research_policy is not None and research_policy.sizing_basis == "visible_nav"
+                    else float(lot["size"])
+                )
             held_state.pending_lot_exits.clear()
             held_state.pending_profit_ids.clear()
             held_state.right_sold.clear()
@@ -1814,7 +2031,7 @@ def run_portfolio_backtest(
             return None
         ok, signal, _ = _semantic_right_entry_gate(
             data, index, candidate, signal,
-            current_down_streak=current_down_streak,
+            current_down_streak=current_down_streak if formula33_rules_enabled else 0,
             management_transition=True,
         )
         if not ok:
@@ -1873,6 +2090,9 @@ def run_portfolio_backtest(
                     "frozen_formula_up_streak", current_up_streak,
                 )
             )
+            if not formula33_rules_enabled:
+                entry_down_streak = 0
+                entry_up_streak = 0
             if opening_right_symbol:
                 channel_capacity_full = (
                     breadth_reversal_entry
@@ -2363,8 +2583,19 @@ def run_portfolio_backtest(
                     "left_to_right_management_only_without_current_candidate",
                 )
                 continue
+            if research_policy is not None and research_policy.sizing_basis == "visible_nav" and not starting_new_right_campaign:
+                cost_units = sum(float(lot["size"]) for lot in states[code].right)
+                if cost_units > 0:
+                    size *= entry_symbol_exposure(code) / cost_units
+            size, research_metadata, research_reason = research_entry_size(
+                code, date, candidate, signal, size, float(fill["price"]),
+                initial_entry=starting_new_right_campaign,
+            )
+            if research_reason:
+                record_entry_block(date, code, candidate, signal, research_reason)
+                continue
             size = _capped_entry_size(
-                symbol_exposure(code), size, max_symbol_exposure,
+                entry_symbol_exposure(code), size, entry_symbol_limit(),
             )
             if size <= 1e-9:
                 record_entry_block(date, code, candidate, signal, "symbol_exposure_cap")
@@ -2453,7 +2684,7 @@ def run_portfolio_backtest(
                     size * 100,
                     3,
                 )
-            if gross_exposure() + size > 1.0 + 1e-9:
+            if entry_gross_exposure() + size > entry_capital_limit() + 1e-9:
                 rotated = rotate_weak_right_symbols_for_entry(
                     date,
                     code,
@@ -2471,8 +2702,8 @@ def run_portfolio_backtest(
                         signal,
                         "weak_replacement_executed:" + ",".join(rotated),
                     )
-            if gross_exposure() + size > 1.0 + 1e-9:
-                available_size = max(0.0, 1.0 - gross_exposure())
+            if entry_gross_exposure() + size > entry_capital_limit() + 1e-9:
+                available_size = max(0.0, entry_capital_limit() - entry_gross_exposure())
                 minimum_trimmed_size = _minimum_trimmed_entry_size(
                     size,
                     starting_new_right_campaign=starting_new_right_campaign,
@@ -2679,7 +2910,7 @@ def run_portfolio_backtest(
             structure_metadata["industry_tags"] = "、".join(
                 sorted(candidate_industry_tags(candidate))
             )
-            buy_metadata = {**lot_risk_metadata(right_lot, quantity), **risk_metadata, **structure_metadata}
+            buy_metadata = {**lot_risk_metadata(right_lot, quantity), **risk_metadata, **structure_metadata, **research_metadata}
             buy_metadata.update({
                 "candidate_snapshot_date": candidate.get(
                     "candidate_snapshot_date",
@@ -2849,14 +3080,17 @@ def run_portfolio_backtest(
                     )
                 ):
                     continue
+                nav_units = entry_capital_limit()
+                if research_policy is not None and research_policy.sizing_basis == "visible_nav":
+                    current_left = entry_symbol_exposure(code)
                 requested_size = min(
-                    configured_left_grid_unit,
-                    effective_left_max_exposure - current_left,
+                    configured_left_grid_unit * nav_units,
+                    effective_left_max_exposure * nav_units - current_left,
                 )
                 requested_size = _capped_entry_size(
-                    symbol_exposure(code), requested_size, max_symbol_exposure,
+                    entry_symbol_exposure(code), requested_size, entry_symbol_limit(),
                 )
-                if requested_size <= 1e-9 or gross_exposure() + requested_size > 1.0 + 1e-9:
+                if requested_size <= 1e-9 or entry_gross_exposure() + requested_size > entry_capital_limit() + 1e-9:
                     continue
                 fill = fill_limit_order(
                     execution_bar(row), side="buy",
@@ -2864,6 +3098,12 @@ def run_portfolio_backtest(
                     previous_close=previous_close, code=code, is_st=is_st(code),
                 )
                 if not fill["filled"] or not fill_matches_phase(fill):
+                    continue
+                requested_size, research_metadata, research_reason = research_entry_size(
+                    code, date, candidate, {}, requested_size, float(fill["price"]), initial_entry=False,
+                )
+                if research_reason:
+                    record_entry_block(date, code, candidate, {}, research_reason)
                     continue
                 size, quantity, pnl, entry_fee_cash, cash_limited = execute_buy(
                     code, requested_size, float(fill["price"]),
@@ -2904,6 +3144,7 @@ def run_portfolio_backtest(
                     cash_limited=cash_limited,
                     lot_rounded=size < requested_size - 1e-9 and not cash_limited,
                     board_lot_size=board_lot_size(code), grid_slot=slot,
+                    **research_metadata,
                     **lot_risk_metadata(lot, quantity),
                     **with_raw_signal_price_metadata(row, {
                         "value_line": grid_anchor,
@@ -3405,6 +3646,13 @@ def run_portfolio_backtest(
             ),
             "candidate_count": len(current_candidates),
         })
+        if research_policy is not None and research_policy.sizing_basis == "visible_nav":
+            point = equity_curve[-1]
+            point.update(gross_exposure_pct=round(point["market_exposure_pct"], 2) if market_value else 0.,
+                         gross_exposure_basis="current_nav_market_value",
+                         cost_exposure_basis="initial_capital_cost_exposure",
+                         nav_market_exposure_pct=point["market_exposure_pct"],
+                         nav_market_exposure_basis="current_nav_market_value")
 
     market_calendar = sorted({
         date.normalize()
@@ -4014,7 +4262,7 @@ def run_portfolio_backtest(
             ):
                 signal, fundamental_score, channel_reason = research_channels.factor_horizon_signal(
                     data, index, candidate, phase=current_phase,
-                    exclude_watch_phase=configured_factor_horizon_exclude_watch_phase,
+                    exclude_watch_phase=(configured_factor_horizon_exclude_watch_phase and formula33_rules_enabled),
                     max_return_60d=configured_factor_horizon_max_return_60d,
                     require_ma20_not_rising=configured_factor_horizon_require_ma20_not_rising,
                     min_avg_amount=configured_factor_horizon_min_avg_amount,
@@ -4103,7 +4351,7 @@ def run_portfolio_backtest(
 
         candidates = []
         entry_allowed = (
-            current_down_streak < 3
+            not formula33_rules_enabled or current_down_streak < 3
             or not capacity_codes()
             or has_twenty_percent_float(date)
         )
@@ -4305,7 +4553,7 @@ def run_portfolio_backtest(
                             continue
                 ok, signal, gate_reason = _semantic_right_entry_gate(
                     data, index, candidate, signal,
-                    current_down_streak=current_down_streak,
+                    current_down_streak=current_down_streak if formula33_rules_enabled else 0,
                     management_transition=code in left_right_switch_signals,
                     price_amount_multiplier=(
                         configured_price_amount_multiplier
@@ -4521,7 +4769,7 @@ def run_portfolio_backtest(
                         continue
                     gated_signal, gate_reason, channel_reason = research_channels.compressed_structure_setup_gate(
                         data, index, candidate, signal, semantic_gate=_semantic_right_entry_gate,
-                        current_down_streak=current_down_streak,
+                        current_down_streak=current_down_streak if formula33_rules_enabled else 0,
                         min_avg_amount=configured_compressed_structure_min_avg_amount,
                         min_entry_evidence_score=configured_compressed_structure_min_entry_evidence_score,
                         min_proximity_score=configured_compressed_structure_min_proximity_score,
@@ -4628,6 +4876,10 @@ def run_portfolio_backtest(
         total_value = left_value + right_value
         invested_amount = total_value + left_entry_fees + right_entry_fees
         market_value = None if close is None else total_quantity * close
+        nav_position_market_value = (
+            None if market_value is None else market_value
+            + sum(float(lot["quantity"]) * close for lot in corporate_book.lots(code))
+        )
         unrealized_pnl_amount = None if market_value is None else market_value - invested_amount
         position_industry_tags = sorted({
             tag
@@ -4641,6 +4893,16 @@ def run_portfolio_backtest(
             "close": close,
             "position_pct": round((left_size + right_size) * 100, 2),
             "position_pct_basis": "initial_capital_cost_exposure",
+            **({"cost_position_pct": round((left_size + right_size) * 100, 2),
+                "cost_position_pct_basis": "initial_capital_cost_exposure",
+                "position_pct": (None if nav_position_market_value is None or final_portfolio_market_value <= 0
+                                 else round(nav_position_market_value / final_portfolio_market_value * 100, 4)),
+                "position_pct_basis": "current_nav_market_value",
+                "nav_market_value": nav_position_market_value,
+                "nav_market_weight_pct": (None if nav_position_market_value is None or final_portfolio_market_value <= 0
+                                         else round(nav_position_market_value / final_portfolio_market_value * 100, 4)),
+                "nav_market_weight_pct_basis": "current_nav_market_value"}
+               if research_policy is not None and research_policy.sizing_basis == "visible_nav" else {}),
             "market_weight_pct": (
                 None if market_value is None or final_portfolio_market_value <= 0
                 else round(market_value / final_portfolio_market_value * 100, 4)
@@ -4824,6 +5086,7 @@ def run_portfolio_backtest(
         left_quota_exits=pending_left_quota_exits,
     ))
     return {
+        **({"research_risk_decisions": research_risk_decisions} if research_policy is not None else {}),
         "paper_order_intents": paper_order_intents,
         "requested_start": requested.strftime("%Y-%m-%d"),
         "actual_start": start.strftime("%Y-%m-%d"),
@@ -5072,6 +5335,11 @@ def run_portfolio_backtest(
         "maximum_gross_exposure_pct": round(
             max((row["gross_exposure_pct"] for row in equity_curve), default=0.0), 2,
         ),
+        **({"exposure_basis": "current_nav_market_value",
+            "maximum_nav_market_exposure_pct": max((row["nav_market_exposure_pct"] for row in equity_curve
+                                                     if row["nav_market_exposure_pct"] is not None), default=0.),
+            "maximum_cost_exposure_pct": max((row["cost_exposure_pct"] for row in equity_curve), default=0.)}
+           if research_policy is not None and research_policy.sizing_basis == "visible_nav" else {}),
         "transaction_cost_pct": round(transaction_costs * 100, 3),
         "final_cash": round(float(cash_balance), 6),
         "final_dividend_receivable": corporate_book.receivable,
