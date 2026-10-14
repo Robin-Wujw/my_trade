@@ -41,15 +41,19 @@ def _read_price(path: Path) -> pd.Series:
         frame = pd.read_csv(path)
     else:
         frame = pd.read_parquet(path)
+    return price_series(frame, source_label=str(path))
+
+
+def price_series(frame: pd.DataFrame, *, source_label="in-memory frame") -> pd.Series:
     if not isinstance(frame, pd.DataFrame) or "date" not in frame:
-        raise ValueError(f"price file has no date column: {path}")
+        raise ValueError(f"price file has no date column: {source_label}")
     close_column = "close"
     # ``close`` is the prepared qfq series in this repository.  Prefer an
     # explicit signal close only when the source does not provide close.
     if close_column not in frame and "signal_close" in frame:
         close_column = "signal_close"
     if close_column not in frame:
-        raise ValueError(f"price file has no close column: {path}")
+        raise ValueError(f"price file has no close column: {source_label}")
     frame = frame.copy()
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.normalize()
     frame[close_column] = pd.to_numeric(frame[close_column], errors="coerce")
@@ -284,6 +288,9 @@ def audit_candidates(
     if benchmark_code:
         codes.add(str(benchmark_code))
     prices, missing_codes = load_price_series(price_directory, codes)
+    if end_date:
+        prices = {code: series.loc[series.index <= pd.Timestamp(end_date).normalize()]
+                  for code, series in prices.items()}
     benchmark = prices.get(str(benchmark_code)) if benchmark_code else None
     observations = attach_forward_returns(candidates, prices, benchmark=benchmark)
     metrics = summarize_audit(observations)
@@ -296,10 +303,9 @@ def audit_candidates(
         limitations.append("missing_price_files_excluded_from_labels")
     payload = {
         "research_only": True,
-        "strict_point_in_time": bool(
-            manifest.get("strict_financial_point_in_time", False)
-            and manifest.get("industry_point_in_time", False)
-        ),
+        "strict_point_in_time": False,
+        "qualification_reason": "manifest_flags_do_not_prove_revision_vintage",
+        "label_end_date": end_date,
         "financial_point_in_time": bool(manifest.get("financial_point_in_time", False)),
         "industry_point_in_time": bool(manifest.get("industry_point_in_time", False)),
         "data_limited": True,
