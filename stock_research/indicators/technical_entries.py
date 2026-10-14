@@ -49,23 +49,25 @@ def _valid_volume_price_nodes(previous: pd.DataFrame) -> list[dict]:
     if len(window) < 12:
         return []
     median_volume = float(window["volume"].median())
-    returns = window["close"].pct_change()
+    returns = window["close"].pct_change().to_numpy()
+    volumes = window["volume"].to_numpy()
+    lows = window["low"].to_numpy()
+    dates = window["date"].to_numpy()
     nodes = []
     for position in range(len(window) - 1):
-        row = window.iloc[position]
-        if float(row["volume"]) < median_volume * 1.5 or float(returns.iloc[position]) < 0.02:
+        if float(volumes[position]) < median_volume * 1.5 or float(returns[position]) < 0.02:
             continue
         support = min(
-            float(window.iloc[position]["low"]),
-            float(window.iloc[position + 1]["low"]),
+            float(lows[position]),
+            float(lows[position + 1]),
         )
         later = window.iloc[position + 2:]
         if not later.empty and float(later["low"].min()) < support:
             continue
         nodes.append({
-            "date": pd.Timestamp(row["date"]).strftime("%Y-%m-%d"),
+            "date": pd.Timestamp(dates[position]).strftime("%Y-%m-%d"),
             "confirmed_on": pd.Timestamp(
-                window.iloc[position + 1]["date"],
+                dates[position + 1],
             ).strftime("%Y-%m-%d"),
             "support": support,
             "status": "valid",

@@ -160,6 +160,8 @@ def infer_uptrend_anchors(
     )
     launches = _volume_launch_positions(data)
     high_values = data["high"].to_numpy(dtype=float)
+    low_values = data["low"].to_numpy(dtype=float)
+    dates = data["date"].to_numpy()
     suffix_high_positions = np.empty(len(data), dtype=int)
     best_position = len(data) - 1
     for position in range(len(data) - 1, -1, -1):
@@ -174,7 +176,7 @@ def infer_uptrend_anchors(
         high_pos = int(suffix_high_positions[launch_pos])
         if high_pos <= launch_pos or len(data) - 1 - high_pos < 1:
             continue
-        high = float(data.iloc[high_pos]["high"])
+        high = float(high_values[high_pos])
         # Keep two levels per launch: the nearest confirmed low represents the
         # small operating wave; the lowest of the recent pivots represents the
         # broader wave-1/trend start (as in the Duofuduo example).  Enumerating
@@ -182,10 +184,10 @@ def infer_uptrend_anchors(
         recent_lows = prior_lows[-12:]
         low_positions = {
             recent_lows[-1],
-            min(recent_lows, key=lambda position: float(data.iloc[position]["low"])),
+            min(recent_lows, key=lambda position: float(low_values[position])),
         }
         for low_pos in low_positions:
-            low = float(data.iloc[low_pos]["low"])
+            low = float(low_values[low_pos])
             if low <= 0 or high / low - 1 < float(minimum_advance):
                 continue
             key = (low_pos, high_pos)
@@ -193,9 +195,9 @@ def infer_uptrend_anchors(
                 "kind": "uptrend_anchor",
                 "uptrend_low": low,
                 "uptrend_high": high,
-                "uptrend_low_date": pd.Timestamp(data.iloc[low_pos]["date"]).strftime("%Y-%m-%d"),
-                "uptrend_high_date": pd.Timestamp(data.iloc[high_pos]["date"]).strftime("%Y-%m-%d"),
-                "launch_date": pd.Timestamp(data.iloc[launch_pos]["date"]).strftime("%Y-%m-%d"),
+                "uptrend_low_date": pd.Timestamp(dates[low_pos]).strftime("%Y-%m-%d"),
+                "uptrend_high_date": pd.Timestamp(dates[high_pos]).strftime("%Y-%m-%d"),
+                "launch_date": pd.Timestamp(dates[launch_pos]).strftime("%Y-%m-%d"),
                 "uptrend_levels": {
                     ratio: structure_price(low, high, ratio)
                     for ratio in SUPPORT_RATIOS
