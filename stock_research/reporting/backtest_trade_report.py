@@ -441,6 +441,33 @@ def _render_r_multiple_audit(result: dict) -> list[str]:
     return lines
 
 
+def _render_channel_concentration(result):
+    if "events" not in result and not result.get("capital_risk_attribution"):
+        return []
+    lines = ["", "## 原始左右来源的收益集中度", ""]
+    if not isinstance(result.get("events"), list):
+        return lines + ["缺少完整事件账本，无法计算左右来源集中度；旧卖出流水没有包含全部股息及权益事件。"]
+    from stock_research.reporting.portfolio_channel_concentration import build_channel_contribution
+
+    report = build_channel_contribution(result["events"], result.get("final_positions"),
+                                        initial_capital=result["initial_capital"])
+    lines += ["左转右仍按最初左侧买入来源统计；已实现净利润含分摊买入费、卖出成本及实际到账股息。",
+              "", "| 最初来源 | 已实现净利润 | Top1占比 | Top3占比 | 静态扣Top3后利润 | 未结算股票数 |",
+              "|---|---:|---:|---:|---:|---:|"]
+    for channel in report["by_channel"]:
+        first, third = channel["top_stock_concentration"]
+        origin = "左侧（含转右）" if channel["origin_channel"] == "left" else "原生右侧"
+        first_share, third_share = first["share_of_net_realized_profit"], third["share_of_net_realized_profit"]
+        lines.append(f"| {origin} | {_money(channel['realized_net_profit'])} | "
+                     f"{_pct(first_share * 100) if first_share is not None else '不可计算'} | "
+                     f"{_pct(third_share * 100) if third_share is not None else '不可计算'} | "
+                     f"{_money(third['remaining_static_realized_profit'])} | {channel['unsettled_stock_count']} |")
+    lines += ["", "静态扣除股票利润不重跑资金、订单竞争及仓位，不是可交易反事实收益；共享资金归因不能证明通道的独立因果增益。浮盈、待上市股数和未到账股息不计入已实现净利润。",
+              f"归因覆盖：{report['attribution_coverage_status']}；排除成交/现金记录 {report['coverage']['excluded_cash_or_trade_rows']} 条，排除终仓记录 {report['coverage']['excluded_final_position_rows']} 条。",
+              "历史财务修订、行业快照和事后选择限制继续保留；缺来源不视为零收益。"]
+    return lines
+
+
 def render_trade_report_markdown(result: dict) -> str:
     """Render summary, chronological trades and final holdings as Markdown."""
     ledger = build_readable_trade_frame(result.get("trade_ledger") or [])
@@ -488,6 +515,7 @@ def render_trade_report_markdown(result: dict) -> str:
             "", f"> {attribution.get('note', '')}",
             f"> 来源利润对账差额：{_money(attribution.get('origin_pnl_reconciliation_difference'))}；现金对账差额：{_money(attribution.get('cash_reconciliation_difference'))}。分批卖出的R统计不等于独立交易周期胜率。",
         ])
+    lines.extend(_render_channel_concentration(result))
     lines.extend(_render_profit_concentration(result))
     lines.extend(_render_r_multiple_audit(result))
     factor_holding_days = result.get("factor_horizon_holding_days")

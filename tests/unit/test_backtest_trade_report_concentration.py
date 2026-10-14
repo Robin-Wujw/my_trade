@@ -1,6 +1,23 @@
 from stock_research.reporting.backtest_trade_report import render_trade_report_markdown
 
 
+def test_regular_report_keeps_left_to_right_origin_and_static_profit_limits():
+    result = {"initial_capital": 1000., "events": [{"date": "2026-07-21", "code": "sz.000001",
+        "execution_quantity": -20., "execution_price": 11., "transaction_cost_amount_raw": 3.,
+        "profit_loss_amount_raw": 15., "origin_allocations": [{"origin_account": "left",
+            "quantity": 20., "cost_amount": 200., "entry_fee_amount": 2.}]}],
+        "trade_ledger": [], "final_positions": []}
+    markdown = render_trade_report_markdown(result)
+    assert "原始左右来源的收益集中度" in markdown
+    assert "| 左侧（含转右） | ¥15.00 | +100.00% | +100.00% | ¥0.00 | 0 |" in markdown
+    assert "不是可交易反事实收益" in markdown and "独立因果增益" in markdown
+
+
+def test_old_summary_without_full_events_reports_unknown_channel_concentration():
+    markdown = render_trade_report_markdown({"capital_risk_attribution": {"by_origin": []}})
+    assert "缺少完整事件账本，无法计算左右来源集中度" in markdown
+
+
 def test_trade_report_renders_profit_concentration_diagnostics():
     result = {
         "requested_start": "2023-01-01",

@@ -79,3 +79,24 @@ def test_backfilled_or_unfinished_labels_refuse_publication(tmp_path, monkeypatc
     with pytest.raises(ValueError, match="real same-day"):
         store.capture_structure_labels(tmp_path / "bad", **kwargs)
     assert not (tmp_path / "bad/manifest.json").exists()
+
+
+def test_barrier_report_verifies_archive_and_rejects_wrong_manifest_binding(tmp_path, monkeypatch):
+    from stock_research.backtesting.inputs import file_sha256
+    from stock_research.reporting.structure_execution_barriers import build_barrier_report
+
+    kwargs = sources(tmp_path, monkeypatch)
+    kwargs["raw_frames"]["sz.000001"].loc[1, "low"] = 8.5
+    kwargs["raw_frames"]["sz.000001"].loc[1, "down_limit"] = 8.
+    root = tmp_path / "labels"
+    store.capture_structure_labels(root, **kwargs)
+    manifest = root / "manifest.json"
+    report = build_barrier_report(manifest, manifest_sha256=file_sha256(manifest))
+    assert report["rows"][0]["entry_day_observation"] == "confirmed_entry_day_breach"
+    assert [row["horizon"] for row in report["by_horizon"]] == [20, 60]
+    wrong = root / "contract.json"
+    with pytest.raises(ValueError, match="exact source manifest"):
+        build_barrier_report(wrong, manifest_sha256=file_sha256(wrong))
+    (root / "execution_prices.pkl.gz").write_bytes(b"changed")
+    with pytest.raises(ValueError, match="archive changed"):
+        build_barrier_report(manifest, manifest_sha256=file_sha256(manifest))
