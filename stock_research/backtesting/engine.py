@@ -25,6 +25,21 @@ from stock_research.indicators.technical_entries import (
 )
 from stock_research.reporting.portfolio_attribution import build_portfolio_attribution
 from stock_research.backtesting.corporate_actions import CorporateActionBook
+from stock_research.research import channels as research_channels
+from stock_research.backtesting.execution import ExecutionCosts, fill_cash_buy, fill_cash_sell
+from stock_research.backtesting.portfolio_rules import (
+    risk_stock_name_reason,
+    candidate_risk_reason,
+    left_candidate_kind,
+    candidate_industry_tags,
+    left_value_falsification_reason,
+    candidate_failure_reason,
+    candidate_is_daily_quota_diagnostic,
+    candidate_has_exceptional_right_profile,
+    candidate_passes_hard_gate,
+    right_candidate_can_evaluate,
+    left_candidate_can_add,
+)
 from stock_research.reporting.signal_text import (
     localize_breadth_reversal_observation,
     localize_entry_block,
@@ -83,10 +98,7 @@ from stock_research.backtesting.defaults import (
     DEFAULT_SIGNALS_EFFECTIVE_NEXT_DAY,
 )
 
-MIN_DAILY_RIGHT_RISK_PCT = 0.01
-MIN_CLOSE_CONFIRMED_RIGHT_RISK_PCT = 0.018
 LARGE_LIQUID_TREND_PILOT_SIZE = 0.06
-PULLBACK_PILOT_BASE_SIZE = 0.08
 PULLBACK_PILOT_STRONG_SIZE = 0.10
 DEFAULT_BREADTH_REVERSAL_MAX_UNIQUE_COUNT = 50
 DEFAULT_BREADTH_REVERSAL_RISK_BUDGET = 0.006
@@ -103,974 +115,49 @@ DEFAULT_COMPRESSED_STRUCTURE_HOLDING_DAYS = 20
 DEFAULT_COMPRESSED_STRUCTURE_MIN_ENTRY_EVIDENCE_SCORE = 9.0
 DEFAULT_COMPRESSED_STRUCTURE_MIN_PROXIMITY_SCORE = 40.0
 DEFAULT_COMPRESSED_STRUCTURE_MIN_AVG_AMOUNT = 0.0
-ENTRY_PRIORITY_MODE_LEGACY = "legacy_weighted"
-ENTRY_PRIORITY_MODE_STRUCTURE = "structure_lexicographic"
+from stock_research.backtesting.signals import (
+    MIN_DAILY_RIGHT_RISK_PCT,
+    MIN_CLOSE_CONFIRMED_RIGHT_RISK_PCT,
+    PULLBACK_PILOT_BASE_SIZE,
+    ENTRY_PRIORITY_MODE_LEGACY,
+    ENTRY_PRIORITY_MODE_STRUCTURE,
+)
 ENTRY_PRIORITY_MODES = {
     ENTRY_PRIORITY_MODE_LEGACY,
     ENTRY_PRIORITY_MODE_STRUCTURE,
 }
 
 
-def build_formula_phase_history(formula_rows) -> dict[str, str]:
-    frame = pd.DataFrame(formula_rows).copy()
-    if frame.empty or "date" not in frame:
-        return {}
-    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-    frame = frame.dropna(subset=["date"]).sort_values("date")
-    phase = "waiting"
-    result = {}
-
-    def streak(value):
-        number = pd.to_numeric(value, errors="coerce")
-        return 0 if pd.isna(number) else int(number)
-
-    for _, row in frame.iterrows():
-        up = streak(row.get("window_up_streak"))
-        down = streak(row.get("window_down_streak"))
-        if down >= 5:
-            phase = "exited"
-        elif up >= 5:
-            phase = "active"
-        elif up >= 3 and phase != "active":
-            phase = "watch"
-        result[row["date"].strftime("%Y-%m-%d")] = phase
-    return result
-
-
-def _enabled(value, *, default=True):
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return default
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "y"}
-    return bool(value)
-
-
-def _clean_trade_basis_text(value):
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return value
-    return str(value).replace(
-        "距离21日收盘高点3%以内",
-        "候选观察：接近21日收盘高点（非买点）",
-    )
-
-
-def _minimum_trimmed_entry_size(
-    planned_size,
-    *,
-    starting_new_right_campaign,
-    pullback_pilot,
-):
-    planned_size = max(0.0, float(planned_size))
-    if pullback_pilot:
-        minimum = PULLBACK_PILOT_BASE_SIZE
-    elif starting_new_right_campaign:
-        minimum = 0.20
-    else:
-        minimum = 0.10
-    return min(planned_size, minimum)
-
-
-def _active_profit_trigger_ids(profit, history, remaining_parts) -> set[str]:
-    """Map source-backed protection signals without treating examples as a checklist."""
-    maximum_return = float(profit.get("maximum_return_pct") or 0.0)
-    if maximum_return < 10:
-        return set()
-    ids = set()
-    if profit.get("profit_floor_triggered"):
-        ids.add("profit_floor")
-    if maximum_return >= 20 and profit.get("trailing_10_triggered"):
-        ids.add("trailing_10")
-    if profit.get("divergence_time_take_profit"):
-        ids.add("divergence_time")
-
-    if (
-        maximum_return >= 20
-        and len(history) >= 14
-        and {"date", "volume", "low"}.issubset(history.columns)
-    ):
-        prior_history = history.iloc[:-1]
-        valid_nodes = _valid_volume_price_nodes(prior_history)
-        if valid_nodes:
-            prior_close = float(prior_history.iloc[-1]["close"])
-            supporting_nodes = [
-                node for node in valid_nodes
-                if float(node["support"]) <= prior_close
-            ]
-            if supporting_nodes:
-                closest_node = max(
-                    supporting_nodes, key=lambda node: float(node["support"]),
-                )
-                if float(history.iloc[-1]["low"]) < float(closest_node["support"]):
-                    ids.add(f"volume_node_break:{closest_node['date']}")
-
-    close = float(profit.get("close") or 0.0)
-    latest_ma20 = pd.to_numeric(history.iloc[-1].get("ma20"), errors="coerce")
-    prior_ma20 = (
-        pd.to_numeric(history.iloc[-6].get("ma20"), errors="coerce")
-        if len(history) >= 6 else pd.NA
-    )
-    if (
-        pd.notna(latest_ma20)
-        and pd.notna(prior_ma20)
-        and float(latest_ma20) > float(prior_ma20)
-        and close < float(latest_ma20) * 0.97
-    ):
-        ids.add("rising_ma20_break_3pct")
-
-    if (
-        int(remaining_parts) == 1
-        and maximum_return >= 20
-        and profit.get("half_profit_triggered")
-    ):
-        ids.add("maximum_profit_half")
-    return ids
-
-
-def _price_structure_signal(
-    data, index, plan=None, *, auto_structure=True, allow_pullback=True,
-):
-    if index < 40:
-        return None
-    row = data.iloc[index]
-    previous = data.iloc[:index]
-    prior_close = float(previous.iloc[-1]["close"])
-    volume_baseline = max(
-        float(previous["volume"].tail(5).mean()),
-        float(previous["volume"].tail(10).mean()),
-    )
-    close_volume_ratio = (
-        float(row["volume"]) / volume_baseline if volume_baseline > 0 else 0.0
-    )
-
-    def gap_up_rank(base_rank: int) -> tuple[int, bool]:
-        prior_high = pd.to_numeric(previous.iloc[-1].get("high"), errors="coerce")
-        day_open = pd.to_numeric(row.get("open"), errors="coerce")
-        gap_up = bool(
-            pd.notna(prior_high)
-            and pd.notna(day_open)
-            and float(day_open) > float(prior_high)
-        )
-        return base_rank, gap_up
-
-    structures = configured_price_structures(plan)
-    if auto_structure:
-        inferred_structures = infer_price_structures(previous)
-        structures.extend(inferred_structures)
-        for inferred in (
-            item for item in inferred_structures
-            if item["kind"] == "uptrend_anchor"
-        ):
-            # Ratios of the preceding uptrend remain pullback candidates. They
-            # become executable only when a pre-known moving average overlaps
-            # the level.  Auto-inferred supports must be trend-level waves, not
-            # short relay swings that only look good after sorting by the
-            # highest nearby level.
-            if not inferred.get("amplitude_valid"):
-                continue
-            # All three ratios stay available at their useful ages.
-            maximum_days = {0.75: 8, 0.625: 21, 0.50: 34}
-            age = int(inferred.get("bars_since_high") or 0)
-            prior = previous.iloc[-1]
-            for ratio, level in inferred["uptrend_levels"].items():
-                if age > maximum_days[ratio]:
-                    continue
-                confluence = []
-                for name in ("ma5", "ma10", "ma20", "ma60"):
-                    value = pd.to_numeric(prior.get(name), errors="coerce")
-                    if pd.notna(value) and abs(float(value) / float(level) - 1) <= SUPPORT_ZONE_PCT:
-                        confluence.append(name.upper())
-                if confluence:
-                    structures.append({
-                        "kind": "uptrend_support", "ratio": ratio,
-                        "level": float(level), "confluence": confluence,
-                        "uptrend_low": inferred["uptrend_low"],
-                        "uptrend_high": inferred["uptrend_high"],
-                        "uptrend_low_date": inferred["uptrend_low_date"],
-                        "uptrend_high_date": inferred["uptrend_high_date"],
-                        "amplitude_valid": inferred.get("amplitude_valid"),
-                    })
-
-    # A close-confirmed breach of the uptrend U50 followed by a reclaim is a
-    # trend-restoration entry.  It is not the H-P pullback-half breakout.
-    reclaim_candidates = []
-    for structure in structures:
-        if structure.get("kind") != "uptrend_anchor":
-            continue
-        if not structure.get("amplitude_valid"):
-            continue
-        trigger = float(structure["uptrend_levels"][0.50])
-        high_date = pd.Timestamp(structure["uptrend_high_date"])
-        after_high = previous[previous["date"] > high_date]
-        effective_breach = bool((after_high["close"] < trigger).any())
-        if (
-            effective_breach
-            and prior_close <= trigger < float(row["close"])
-            and float(row["close"]) <= trigger * (1 + SUPPORT_ZONE_PCT)
-            and close_volume_ratio >= 1.0
-        ):
-            reclaim_candidates.append((trigger, structure))
-    if reclaim_candidates:
-        trigger, structure = max(reclaim_candidates, key=lambda item: item[0])
-        rank, gap_up = gap_up_rank(5)
-        reason = "上涨波段50%有效跌破后收盘放量收复"
-        if gap_up:
-            reason += "; 跳空向上加分"
-        return {
-            "rank": rank, "stop": trigger, "trigger": trigger,
-            "order_type": "close", "reason": reason,
-            "known_volume_ratio": close_volume_ratio,
-            "requires_next_day_confirmation": True,
-            "structure_ratio": 0.50,
-            "signal_type": "uptrend_50_reclaim", "gap_up": gap_up,
-            "anchor_low": structure["uptrend_low"],
-            "anchor_high": structure["uptrend_high"],
-            "anchor_low_date": structure["uptrend_low_date"],
-            "anchor_high_date": structure["uptrend_high_date"],
-        }
-
-    # Pullback-half breakout is a separate three-anchor structure. It is valid
-    # only after the same uptrend's 62.5% was breached, the trend-level span is
-    # wide enough, and consolidation has lasted at least 13 trading days.
-    for structure in structures:
-        if structure["kind"] != "pullback_recovery":
-            continue
-        if not (
-            structure.get("deep_pullback_confirmed")
-            and structure.get("amplitude_valid")
-            and int(structure.get("consolidation_days") or 0) >= 13
-        ):
-            continue
-        trigger = float(structure["recovery_half"])
-        if (
-            prior_close <= trigger < float(row["close"])
-            and float(row["close"]) <= trigger * (1 + SUPPORT_ZONE_PCT)
-            and close_volume_ratio >= 1.0
-        ):
-            rank, gap_up = gap_up_rank(5)
-            reason = "回调波段50%收盘放量向上突破"
-            if gap_up:
-                reason += "; 跳空向上加分"
-            return {
-                "rank": rank, "stop": trigger, "trigger": trigger,
-                "order_type": "close", "reason": reason,
-                "known_volume_ratio": close_volume_ratio,
-                "requires_next_day_confirmation": True,
-                "structure_ratio": 0.50,
-                "signal_type": "pullback_50_breakout", "gap_up": gap_up,
-                "anchor_low": structure.get("uptrend_low"),
-                "anchor_high": structure.get("uptrend_high"),
-                "anchor_pullback_low": structure.get("pullback_low"),
-                "anchor_low_date": structure.get("uptrend_low_date"),
-                "anchor_high_date": structure.get("uptrend_high_date"),
-                "anchor_pullback_low_date": structure.get("pullback_low_date"),
-            }
-
-    # U75/U625 are pullback-only and require declared technical confluence.
-    # They are lower priority than the author's two right-side breakout entries.
-    if allow_pullback:
-        supports = sorted(
-            (item for item in structures if item["kind"] == "uptrend_support"),
-            key=lambda item: item["level"], reverse=True,
-        )
-        for structure in supports:
-            if not structure.get("amplitude_valid"):
-                continue
-            level = float(structure["level"])
-            ratio = float(structure["ratio"])
-            zone_top = level * (1 + SUPPORT_ZONE_PCT)
-            if (
-                prior_close > level
-                and float(row["low"]) <= zone_top
-                and float(row["close"]) >= level
-                and float(row["close"]) <= zone_top
-            ):
-                confluence = ",".join(map(str, structure["confluence"]))
-                return {
-                    "rank": 4, "stop": level, "trigger": float(row["close"]),
-                    "order_type": "close",
-                    "reason": f"上涨波段{ratio:.1%}拉回支撑5%区域; 共振={confluence}",
-                    "known_volume_ratio": 1.0, "structure_ratio": ratio,
-                    "signal_type": "uptrend_support_pullback",
-                    "support_confluence": list(structure["confluence"]),
-                    "anchor_low": structure.get("uptrend_low"),
-                    "anchor_high": structure.get("uptrend_high"),
-                    "anchor_low_date": structure.get("uptrend_low_date"),
-                    "anchor_high_date": structure.get("uptrend_high_date"),
-                }
-    return None
-
-
-def _right_signal(
-    data, index, plan=None, *, auto_price_structure=True,
-    allow_structure_pullback=True,
-):
-    if index < 60:
-        return None
-    structure_signal = _price_structure_signal(
-        data, index, plan, auto_structure=auto_price_structure,
-        allow_pullback=allow_structure_pullback,
-    )
-    if structure_signal:
-        structure_signal = apply_entry_confluence(data, index, structure_signal)
-    if configured_price_structures(plan) and structure_signal:
-        return structure_signal
-    technical_signal = infer_technical_entry(data, index)
-    return max(
-        (signal for signal in (structure_signal, technical_signal) if signal),
-        key=lambda signal: signal["rank"],
-        default=None,
-    )
-
-
-def _leader_trend_add_signal(data, index):
-    if index < 80:
-        return None
-    row = data.iloc[index]
-    previous = data.iloc[:index]
-    prior = previous.iloc[-1]
-    close_high = float(previous["close"].tail(21).max())
-    volume_baseline = max(
-        float(previous["volume"].tail(5).mean()),
-        float(previous["volume"].tail(10).mean()),
-    )
-    volume_ratio = float(row["volume"]) / volume_baseline if volume_baseline > 0 else 0.0
-    ma20 = pd.to_numeric(prior.get("ma20"), errors="coerce")
-    ma60 = pd.to_numeric(prior.get("ma60"), errors="coerce")
-    prior_ma20 = pd.to_numeric(previous.iloc[-6].get("ma20"), errors="coerce")
-    if (
-        pd.isna(ma20)
-        or pd.isna(ma60)
-        or pd.isna(prior_ma20)
-        or close_high <= 0
-    ):
-        return None
-    if not (
-        float(prior["close"]) <= close_high < float(row["close"])
-        and float(row["close"]) <= close_high * 1.10
-        and float(prior["close"]) > float(ma20) >= float(ma60)
-        and float(ma20) > float(prior_ma20)
-        and volume_ratio >= 0.85
-    ):
-        return None
-    stop = max(close_high * 0.95, float(ma20) * 0.98)
-    target = close_high + (close_high - stop) * 3.0
-    signal = {
-        "rank": 5,
-        "trigger": close_high,
-        "stop": stop,
-        "target_price": target,
-        "order_type": "close",
-        "reason": "proven leader trend add on 21d close high; close stop",
-        "known_volume_ratio": volume_ratio,
-        "signal_type": "leader_trend_add",
-        "requires_next_day_confirmation": True,
-    }
-    return apply_entry_confluence(data, index, signal)
-
-
-def _candidate_number(candidate, key):
-    if not candidate:
-        return None
-    value = pd.to_numeric(candidate.get(key), errors="coerce")
-    return float(value) if pd.notna(value) else None
-
-
-def _candidate_first_number(candidate, *keys):
-    for key in keys:
-        value = _candidate_number(candidate, key)
-        if value is not None:
-            return value
-    return None
-
-
-def _channel_candidate_number(candidate, channel, key):
-    return _candidate_first_number(candidate, f"{channel}_{key}", key)
-
-
-def _signal_number(signal, key):
-    if not signal:
-        return None
-    value = pd.to_numeric(signal.get(key), errors="coerce")
-    return float(value) if pd.notna(value) else None
-
-
-def _right_entry_priority_sort_key(item, frames, *, mode):
-    """Return a deterministic same-day cash-allocation priority key."""
-    (
-        legacy_priority, candidate_score, signal_rank, code, index, signal,
-        candidate, _,
-    ) = item
-    if mode == ENTRY_PRIORITY_MODE_LEGACY:
-        return (
-            float(legacy_priority), float(candidate_score),
-            float(signal_rank), str(code), int(index),
-        )
-    if mode != ENTRY_PRIORITY_MODE_STRUCTURE:
-        raise ValueError(f"unsupported right entry priority mode: {mode}")
-
-    entry_evidence = _signal_number(signal, "entry_evidence_score")
-    structure_proximity = _signal_number(
-        signal, "structure_proximity_score",
-    )
-    if structure_proximity is None:
-        structure_proximity = _candidate_number(
-            candidate, "structure_proximity_score",
-        )
-    if (
-        structure_proximity is None
-        and not signal.get("standard_right_next_open")
-        and signal.get("technical_signal_timing") != "previous_close_preplaced_order"
-    ):
-        value = pd.to_numeric(
-            frames[str(code)].iloc[int(index)].get(
-                "structure_proximity_score",
-            ),
-            errors="coerce",
-        )
-        structure_proximity = float(value) if pd.notna(value) else None
-    return (
-        float(signal_rank),
-        float(entry_evidence) if entry_evidence is not None else -math.inf,
-        (
-            float(structure_proximity)
-            if structure_proximity is not None else -math.inf
-        ),
-        float(candidate_score),
-        float(legacy_priority),
-        str(code),
-        int(index),
-    )
-
-
-def _ordered_right_entry_candidates(candidates, frames, *, mode):
-    return sorted(
-        candidates,
-        key=lambda item: _right_entry_priority_sort_key(
-            item, frames, mode=mode,
-        ),
-        reverse=True,
-    )
-
-
-def _signal_support_has_fast_ma_confluence(signal) -> bool:
-    if not signal:
-        return True
-    confluence = signal.get("support_confluence")
-    if confluence is None:
-        reason = str(signal.get("reason") or "")
-        if "共振=" not in reason:
-            return True
-        confluence_text = reason.split("共振=", 1)[1]
-        confluence = re.split(r"[,，、;；]+", confluence_text)
-    if isinstance(confluence, str):
-        items = re.split(r"[,，、;；]+", confluence)
-    else:
-        items = list(confluence)
-    fast_ma = {"MA5", "MA10", "MA20"}
-    return any(str(item).strip() in fast_ma for item in items)
-
-
-def _prepare_bull_half_reversal_signal(data, index, signal):
-    """Turn the observed half-pullback into a protective close signal."""
-    if not signal or signal.get("signal_type") != "bull_run_half_pullback":
-        return signal
-    row = data.iloc[index]
-    trigger = _signal_number(signal, "trigger")
-    signal_low = pd.to_numeric(row.get("low"), errors="coerce")
-    if trigger is None or pd.isna(signal_low):
-        return signal
-    result = dict(signal)
-    result.update({
-        "order_type": "close",
-        "stop": min(float(trigger), float(signal_low)) * 0.995,
-        "reason": "连阳一半拉回；信号日低点下方止损",
-        "requires_next_day_confirmation": True,
-        "bull_half_signal_date": pd.Timestamp(row["date"]).strftime("%Y-%m-%d"),
-    })
-    return result
-
-
-def _confirm_bull_half_reversal_signal(
-    data,
-    index,
-    signal,
-    *,
-    maximum_extension=0.05,
-):
-    """Confirm yesterday's half-pullback at today's close without backdating."""
-    if not signal or signal.get("signal_type") != "bull_run_half_pullback":
-        return False, signal, "missing_signal"
-    row = data.iloc[index]
-    trigger = _signal_number(signal, "trigger")
-    close = pd.to_numeric(row.get("close"), errors="coerce")
-    if trigger is None or pd.isna(close) or float(close) < trigger:
-        return False, signal, "next_close_confirmation_failed"
-    if float(close) > trigger * (1.0 + float(maximum_extension)):
-        return False, signal, "next_close_confirmation_too_extended"
-    result = dict(signal)
-    result.update({
-        "order_type": "close",
-        "requires_next_day_confirmation": False,
-        "reason": "连阳一半拉回；次日收盘确认；信号日低点下方止损",
-        "close_fill_status": "next_close_confirmed",
-        "technical_signal_date": signal.get("bull_half_signal_date"),
-        "technical_signal_timing": "signal_close_then_next_day_close_confirmation",
-    })
-    return True, result, "ok"
-
-
-def _semantic_bull_half_reversal_gate(data, index, candidate, signal):
-    """Separate contrarian semantics from the trend-breakout entry gate."""
-    enriched = dict(signal or {})
-    if not signal or signal.get("signal_type") != "bull_run_half_pullback":
-        return False, enriched, "missing_signal"
-    entry_price = float(data.iloc[index]["close"])
-    stop = _signal_number(signal, "stop")
-    if stop is None or stop <= 0 or stop >= entry_price:
-        return False, enriched, "invalid_or_non_protective_stop"
-    average_amount = _candidate_number(candidate, "avg_amount_20")
-    if average_amount is None or average_amount < 500_000_000.0:
-        return False, enriched, "liquidity_too_thin"
-    return_60d = _candidate_number(candidate, "return_60d")
-    if return_60d is None or return_60d > -0.10:
-        return False, enriched, "reversal_60d_decline_not_deep_enough"
-    risk = entry_price - stop
-    risk_pct = risk / entry_price
-    if risk_pct < MIN_CLOSE_CONFIRMED_RIGHT_RISK_PCT:
-        return False, enriched, "close_confirmed_risk_pct_too_tight"
-    if risk_pct > 0.10:
-        return False, enriched, "risk_pct_too_wide"
-    target = entry_price + risk * 3.0
-    enriched.update({
-        "semantic_entry_ok": True,
-        "semantic_entry_setup": "breadth_reversal_half_pullback",
-        "entry_gate_reason": "ok",
-        "entry_risk_pct": round(risk_pct * 100, 3),
-        "entry_reward_risk": 3.0,
-        "entry_target_price": round(target, 3),
-        "entry_target_basis": "fixed_3r_after_next_close_confirmation",
-        "entry_liquidity_floor": 500_000_000.0,
-        "entry_liquidity_profile": "standard_500m",
-    })
-    return True, enriched, "ok"
-
-
-def _candidate_text(candidate, key) -> str:
-    if not candidate:
-        return ""
-    value = candidate.get(key)
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return ""
-    return str(value).strip()
-
-
-def _has_semantic_candidate_profile(candidate) -> bool:
-    if not candidate:
-        return False
-    fields = {
-        "candidate_source", "quality_score", "earnings_yoy", "mktcap",
-        "trade_basis_score", "leadership_score", "right_quant_score",
-        "return_20d", "return_60d", "avg_amount_20",
-    }
-    return any(candidate.get(field) not in (None, "") for field in fields)
-
-
-def _factor_only_selection_profile(candidate) -> bool:
-    return (
-        _candidate_text(candidate, "selection_profile")
-        == "quantsplaybook_factor_only"
-        or any(
-            _enabled(candidate.get(field), default=False)
-            for field in (
-                "compressed_structure_channel_eligible",
-                "factor_horizon_channel_eligible",
-                "breadth_reversal_channel_eligible",
-            )
-        )
-    )
-
-
-def _compact_attack_core_profile(candidate) -> bool:
-    setup = _candidate_text(candidate, "right_quant_setup")
-    right_quant = _candidate_number(candidate, "right_quant_score")
-    structure_rank = _candidate_first_number(
-        candidate, "quant_structure_rank", "right_structure_rank", "structure_rank",
-    )
-    low_risk_rank = _candidate_first_number(
-        candidate, "quant_low_risk_rank", "right_risk_rank", "low_risk_rank",
-    )
-    volume_confirm_rank = _candidate_first_number(
-        candidate,
-        "quant_volume_confirm_rank", "right_volume_node_rank", "volume_confirm_rank",
-    )
-    ret60 = _candidate_number(candidate, "return_60d")
-    drawdown_60 = _candidate_number(candidate, "drawdown_60")
-    return bool(
-        setup == "compact_attack_core"
-        and right_quant is not None and right_quant >= 85.0
-        and structure_rank is not None and structure_rank >= 80.0
-        and low_risk_rank is not None and low_risk_rank >= 60.0
-        and volume_confirm_rank is not None and volume_confirm_rank >= 60.0
-        and ret60 is not None and ret60 >= 0.15
-        and (drawdown_60 is None or drawdown_60 >= -0.08)
-    )
-
-
-def _large_liquid_trend_core_profile(candidate) -> bool:
-    """Broadens strong right-side candidates without relaxing structure quality."""
-    if not candidate:
-        return False
-    sources = set(str(candidate.get("candidate_source") or "").split("+"))
-    setup = _candidate_text(candidate, "right_quant_setup")
-    quality = _candidate_number(candidate, "quality_score")
-    growth = _candidate_number(candidate, "earnings_yoy")
-    market_cap = _candidate_number(candidate, "mktcap")
-    avg_amount = _candidate_number(candidate, "avg_amount_20")
-    trade_basis = _candidate_number(candidate, "trade_basis_score")
-    right_quant = _candidate_number(candidate, "right_quant_score")
-    ret20 = _candidate_number(candidate, "return_20d")
-    ret60 = _candidate_number(candidate, "return_60d")
-    drawdown_60 = _candidate_number(candidate, "drawdown_60")
-    alpha_rank = _candidate_first_number(candidate, "quant_alpha_rank", "alpha_rank")
-    trend_stability_rank = _candidate_first_number(
-        candidate, "quant_trend_stability_rank", "trend_stability_rank",
-    )
-    structure_rank = _candidate_first_number(
-        candidate, "quant_structure_rank", "right_structure_rank", "structure_rank",
-    )
-    volume_confirm_rank = _candidate_first_number(
-        candidate,
-        "quant_volume_confirm_rank", "right_volume_node_rank", "volume_confirm_rank",
-    )
-    low_risk_rank = _candidate_first_number(
-        candidate, "quant_low_risk_rank", "right_risk_rank", "low_risk_rank",
-    )
-    return bool(
-        sources & {"factor_quant", "quant_right"}
-        and setup in {"强趋势", "large_liquid_trend_core"}
-        and quality is not None and quality >= 75.0
-        and growth is not None and growth >= 0.20
-        and market_cap is not None and market_cap >= 3000.0
-        and avg_amount is not None and avg_amount >= 3_000_000_000.0
-        and trade_basis is not None and trade_basis >= 6.0
-        and right_quant is not None and right_quant >= 85.0
-        and ret20 is not None and 0.0 <= ret20 <= 0.40
-        and ret60 is not None and ret60 >= 0.25
-        and drawdown_60 is not None and drawdown_60 >= -0.16
-        and (alpha_rank is None or alpha_rank >= 55.0)
-        and (trend_stability_rank is None or trend_stability_rank >= 70.0)
-        and (structure_rank is None or structure_rank >= 35.0)
-        and (volume_confirm_rank is None or volume_confirm_rank >= 45.0)
-        and (low_risk_rank is None or low_risk_rank >= 25.0)
-    )
-
-
-def _planned_right_target(data, index, signal, entry_price, risk_amount, candidate=None):
-    candidates = []
-    explicit = _signal_number(signal, "target_price")
-    if explicit is not None:
-        candidates.append((explicit, "explicit_signal_target"))
-    signal_type = str(signal.get("signal_type") or "")
-    trigger = _signal_number(signal, "trigger")
-    stop = _signal_number(signal, "stop")
-    if (
-        signal_type == "leader_pivot_breakout"
-        and _compact_attack_core_profile(candidate)
-        and trigger is not None
-        and stop is not None
-        and trigger > stop > 0
-    ):
-        pivot_risk = trigger - stop
-        candidates.append((
-            trigger + pivot_risk * 3.5,
-            "compact_attack_core_3_5r_pivot_continuation",
-        ))
-    anchor_high = _signal_number(signal, "anchor_high")
-    if anchor_high is not None:
-        candidates.append((anchor_high, "visible_anchor_high"))
-    visible = data.iloc[:index + 1]
-    if not visible.empty:
-        recent_high = pd.to_numeric(
-            visible.tail(120)["high"], errors="coerce",
-        ).max()
-        if pd.notna(recent_high):
-            candidates.append((float(recent_high), "visible_120d_high"))
-    valid = [
-        (price, label) for price, label in candidates
-        if price is not None and price > entry_price
-    ]
-    if valid:
-        return max(valid, key=lambda item: item[0])
-    return entry_price + risk_amount * 2.8, "planned_2_8r_trend_continuation"
-
-
-def _trailing_amount_observation(data, index, *, amount_multiplier=1.0):
-    """Return signal-day and trailing-20 turnover using only visible bars."""
-    if "amount" not in data or index < 0:
-        return None, None
-    start = max(0, int(index) - 19)
-    values = pd.to_numeric(
-        data.iloc[start:int(index) + 1]["amount"],
-        errors="coerce",
-    )
-    values = values[(values > 0) & values.notna()] * float(amount_multiplier)
-    current = pd.to_numeric(data.iloc[int(index)].get("amount"), errors="coerce")
-    signal_amount = (
-        None
-        if pd.isna(current) or float(current) <= 0
-        else float(current) * float(amount_multiplier)
-    )
-    average_amount = float(values.mean()) if len(values) >= 20 else None
-    return signal_amount, average_amount
-
-
-def _semantic_right_entry_gate(
-    data,
-    index,
-    candidate,
-    signal,
-    *,
-    current_down_streak=0,
-    management_transition=False,
-    price_amount_multiplier=1.0,
-    factor_only_min_avg_amount=None,
-):
-    """Convert a technical signal into an auditable high R/R entry decision."""
-    if not signal:
-        return False, signal, "missing_signal"
-    enriched = dict(signal)
-    factor_only = _factor_only_selection_profile(candidate)
-    if not factor_only and not _has_semantic_candidate_profile(candidate):
-        enriched.update({
-            "semantic_entry_ok": True,
-            "semantic_entry_setup": "legacy_minimal_candidate_profile",
-            "entry_gate_reason": "legacy_minimal_candidate_profile",
-        })
-        return True, enriched, "ok"
-
-    close = float(data.iloc[index]["close"])
-    entry_price = close if signal.get("order_type") == "close" else (
-        _signal_number(signal, "trigger") or close
-    )
-    stop = _signal_number(signal, "stop")
-    if entry_price <= 0 or stop is None or stop <= 0 or stop >= entry_price:
-        enriched["semantic_entry_ok"] = False
-        enriched["entry_gate_reason"] = "invalid_or_non_protective_stop"
-        return False, enriched, "invalid_or_non_protective_stop"
-
-    quality = _candidate_number(candidate, "quality_score")
-    growth = _candidate_number(candidate, "earnings_yoy")
-    market_cap = _candidate_number(candidate, "mktcap")
-    if not factor_only and not management_transition:
-        if quality is None or quality < 70:
-            return False, enriched, "quality_hard_gate_failed"
-        if growth is None or growth < 0.10:
-            return False, enriched, "growth_hard_gate_failed"
-        if market_cap is None or market_cap < 100:
-            return False, enriched, "market_cap_hard_gate_failed"
-
-    trade_basis = (
-        None if management_transition
-        else _candidate_number(candidate, "trade_basis_score")
-    )
-    leadership = (
-        None if management_transition
-        else _candidate_number(candidate, "leadership_score")
-    )
-    right_quant = (
-        None if management_transition
-        else _candidate_number(candidate, "right_quant_score")
-    )
-    ret20 = (
-        None if management_transition
-        else _candidate_number(candidate, "return_20d")
-    )
-    ret60 = (
-        None if management_transition
-        else _candidate_number(candidate, "return_60d")
-    )
-    candidate_avg_amount = (
-        None if management_transition
-        else _candidate_number(candidate, "avg_amount_20")
-    )
-    observed_signal_amount, observed_avg_amount = _trailing_amount_observation(
-        data,
-        index,
-        amount_multiplier=price_amount_multiplier,
-    )
-    avg_amount = (
-        observed_avg_amount
-        if factor_only and observed_avg_amount is not None
-        else candidate_avg_amount
-    )
-    large_liquid_trend_core = (
-        False if management_transition
-        else _large_liquid_trend_core_profile(candidate)
-    )
-    trade_basis_floor = 6.0 if large_liquid_trend_core else 6.5
-    # factor_only 候选的 trade_basis 检查同样保持"候选无该字段"时的语义
-    # （跳过）：候选画像补出的 trade_basis_score 不应改变 factor_only 通道行为。
-    if trade_basis is not None and not factor_only and trade_basis < trade_basis_floor:
-        return False, enriched, "trade_basis_too_weak"
-    liquidity_floor = 500_000_000.0
-    liquidity_profile = "standard_500m"
-    compact_attack_liquidity_ok = _compact_attack_core_profile(candidate)
-    if compact_attack_liquidity_ok:
-        liquidity_floor = 450_000_000.0
-        liquidity_profile = "compact_attack_core_450m"
-    if large_liquid_trend_core:
-        liquidity_floor = 3_000_000_000.0
-        liquidity_profile = "large_liquid_trend_core_3b"
-    if factor_only:
-        liquidity_floor = (
-            None
-            if factor_only_min_avg_amount is None
-            else float(factor_only_min_avg_amount)
-        )
-        liquidity_profile = (
-            "factor_only_visible_amount_not_enforced"
-            if liquidity_floor is None
-            else "factor_only_visible_20d_amount_floor"
-        )
-    enriched.update({
-        "observed_signal_amount": observed_signal_amount,
-        "observed_avg_amount_20": observed_avg_amount,
-        "observed_amount_multiplier": float(price_amount_multiplier),
-    })
-    if (
-        factor_only
-        and liquidity_floor is not None
-        and (avg_amount is None or avg_amount < liquidity_floor)
-    ):
-        enriched.update({
-            "semantic_entry_ok": False,
-            "entry_gate_reason": "liquidity_too_thin",
-            "entry_liquidity_floor": liquidity_floor,
-            "entry_liquidity_profile": liquidity_profile,
-        })
-        return False, enriched, "liquidity_too_thin"
-    if avg_amount is not None and not factor_only and avg_amount < liquidity_floor:
-        enriched.update({
-            "semantic_entry_ok": False,
-            "entry_gate_reason": "liquidity_too_thin",
-            "entry_liquidity_floor": liquidity_floor,
-            "entry_liquidity_profile": liquidity_profile,
-        })
-        return False, enriched, "liquidity_too_thin"
-    if ret20 is not None and not factor_only and ret20 < -0.02:
-        return False, enriched, "weak_20d_relative_strength"
-
-    strong_profile = any((
-        leadership is not None and leadership >= 18.0,
-        right_quant is not None and right_quant >= 60.0,
-        ret60 is not None and ret60 >= 0.20,
-        trade_basis is not None and trade_basis >= 8.0,
-    ))
-    if not factor_only and not management_transition and not strong_profile:
-        return False, enriched, "weak_relative_strength"
-
-    signal_type = str(signal.get("signal_type") or "")
-    technical_alignment = _candidate_text(candidate, "technical_alignment")
-    if (
-        signal_type == "uptrend_support_pullback"
-        and large_liquid_trend_core
-        and technical_alignment
-        and technical_alignment != "trade_ready"
-    ):
-        enriched.update({
-            "semantic_entry_ok": False,
-            "entry_gate_reason": "large_liquid_trend_watch_only",
-        })
-        return False, enriched, "large_liquid_trend_watch_only"
-    if (
-        signal_type == "uptrend_support_pullback"
-        and not _signal_support_has_fast_ma_confluence(signal)
-    ):
-        enriched.update({
-            "semantic_entry_ok": False,
-            "entry_gate_reason": "support_pullback_without_fast_ma_confluence",
-        })
-        return False, enriched, "support_pullback_without_fast_ma_confluence"
-    volume_ratio = float(signal.get("known_volume_ratio") or 0.0)
-    breakout_types = {
-        "uptrend_50_reclaim", "pullback_50_breakout", "gap_long_ma_breakout",
-        "consolidation_breakout", "leader_pivot_breakout",
-        "volume_price_node", "leader_trend_add",
-    }
-    if signal_type in breakout_types and volume_ratio < 1.0:
-        return False, enriched, "volume_confirmation_missing"
-    if ret20 is not None and not factor_only and ret20 > 0.70:
-        return False, enriched, "late_acceleration_chase"
-    if ret20 is not None and not factor_only and ret20 > 0.45 and volume_ratio >= 3.0:
-        return False, enriched, "late_acceleration_chase"
-
-    risk_amount = entry_price - stop
-    risk_pct = risk_amount / entry_price
-    if risk_pct < MIN_DAILY_RIGHT_RISK_PCT:
-        enriched.update({
-            "semantic_entry_ok": False,
-            "entry_risk_pct": round(risk_pct * 100, 3),
-            "entry_minimum_risk_pct": round(MIN_DAILY_RIGHT_RISK_PCT * 100, 3),
-            "entry_gate_reason": "risk_pct_too_tight",
-        })
-        return False, enriched, "risk_pct_too_tight"
-    if signal.get("order_type") == "close" and risk_pct < MIN_CLOSE_CONFIRMED_RIGHT_RISK_PCT:
-        enriched.update({
-            "semantic_entry_ok": False,
-            "entry_risk_pct": round(risk_pct * 100, 3),
-            "entry_minimum_close_confirmed_risk_pct": round(
-                MIN_CLOSE_CONFIRMED_RIGHT_RISK_PCT * 100,
-                3,
-            ),
-            "entry_gate_reason": "close_confirmed_risk_pct_too_tight",
-        })
-        return False, enriched, "close_confirmed_risk_pct_too_tight"
-    risk_limit = 0.065 if signal_type == "uptrend_support_pullback" else 0.10
-    if int(current_down_streak or 0) >= 3:
-        risk_limit = min(risk_limit, 0.07)
-    if risk_pct > risk_limit:
-        enriched.update({
-            "semantic_entry_ok": False,
-            "entry_risk_pct": round(risk_pct * 100, 3),
-            "entry_gate_reason": "risk_pct_too_wide",
-        })
-        return False, enriched, "risk_pct_too_wide"
-
-    target, target_basis = _planned_right_target(
-        data, index, signal, entry_price, risk_amount, candidate,
-    )
-    reward_risk = (target - entry_price) / risk_amount if risk_amount > 0 else 0.0
-    required_rr = 3.0 if signal_type == "uptrend_support_pullback" else 2.5
-    if signal_type == "uptrend_support_pullback" and large_liquid_trend_core:
-        required_rr = 3.5
-    if int(current_down_streak or 0) >= 3:
-        required_rr = max(required_rr, 3.0)
-    if reward_risk < required_rr:
-        enriched.update({
-            "semantic_entry_ok": False,
-            "entry_risk_pct": round(risk_pct * 100, 3),
-            "entry_reward_risk": round(reward_risk, 3),
-            "entry_target_price": round(target, 3),
-            "entry_target_basis": target_basis,
-            "entry_gate_reason": "reward_risk_too_low",
-        })
-        return False, enriched, "reward_risk_too_low"
-
-    enriched.update({
-        "semantic_entry_ok": True,
-        "semantic_entry_setup": (
-            "factor_only_high_rr_right_entry"
-            if factor_only else "high_rr_right_entry"
-        ),
-        "entry_gate_reason": "ok",
-        "entry_risk_pct": round(risk_pct * 100, 3),
-        "entry_reward_risk": round(reward_risk, 3),
-        "entry_target_price": round(target, 3),
-        "entry_target_basis": target_basis,
-        "entry_liquidity_floor": liquidity_floor,
-        "entry_liquidity_profile": liquidity_profile,
-    })
-    return True, enriched, "ok"
+# Compatibility exports keep existing research imports and engine-level signal
+# injection working; implementations own no positions, cash or order state.
+from stock_research.backtesting.signals import (
+    build_formula_phase_history as build_formula_phase_history,
+    _enabled as _enabled,
+    _clean_trade_basis_text as _clean_trade_basis_text,
+    _minimum_trimmed_entry_size as _minimum_trimmed_entry_size,
+    _active_profit_trigger_ids as _active_profit_trigger_ids,
+    _price_structure_signal as _price_structure_signal,
+    _right_signal as _right_signal,
+    _leader_trend_add_signal as _leader_trend_add_signal,
+    _candidate_number as _candidate_number,
+    _candidate_first_number as _candidate_first_number,
+    _channel_candidate_number as _channel_candidate_number,
+    _signal_number as _signal_number,
+    _right_entry_priority_sort_key as _right_entry_priority_sort_key,
+    _ordered_right_entry_candidates as _ordered_right_entry_candidates,
+    _signal_support_has_fast_ma_confluence as _signal_support_has_fast_ma_confluence,
+    _prepare_bull_half_reversal_signal as _prepare_bull_half_reversal_signal,
+    _confirm_bull_half_reversal_signal as _confirm_bull_half_reversal_signal,
+    _semantic_bull_half_reversal_gate as _semantic_bull_half_reversal_gate,
+    _candidate_text as _candidate_text,
+    _has_semantic_candidate_profile as _has_semantic_candidate_profile,
+    _factor_only_selection_profile as _factor_only_selection_profile,
+    _compact_attack_core_profile as _compact_attack_core_profile,
+    _large_liquid_trend_core_profile as _large_liquid_trend_core_profile,
+    _planned_right_target as _planned_right_target,
+    _trailing_amount_observation as _trailing_amount_observation,
+    _semantic_right_entry_gate as _semantic_right_entry_gate,
+)
 
 
 def run_portfolio_backtest(
@@ -1352,21 +439,7 @@ def run_portfolio_backtest(
                 return name
         return candidate_names.get(code) or str(plans.get(code, {}).get("name") or code)
 
-    def risk_stock_name_reason(name):
-        text = str(name or "").strip()
-        if not text or text.lower() in {"nan", "none"}:
-            return ""
-        upper = text.upper()
-        if "ST" in upper or "退" in text:
-            return "risk_name_or_status"
-        return ""
 
-    def candidate_risk_reason(candidate):
-        if not candidate:
-            return ""
-        return risk_stock_name_reason(
-            candidate.get("name") or "",
-        )
 
     risk_names_as_of = {}
 
@@ -1818,9 +891,6 @@ def run_portfolio_backtest(
             return False
         return len(left_codes) >= configured_left_positions
 
-    def left_candidate_kind(candidate):
-        sources = set(str((candidate or {}).get("candidate_source") or "").split("+"))
-        return "pe_pb" if sources & {"pe_model", "pb_model"} else "value"
 
     def pe_pb_left_codes():
         return {
@@ -1850,168 +920,13 @@ def run_portfolio_backtest(
             for state in states.values()
         )
 
-    def candidate_industry_tags(candidate):
-        raw = candidate.get("industry") or candidate.get("mainline_boards") or ""
-        if pd.isna(raw):
-            return set()
-        aliases = {
-            "通信网络设备及器件": "通信设备",
-            "光通信设备": "通信设备",
-            "通信终端及配件": "通信设备",
-        }
-        tags = {
-            aliases.get(tag.strip(), tag.strip())
-            for tag in re.split(r"[、,，;；/|+]", str(raw))
-            if tag.strip()
-        }
-        return tags
 
-    def left_value_falsification_reason(candidate):
-        if not candidate:
-            return ""
-        reason = str(candidate.get("value_falsification_reason") or "").strip()
-        if reason:
-            return reason
-        if _enabled(candidate.get("value_falsified"), default=False):
-            return str(
-                candidate.get("candidate_failure_reason")
-                or "value thesis falsified by financial snapshot"
-            ).strip()
-        return ""
 
-    def candidate_failure_reason(candidate):
-        if not candidate:
-            return ""
-        return str(candidate.get("candidate_failure_reason") or "").strip()
 
-    def candidate_is_daily_quota_diagnostic(candidate):
-        reason = candidate_failure_reason(candidate)
-        return reason.startswith(
-            "not_selected_for_trading: factor_rank_not_in_observation_pool"
-        ) or reason.startswith(
-            "not_selected_for_trading: daily_top10_quota_or_core_reservation"
-        )
 
-    def candidate_has_exceptional_right_profile(candidate):
-        """Keep the over-quota escape hatch only for clear right-side leaders."""
-        if not candidate:
-            return False
-        sources = set(str(candidate.get("candidate_source") or "").split("+"))
-        if not sources & {
-            "standard_mainline", "growth_leadership",
-            "quant_right", "factor_quant",
-        }:
-            return False
-        right_quant_score = pd.to_numeric(
-            candidate.get("right_quant_score"), errors="coerce",
-        )
-        if pd.notna(right_quant_score) and float(right_quant_score) >= 95.0:
-            return True
-        leadership = pd.to_numeric(candidate.get("leadership_score"), errors="coerce")
-        return_20 = pd.to_numeric(candidate.get("return_20d"), errors="coerce")
-        return_60 = pd.to_numeric(candidate.get("return_60d"), errors="coerce")
-        drawdown_60 = pd.to_numeric(candidate.get("drawdown_60"), errors="coerce")
-        avg_amount_20 = pd.to_numeric(candidate.get("avg_amount_20"), errors="coerce")
-        visible_right_strength = (
-            pd.notna(leadership)
-            and float(leadership) >= 23.0
-        ) or (
-            pd.notna(right_quant_score)
-            and float(right_quant_score) >= 75.0
-        )
-        return bool(
-            visible_right_strength
-            and pd.notna(return_20)
-            and pd.notna(return_60)
-            and pd.notna(drawdown_60)
-            and pd.notna(avg_amount_20)
-            and 0.05 <= float(return_20) <= 0.60
-            and float(return_60) >= 0.35
-            and float(drawdown_60) >= -0.12
-            and float(avg_amount_20) >= 5_000_000_000.0
-        )
 
-    def candidate_passes_hard_gate(candidate):
-        if not candidate:
-            return False
-        quality = pd.to_numeric(candidate.get("quality_score"), errors="coerce")
-        growth = pd.to_numeric(candidate.get("earnings_yoy"), errors="coerce")
-        market_cap = pd.to_numeric(candidate.get("mktcap"), errors="coerce")
-        return (
-            pd.notna(quality)
-            and pd.notna(growth)
-            and pd.notna(market_cap)
-            and float(quality) >= 70.0
-            and float(growth) >= 0.10
-            and float(market_cap) >= 100.0
-        )
 
-    def right_candidate_can_evaluate(candidate):
-        if not candidate:
-            return False
-        if candidate_risk_reason(candidate):
-            return False
-        if (
-            _enabled(candidate.get("selected_for_trading"), default=True)
-            and _enabled(candidate.get("signal_eligible"), default=True)
-        ):
-            return True
-        # Ranking out of the daily Top10 is a report/display limit.  It should
-        # not prevent a right-side model candidate from waiting for its own
-        # high-quality technical setup.
-        return (
-            candidate_is_daily_quota_diagnostic(candidate)
-            and _enabled(candidate.get("allow_right"), default=False)
-            and candidate_has_exceptional_right_profile(candidate)
-            and candidate_passes_hard_gate(candidate)
-            and not left_value_falsification_reason(candidate)
-        )
 
-    def left_candidate_can_add(candidate):
-        if not candidate:
-            return False
-        if candidate_risk_reason(candidate):
-            return False
-        sources = set(str(candidate.get("candidate_source") or "").split("+"))
-        quality = pd.to_numeric(candidate.get("quality_score"), errors="coerce")
-        market_cap = pd.to_numeric(candidate.get("mktcap"), errors="coerce")
-        if "pe_model" in sources or "pb_model" in sources:
-            # PE/PB 低估通道：低估比率 = 当前估值/历史年度低估均值 <= 1.0，
-            # 质量/市值门槛放宽（quality>=60、mktcap>=100亿）。
-            pe_ratio = pd.to_numeric(candidate.get("pe_ratio"), errors="coerce")
-            pb_ratio = pd.to_numeric(candidate.get("pb_ratio"), errors="coerce")
-            ratios = [v for v in (pe_ratio, pb_ratio) if pd.notna(v)]
-            low_ratio = min(ratios) if ratios else np.nan
-            return (
-                _enabled(candidate.get("selected_for_trading"), default=True)
-                and _enabled(candidate.get("signal_eligible"), default=True)
-                and _enabled(candidate.get("allow_left"), default=False)
-                and pd.notna(low_ratio)
-                and 0.0 < float(low_ratio) <= 1.0
-                and pd.notna(quality)
-                and float(quality) >= 60.0
-                and pd.notna(market_cap)
-                and float(market_cap) >= 100.0
-                and not left_value_falsification_reason(candidate)
-            )
-        price_to_value = pd.to_numeric(candidate.get("price_to_value"), errors="coerce")
-        growth = pd.to_numeric(candidate.get("earnings_yoy"), errors="coerce")
-        return (
-            _enabled(candidate.get("selected_for_trading"), default=True)
-            and _enabled(candidate.get("signal_eligible"), default=True)
-            and _enabled(candidate.get("allow_left"), default=False)
-            and "value_model" in sources
-            and _enabled(candidate.get("value_industry_allowed"), default=False)
-            and pd.notna(price_to_value)
-            and 0.88 <= float(price_to_value) <= 1.03
-            and pd.notna(quality)
-            and float(quality) >= 80.0
-            and pd.notna(growth)
-            and float(growth) >= 0.20
-            and pd.notna(market_cap)
-            and float(market_cap) >= 150.0
-            and not left_value_falsification_reason(candidate)
-        )
 
     def held_industry_counts():
         counts = {}
@@ -2338,34 +1253,13 @@ def run_portfolio_backtest(
             return 0.30
         return 0.0
 
+    execution_costs = ExecutionCosts(
+        commission_rate, minimum_commission, estimated_slippage_rate,
+        sell_stamp_duty_rate, sell_stamp_duty_rate_before_2023_08_28,
+    )
+
     def trade_fee_components(turnover, *, sell=False, trade_date=None):
-        turnover = abs(float(turnover))
-        if turnover <= 0:
-            return {
-                "commission_amount": 0.0,
-                "stamp_duty_amount": 0.0,
-                "slippage_amount": 0.0,
-                "transaction_cost_amount": 0.0,
-            }
-        commission = max(
-            turnover * float(commission_rate), float(minimum_commission),
-        )
-        stamp_duty_rate = (
-            sell_stamp_duty_rate_for_date(
-                trade_date,
-                sell_stamp_duty_rate,
-                sell_stamp_duty_rate_before_2023_08_28,
-            )
-            if sell else 0.0
-        )
-        stamp_duty = turnover * stamp_duty_rate
-        slippage = turnover * float(estimated_slippage_rate)
-        return {
-            "commission_amount": commission,
-            "stamp_duty_amount": stamp_duty,
-            "slippage_amount": slippage,
-            "transaction_cost_amount": commission + stamp_duty + slippage,
-        }
+        return execution_costs.components(turnover, sell=sell, trade_date=trade_date)
 
     def add_event(
         date, code, action, price, size, reason, pnl=0.0, *,
@@ -2511,51 +1405,25 @@ def run_portfolio_backtest(
         )["transaction_cost_amount"]
 
     def execute_buy(code, requested_size, price):
-        """Buy against real shared cash, shrinking rather than borrowing."""
         nonlocal cash_balance, transaction_costs, phase_buy_budget
-        available_cash = min(cash_balance, phase_buy_budget)
-        requested_notional = max(0.0, float(requested_size)) * float(initial_capital)
-        price = float(price)
-        if requested_notional <= 0 or price <= 0 or available_cash <= float(minimum_commission):
-            return 0.0, 0.0, 0.0, 0.0, False
-        affordable_notional = _affordable_buy_notional(
-            available_cash,
-            requested_notional,
-            commission_rate=commission_rate,
-            minimum_commission=minimum_commission,
-            slippage_rate=estimated_slippage_rate,
+        fill = fill_cash_buy(
+            code, requested_size, price, initial_capital=initial_capital,
+            cash_balance=cash_balance, phase_buy_budget=phase_buy_budget,
+            costs=execution_costs,
         )
-        if affordable_notional <= 1e-8:
-            return 0.0, 0.0, 0.0, 0.0, True
-        cash_limited = affordable_notional < requested_notional - 1e-8
-        quantity = _board_lot_quantity(code, affordable_notional / price)
-        if quantity <= 0:
-            return 0.0, 0.0, 0.0, 0.0, cash_limited
-        notional = quantity * price
-        fee_cash = trade_fee(notional)
-        cash_balance = max(0.0, cash_balance - notional - fee_cash)
-        phase_buy_budget = max(0.0, phase_buy_budget - notional - fee_cash)
-        fee = fee_cash / float(initial_capital)
-        transaction_costs += fee
-        return notional / float(initial_capital), float(quantity), -fee, fee_cash, cash_limited
+        cash_balance, phase_buy_budget = fill.cash_after, fill.phase_budget_after
+        transaction_costs += fill.normalized_fee
+        return fill.engine_tuple()
 
     def execute_sell(quantity, sell, cost):
-        """Sell exact shares and release net proceeds into shared cash."""
         nonlocal cash_balance, transaction_costs
-        quantity = max(0.0, float(quantity))
-        sell = float(sell)
-        cost = float(cost)
-        if quantity <= 0:
-            return 0.0, 0.0
-        turnover = quantity * sell
-        fee_cash = trade_fee(turnover, sell=True, trade_date=date)
-        cash_balance += turnover - fee_cash
-        fee = fee_cash / float(initial_capital)
-        transaction_costs += fee
-        cost_value = quantity * cost
-        size = cost_value / float(initial_capital)
-        pnl = (turnover - cost_value - fee_cash) / float(initial_capital)
-        return size, pnl
+        fill = fill_cash_sell(
+            quantity, sell, cost, initial_capital=initial_capital,
+            cash_balance=cash_balance, trade_date=date, costs=execution_costs,
+        )
+        cash_balance = fill.cash_after
+        transaction_costs += fill.normalized_fee
+        return fill.size, fill.pnl
 
     def apply_corporate_actions(date):
         nonlocal cash_balance
@@ -2992,10 +1860,8 @@ def run_portfolio_backtest(
             compressed_structure_entry = (
                 entry_channel == "compressed_structure_continuation"
             )
-            diversified_factor_entry = bool(
-                configured_diversified_factor_sleeve
-                and entry_channel == "standard_right_entry"
-                and _factor_only_selection_profile(candidate)
+            diversified_factor_entry = research_channels.diversified_factor_entry(
+                candidate, entry_channel, enabled=configured_diversified_factor_sleeve,
             )
             entry_down_streak = int(
                 signal.get(
@@ -3320,14 +2186,9 @@ def run_portfolio_backtest(
                     if breadth_reversal_entry
                     or factor_horizon_entry
                     or compressed_structure_entry
-                    else min(
-                        configured_diversified_factor_max_position,
-                        configured_diversified_factor_risk_budget
-                        / max(
-                            float(signal.get("entry_risk_pct") or 0.0)
-                            / 100.0,
-                            1e-6,
-                        ),
+                    else research_channels.diversified_factor_size(
+                        signal, max_position=configured_diversified_factor_max_position,
+                        risk_budget=configured_diversified_factor_risk_budget,
                     )
                     if diversified_factor_entry
                     else 0.20 if entry_down_streak >= 3
@@ -5041,61 +3902,17 @@ def run_portfolio_backtest(
                 )
                 continue
             data = frames[code]
-            signal_open = pd.to_numeric(
-                data.iloc[index].get("open"), errors="coerce",
+            next_signal, fundamental_score, entry_priority, channel_reason = research_channels.compressed_structure_open_signal(
+                data, index, candidate, signal,
+                max_position=configured_compressed_structure_max_position,
+                risk_budget=configured_compressed_structure_risk_budget,
+                stop_loss_pct=configured_compressed_structure_stop_loss_pct,
+                holding_days=configured_compressed_structure_holding_days,
             )
-            if pd.isna(signal_open) or float(signal_open) <= 0:
-                record_entry_block(
-                    date, code, candidate, signal,
-                    "compressed_structure_missing_entry_price",
-                )
+            if channel_reason:
+                record_entry_block(date, code, candidate, signal, channel_reason)
                 continue
-            planned_size = min(
-                configured_compressed_structure_max_position,
-                configured_compressed_structure_risk_budget
-                / configured_compressed_structure_stop_loss_pct,
-            )
-            signal.update({
-                "trigger": float(signal_open),
-                "stop": float(signal_open) * (
-                    1.0 - configured_compressed_structure_stop_loss_pct
-                ),
-                "order_type": "limit",
-                "reason": (
-                    "紧结构平台延续；下一交易日开盘执行；"
-                    f"固定{configured_compressed_structure_stop_loss_pct:.0%}保护止损；"
-                    f"持有{configured_compressed_structure_holding_days}个交易日"
-                ),
-                "entry_channel": "compressed_structure_continuation",
-                "semantic_entry_ok": True,
-                "semantic_entry_setup": "compressed_structure_continuation",
-                "entry_gate_reason": "compressed_structure_rule_matched",
-                "entry_risk_pct": round(
-                    configured_compressed_structure_stop_loss_pct * 100, 3,
-                ),
-                "planned_position_size": planned_size,
-                "requires_next_day_confirmation": False,
-                "technical_signal_timing": (
-                    "候选日与平台信号在收盘冻结，下一全市场交易日开盘执行"
-                ),
-            })
-            fundamental_score = float(candidate.get("candidate_score") or 0.0)
-            entry_evidence_score = float(
-                signal.get("entry_evidence_score") or 0.0
-            )
-            structure_proximity_score = float(
-                signal.get("structure_proximity_score") or 0.0
-            )
-            factor_rank = float(
-                _channel_candidate_number(
-                    candidate, "compressed_structure", "playbook_factor_rank",
-                ) or 999.0
-            )
-            entry_priority = (
-                entry_evidence_score * 1000.0
-                + structure_proximity_score * 10.0
-                - factor_rank
-            )
+            signal = next_signal
             candidates.append((
                 entry_priority, fundamental_score, signal.get("rank") or 0,
                 code, index, signal, candidate,
@@ -5195,155 +4012,21 @@ def run_portfolio_backtest(
             if factor_horizon_candidate and not (
                 states[code].left or states[code].right
             ):
-                if (
-                    configured_factor_horizon_exclude_watch_phase
-                    and current_phase == "watch"
-                ):
-                    record_entry_block(
-                        date, code, candidate, {},
-                        "factor_horizon_watch_phase_excluded",
-                    )
+                signal, fundamental_score, channel_reason = research_channels.factor_horizon_signal(
+                    data, index, candidate, phase=current_phase,
+                    exclude_watch_phase=configured_factor_horizon_exclude_watch_phase,
+                    max_return_60d=configured_factor_horizon_max_return_60d,
+                    require_ma20_not_rising=configured_factor_horizon_require_ma20_not_rising,
+                    min_avg_amount=configured_factor_horizon_min_avg_amount,
+                    max_position=configured_factor_horizon_max_position,
+                    risk_budget=configured_factor_horizon_risk_budget,
+                    stop_loss_pct=configured_factor_horizon_stop_loss_pct,
+                    holding_days=configured_factor_horizon_holding_days,
+                    trend_management_return=configured_factor_horizon_trend_management_return,
+                )
+                if channel_reason:
+                    record_entry_block(date, code, candidate, {}, channel_reason)
                     continue
-                factor_rank = _channel_candidate_number(
-                    candidate, "factor_horizon", "playbook_factor_rank",
-                )
-                structure_score = _channel_candidate_number(
-                    candidate, "factor_horizon", "structure_proximity_score",
-                )
-                if structure_score is None:
-                    structure_score = pd.to_numeric(
-                        data.iloc[index - 1].get("structure_proximity_score") if index > 0 else None,
-                        errors="coerce",
-                    )
-                    structure_score = (
-                        float(structure_score)
-                        if pd.notna(structure_score) else None
-                    )
-                average_amount = _channel_candidate_number(
-                    candidate, "factor_horizon", "avg_amount_20",
-                )
-                return_60d = _channel_candidate_number(
-                    candidate, "factor_horizon", "return_60d",
-                )
-                if (
-                    factor_rank is None
-                    or factor_rank > 10
-                    or structure_score is None
-                    or structure_score <= 40
-                ):
-                    record_entry_block(
-                        date, code, candidate, {},
-                        "factor_horizon_rule_mismatch",
-                    )
-                    continue
-                if (
-                    configured_factor_horizon_max_return_60d is not None
-                    and (
-                        return_60d is None
-                        or return_60d
-                        > configured_factor_horizon_max_return_60d
-                    )
-                ):
-                    record_entry_block(
-                        date, code, candidate, {},
-                        "factor_horizon_return_60d_filter_mismatch",
-                    )
-                    continue
-                if (
-                    configured_factor_horizon_require_ma20_not_rising
-                    and _enabled(
-                        candidate.get("ma20_rising"), default=True,
-                    )
-                ):
-                    record_entry_block(
-                        date, code, candidate, {},
-                        "factor_horizon_ma20_filter_mismatch",
-                    )
-                    continue
-                if (
-                    average_amount is None
-                    or average_amount < configured_factor_horizon_min_avg_amount
-                ):
-                    record_entry_block(
-                        date, code, candidate, {}, "liquidity_too_thin",
-                    )
-                    continue
-                signal_open = pd.to_numeric(
-                    data.iloc[index].get("open"), errors="coerce",
-                )
-                if pd.isna(signal_open) or float(signal_open) <= 0:
-                    record_entry_block(
-                        date, code, candidate, {}, "missing_entry_price",
-                    )
-                    continue
-                planned_size = min(
-                    configured_factor_horizon_max_position,
-                    configured_factor_horizon_risk_budget
-                    / configured_factor_horizon_stop_loss_pct,
-                )
-                factor_horizon_rule_parts = [
-                    "训练期冻结的因子前10名与结构接近分大于40条件",
-                ]
-                if configured_factor_horizon_max_return_60d is not None:
-                    factor_horizon_rule_parts.append(
-                        "60日收益不高于"
-                        f"{configured_factor_horizon_max_return_60d:.1%}"
-                    )
-                if configured_factor_horizon_require_ma20_not_rising:
-                    factor_horizon_rule_parts.append("MA20尚未上扬")
-                if configured_factor_horizon_exclude_watch_phase:
-                    factor_horizon_rule_parts.append(
-                        "Formula33观察阶段不买入"
-                    )
-                factor_horizon_exit_plan = (
-                    "历史最大浮盈达到"
-                    f"{configured_factor_horizon_trend_management_return:.1%}"
-                    "后转趋势管理，否则"
-                    f"{configured_factor_horizon_holding_days}日到期"
-                    if configured_factor_horizon_trend_management_return
-                    is not None
-                    else f"计划持有{configured_factor_horizon_holding_days}日"
-                )
-                signal = {
-                    "rank": 4,
-                    "trigger": float(signal_open),
-                    "stop": float(signal_open) * (
-                        1.0 - configured_factor_horizon_stop_loss_pct
-                    ),
-                    "order_type": "limit",
-                    "reason": "；".join(factor_horizon_rule_parts) + (
-                        f"；{factor_horizon_exit_plan}"
-                    ),
-                    "known_volume_ratio": float(
-                        _candidate_number(
-                            candidate, "known_volume_ratio",
-                        ) or 1.0
-                    ),
-                    "signal_type": "factor_horizon_match",
-                    "entry_channel": "factor_horizon_match",
-                    "semantic_entry_ok": True,
-                    "semantic_entry_setup": "factor_horizon_match",
-                    "entry_gate_reason": "factor_horizon_rule_matched",
-                    "entry_risk_pct": round(
-                        configured_factor_horizon_stop_loss_pct * 100,
-                        3,
-                    ),
-                    "planned_position_size": planned_size,
-                    "entry_liquidity_floor": (
-                        configured_factor_horizon_min_avg_amount
-                    ),
-                    "technical_signal_date": candidate.get(
-                        "candidate_snapshot_date",
-                    ),
-                    "technical_signal_timing": (
-                        "候选日收盘冻结，下一交易日开盘执行"
-                    ),
-                }
-                fundamental_score = float(
-                    _channel_candidate_number(
-                        candidate, "factor_horizon", "candidate_score",
-                    ) or 0.0
-                )
                 entry_priority = fundamental_score + 100.0
                 candidates.append((
                     entry_priority, fundamental_score, signal["rank"],
@@ -5545,37 +4228,13 @@ def run_portfolio_backtest(
                     and code not in left_right_switch_signals
                 ):
                     continue
-                compressed_structure_candidate = (
-                    configured_compressed_structure_enabled
-                    and code not in left_right_switch_signals
-                    and (
-                        _enabled(
-                            candidate.get(
-                                "compressed_structure_channel_eligible"
-                            ),
-                            default=False,
-                        )
-                        or (
-                            configured_factor_only_compressed_structure_only
-                            and _factor_only_selection_profile(candidate)
-                        )
-                    )
+                compressed_structure_candidate = research_channels.channel_candidate_eligible(
+                    candidate, 'compressed_structure', enabled=configured_compressed_structure_enabled,
+                    blocked=code in left_right_switch_signals, factor_only=configured_factor_only_compressed_structure_only,
                 )
-                breadth_reversal_candidate = (
-                    configured_breadth_reversal_enabled
-                    and code not in left_right_switch_signals
-                    and (
-                        _enabled(
-                            candidate.get(
-                                "breadth_reversal_channel_eligible"
-                            ),
-                            default=False,
-                        )
-                        or (
-                            configured_factor_only_breadth_reversal_only
-                            and _factor_only_selection_profile(candidate)
-                        )
-                    )
+                breadth_reversal_candidate = research_channels.channel_candidate_eligible(
+                    candidate, 'breadth_reversal', enabled=configured_breadth_reversal_enabled,
+                    blocked=code in left_right_switch_signals, factor_only=configured_factor_only_breadth_reversal_only,
                 )
                 if compressed_structure_candidate and not breadth_reversal_candidate:
                     continue
@@ -5606,51 +4265,12 @@ def run_portfolio_backtest(
                             "reversal_symbol_already_held",
                         )
                         continue
-                    signal = _prepare_bull_half_reversal_signal(
-                        data, index, signal,
+                    signal, unique_count, channel_reason = research_channels.breadth_observation_gate(
+                        data, index, candidate, signal, formula_by_date.get(date), date,
+                        max_unique_count=configured_breadth_reversal_max_unique_count,
                     )
-                    formula_observation = formula_by_date.get(date)
-                    unique_count = None
-                    if isinstance(formula_observation, dict):
-                        unique_value = pd.to_numeric(
-                            formula_observation.get("window_unique_count"),
-                            errors="coerce",
-                        )
-                        if pd.notna(unique_value):
-                            unique_count = int(unique_value)
-                    signal["entry_channel"] = "breadth_reversal_half_pullback"
-                    signal["formula_observation_date"] = date.strftime(
-                        "%Y-%m-%d",
-                    )
-                    signal["formula_window_unique_count"] = unique_count
-                    if unique_count is None:
-                        record_entry_block(
-                            date, code, candidate, signal,
-                            "breadth_unique_count_missing",
-                        )
-                        continue
-                    if unique_count >= configured_breadth_reversal_max_unique_count:
-                        record_entry_block(
-                            date, code, candidate, signal,
-                            "breadth_not_low_enough",
-                        )
-                        continue
-                    average_amount = _channel_candidate_number(
-                        candidate, "breadth_reversal", "avg_amount_20",
-                    )
-                    if average_amount is None or average_amount < 500_000_000.0:
-                        record_entry_block(
-                            date, code, candidate, signal, "liquidity_too_thin",
-                        )
-                        continue
-                    return_60d = _channel_candidate_number(
-                        candidate, "breadth_reversal", "return_60d",
-                    )
-                    if return_60d is None or return_60d > -0.10:
-                        record_entry_block(
-                            date, code, candidate, signal,
-                            "reversal_60d_decline_not_deep_enough",
-                        )
+                    if channel_reason:
+                        record_entry_block(date, code, candidate, signal, channel_reason)
                         continue
                     pending_breadth_reversal_entries[code] = {
                         "candidate": dict(candidate),
@@ -5899,94 +4519,15 @@ def run_portfolio_backtest(
                     )
                     if not signal:
                         continue
-                    if signal.get("signal_type") != "consolidation_breakout":
-                        record_entry_block(
-                            date, code, candidate, signal,
-                            "compressed_structure_non_platform_signal",
-                        )
-                        continue
-                    original_gate_candidate = dict(candidate)
-                    for field in (
-                        "avg_amount_20", "return_20d", "return_60d",
-                    ):
-                        original_gate_candidate.pop(field, None)
-                    ok, gated_signal, gate_reason = _semantic_right_entry_gate(
-                        data, index, original_gate_candidate, signal,
+                    gated_signal, gate_reason, channel_reason = research_channels.compressed_structure_setup_gate(
+                        data, index, candidate, signal, semantic_gate=_semantic_right_entry_gate,
                         current_down_streak=current_down_streak,
+                        min_avg_amount=configured_compressed_structure_min_avg_amount,
+                        min_entry_evidence_score=configured_compressed_structure_min_entry_evidence_score,
+                        min_proximity_score=configured_compressed_structure_min_proximity_score,
                     )
-                    if ok or gate_reason not in {
-                        "risk_pct_too_tight",
-                        "close_confirmed_risk_pct_too_tight",
-                    }:
-                        record_entry_block(
-                            date, code, candidate, gated_signal,
-                            "compressed_structure_original_gate_mismatch",
-                        )
-                        continue
-                    entry_evidence_score = _signal_number(
-                        gated_signal, "entry_evidence_score",
-                    )
-                    structure_proximity_score = _channel_candidate_number(
-                        candidate,
-                        "compressed_structure",
-                        "structure_proximity_score",
-                    )
-                    structure_proximity_score_source = "candidate_snapshot"
-                    if structure_proximity_score is None:
-                        structure_proximity_score = pd.to_numeric(
-                            data.iloc[index].get("structure_proximity_score"),
-                            errors="coerce",
-                        )
-                        structure_proximity_score = (
-                            float(structure_proximity_score)
-                            if pd.notna(structure_proximity_score) else None
-                        )
-                        structure_proximity_score_source = (
-                            "signal_date_visible_price_history"
-                        )
-                    gated_signal.update({
-                        "structure_proximity_score": structure_proximity_score,
-                        "structure_proximity_score_source": (
-                            structure_proximity_score_source
-                        ),
-                    })
-                    average_amount = _channel_candidate_number(
-                        candidate, "compressed_structure", "avg_amount_20",
-                    )
-                    gated_signal.update({
-                        "entry_liquidity_floor": (
-                            configured_compressed_structure_min_avg_amount
-                        ),
-                        "entry_liquidity_profile": (
-                            "紧结构专用日均成交额门"
-                        ),
-                        "candidate_avg_amount_20": average_amount,
-                    })
-                    if (
-                        configured_compressed_structure_min_avg_amount > 0
-                        and (
-                            average_amount is None
-                            or average_amount
-                            < configured_compressed_structure_min_avg_amount
-                        )
-                    ):
-                        record_entry_block(
-                            date, code, candidate, gated_signal,
-                            "compressed_structure_liquidity_too_thin",
-                        )
-                        continue
-                    if (
-                        entry_evidence_score is None
-                        or entry_evidence_score
-                        < configured_compressed_structure_min_entry_evidence_score
-                        or structure_proximity_score is None
-                        or structure_proximity_score
-                        <= configured_compressed_structure_min_proximity_score
-                    ):
-                        record_entry_block(
-                            date, code, candidate, gated_signal,
-                            "compressed_structure_quality_gate_failed",
-                        )
+                    if channel_reason:
+                        record_entry_block(date, code, candidate, gated_signal, channel_reason)
                         continue
                     execution_date = next_calendar_date.get(date)
                     gated_signal.update({
