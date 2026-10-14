@@ -107,6 +107,9 @@ def observed_structure_events(price_frames, eligible_members, observation_date, 
                         "planned_target": target, "planned_r": (float(target) - entry) / (entry - stop)
                         if target is not None and math.isfinite(float(target)) else None,
                         "factor_rank": ranks.get(code), "source_sha256": source_sha256,
+                        "price_basis": "observation_raw_anchor" if math.isclose(
+                            float(frame.iloc[-1].get("qfq_to_raw_factor", 1.)), 1., abs_tol=1e-10
+                        ) else "unverified_signal_basis",
                         "research_only": True, "strict_point_in_time": False,
                         "same_day_capture": captured.normalize().tz_localize(None) == day})
     return results
@@ -129,7 +132,7 @@ def _true(value):
     return isinstance(value, (bool, np.bool_)) and bool(value)
 
 
-def _visible_campaigns(events, labels, captures, *, as_of, signal_type, horizon, forward_only):
+def _visible_campaigns(events, labels, captures, *, as_of, signal_type, horizon, forward_only, registration_at=REGISTERED_AT):
     if horizon not in HORIZONS:
         raise ValueError("Only registered T+20/T+60 horizons are allowed")
     cutoff = _local_time(as_of)
@@ -146,7 +149,7 @@ def _visible_campaigns(events, labels, captures, *, as_of, signal_type, horizon,
                  & capture_frame.is_trading_day.map(_true)
                  & (local.dt.hour * 60 + local.dt.minute).ge(16 * 60 + 30))
         if forward_only:
-            valid &= times.gt(REGISTERED_AT)
+            valid &= times.gt(_local_time(registration_at))
         sessions = int(days.loc[valid].nunique())
         captured_sources = {(str(days.loc[index].date()), str(times.loc[index]),
                              str(capture_frame.loc[index, "source_sha256"])) for index in capture_frame.index[valid]}
@@ -172,10 +175,12 @@ def _visible_campaigns(events, labels, captures, *, as_of, signal_type, horizon,
              & selected.label_source_sha256.astype(str).str.fullmatch(r"[0-9a-f]{64}")
              & selected.known.ge(selected.capture)
              & selected.known.dt.tz_convert("Asia/Shanghai").dt.tz_localize(None).dt.normalize().ge(selected.exit))
+    if forward_only and "forward_contract_eligible" in selected:
+        valid &= selected.forward_contract_eligible.map(_true)
     selected = selected.loc[valid].copy()
     if forward_only:
         day = selected.capture.dt.tz_convert("Asia/Shanghai").dt.tz_localize(None).dt.normalize()
-        selected = selected.loc[selected.capture.gt(REGISTERED_AT) & day.eq(selected.start)]
+        selected = selected.loc[selected.capture.gt(_local_time(registration_at)) & day.eq(selected.start)]
         matched = pd.Series([(str(row["start"].date()), str(row["capture"]), str(row["source_sha256"]))
                              in captured_sources for row in selected.to_dict("records")],
                             index=selected.index, dtype=bool)
@@ -192,7 +197,7 @@ def _visible_campaigns(events, labels, captures, *, as_of, signal_type, horizon,
 
 
 def visible_expectancy(events, labels, captures, *, as_of, signal_type, horizon=60,
-                       forward_only=True):
+                       forward_only=True, registration_at=REGISTERED_AT):
     """Require 252 real captured sessions and 100 nonoverlapping campaigns.
 
     Exit R must include actual executable costs. Close-return labels are not
@@ -201,7 +206,7 @@ def visible_expectancy(events, labels, captures, *, as_of, signal_type, horizon=
     """
     cutoff = _local_time(as_of)
     retained, sessions = _visible_campaigns(events, labels, captures, as_of=as_of,
-        signal_type=signal_type, horizon=horizon, forward_only=forward_only)
+        signal_type=signal_type, horizon=horizon, forward_only=forward_only, registration_at=registration_at)
     dataset = [{key: str(row[key]) for key in ("event_id", "source_sha256", "label_source_sha256", "exit", "known", "net_r")} for row in retained]
     fingerprint = hashlib.sha256(json.dumps(dataset, sort_keys=True).encode()).hexdigest()
     values = np.array([row["net_r"] for row in retained], dtype=float)
@@ -213,7 +218,7 @@ def visible_expectancy(events, labels, captures, *, as_of, signal_type, horizon=
 
 
 def conditional_factor_gain(events, labels, captures, *, as_of, signal_type, horizon=60,
-                            forward_only=True):
+                            forward_only=True, registration_at=REGISTERED_AT):
     """Describe Top50's incremental net R within the same class and date.
 
     A date contributes once, after averaging its campaigns in each cohort.
@@ -222,7 +227,7 @@ def conditional_factor_gain(events, labels, captures, *, as_of, signal_type, hor
     a serial-dependence correction, and never promotes production parameters.
     """
     retained, sessions = _visible_campaigns(events, labels, captures, as_of=as_of,
-        signal_type=signal_type, horizon=horizon, forward_only=forward_only)
+        signal_type=signal_type, horizon=horizon, forward_only=forward_only, registration_at=registration_at)
     dated = {}
     known = 0
     for row in retained:

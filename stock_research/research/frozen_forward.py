@@ -407,7 +407,13 @@ def _run_capture(*, database, sync_state, left_directory, formula_history,
                          "left_manifest": Path(left_directory) / "manifest.json", "baseline": BASELINE_PATH},
         factor_ranks=structure_context["factor_ranks"],
     )
+    from stock_research.research.structure_label_store import capture_daily_structure_labels
+    structure_label_receipt = capture_daily_structure_labels(
+        output, manifest["snapshots"], day_root / "structure_events", repository, prices,
+        sync_state, observation_date, captured_at,
+    )
     del structure_frames, structure_context
+    verify_completed_receipts(state, repository)
     if (sha256(sync_state) != sync_hash or sha256(formula_history) != formula_hash
             or implementation_fingerprint() != implementation):
         raise ValueError("input/code changed during structure event capture")
@@ -426,6 +432,9 @@ def _run_capture(*, database, sync_state, left_directory, formula_history,
              "structure_event_receipt": structure_receipt,
              "structure_event_manifest": (day_root / "structure_events" / "manifest.json").relative_to(output).as_posix(),
              "structure_event_manifest_sha256": sha256(day_root / "structure_events" / "manifest.json"),
+             "structure_label_receipt": structure_label_receipt,
+             "structure_label_manifest": (day_root / "structure_labels" / "manifest.json").relative_to(output).as_posix(),
+             "structure_label_manifest_sha256": sha256(day_root / "structure_labels" / "manifest.json"),
              "orders_sha256": sha256(day_root / "paper_orders.json"),
              "paper_replay_sha256": sha256(day_root / "paper_replay.json")}
     manifest["snapshots"].append(entry)

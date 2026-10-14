@@ -53,6 +53,15 @@ def load_forward_report(manifest_path, observation_date, *, now=None):
                 or document.get("observation_date") != observation_date
                 or pd.Timestamp(document["captured_at"]) != captured):
             raise ValueError("forward structure capture receipt mismatch")
+    if "structure_label_manifest" in entry:
+        from stock_research.research.structure_label_store import load_structure_labels
+        label_path = (path.parent / entry["structure_label_manifest"]).resolve()
+        if (not label_path.is_relative_to(candidate_path.parent) or not label_path.is_file()
+                or sha256(label_path) != entry.get("structure_label_manifest_sha256")):
+            raise ValueError("forward structure label manifest path/hash mismatch")
+        document, _ = load_structure_labels(label_path.parent)
+        if document != entry.get("structure_label_receipt") or pd.Timestamp(document["captured_at"]) != captured:
+            raise ValueError("forward structure label receipt mismatch")
     candidates = pd.read_csv(candidate_path, dtype={"code": str})
     required = {"code", "date", "observation_date", "captured_at", "candidate_source", "research_only"}
     if (not required.issubset(candidates) or len(candidates) != entry.get("candidate_count")

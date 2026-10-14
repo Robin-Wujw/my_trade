@@ -74,6 +74,19 @@ def test_policy_off_preserves_production_results_and_public_signature(monkeypatc
     assert research["cash_income_status"] == "not_applied_no_identified_source_quote"
 
 
+def test_explicit_empty_structure_evidence_blocks_actual_research_fills(monkeypatch):
+    from stock_research.backtesting import signals
+    kwargs, _, _ = _fixture(monkeypatch)
+    baseline = engine.run_portfolio_backtest(**kwargs)
+    assert _buys(baseline)
+    monkeypatch.setattr(engine, "_semantic_right_entry_gate", signals._semantic_right_entry_gate)
+    result = run_portfolio_research(research_policy={}, structure_label_manifests=[], **kwargs)
+    assert not _buys(result)
+    assert any(row["reason"] == "structure_expectancy_data_limited" for row in result["entry_blocks"])
+    assert result["structure_expectancy_decisions"]
+    assert all(row["mean_net_r"] is None for row in result["structure_expectancy_decisions"])
+
+
 def test_nav_sizing_uses_open_marks_and_keeps_initial_capital_accounting(monkeypatch):
     kwargs, days, _ = _fixture(monkeypatch, execution_close=12.)
     policy = {"sizing_basis": "visible_nav"}

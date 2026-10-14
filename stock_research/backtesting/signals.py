@@ -662,11 +662,26 @@ def _semantic_right_entry_gate(
     management_transition=False,
     price_amount_multiplier=1.0,
     factor_only_min_avg_amount=None,
+    research_expectancy=None,
 ):
     """Convert a technical signal into an auditable high R/R entry decision."""
     if not signal:
         return False, signal, "missing_signal"
     enriched = dict(signal)
+    expected = None
+    if research_expectancy is not None:
+        from stock_research.research.structure_events import expected_target
+        entry = _signal_number(signal, "trigger") if signal.get("order_type") != "close" else float(data.iloc[index]["close"])
+        stop = _signal_number(signal, "stop")
+        if entry is None or stop is None or not 0 < stop < entry:
+            enriched.update(semantic_entry_ok=False, entry_gate_reason="invalid_or_non_protective_stop")
+            return False, enriched, "invalid_or_non_protective_stop"
+        expected = expected_target(entry, stop, research_expectancy)
+        enriched["research_structure_expectancy"] = expected["expectancy"]
+        if expected["status"] != "ok":
+            reason = "structure_expectancy_" + expected["status"]
+            enriched.update(semantic_entry_ok=False, entry_gate_reason=reason)
+            return False, enriched, reason
     factor_only = _factor_only_selection_profile(candidate)
     if not factor_only and not _has_semantic_candidate_profile(candidate):
         enriched.update({
@@ -674,6 +689,9 @@ def _semantic_right_entry_gate(
             "semantic_entry_setup": "legacy_minimal_candidate_profile",
             "entry_gate_reason": "legacy_minimal_candidate_profile",
         })
+        if expected is not None:
+            enriched.update(entry_target_price=expected["target"], entry_target_basis="visible_forward_structure_net_expectancy",
+                            entry_reward_risk=research_expectancy.mean_net_r)
         return True, enriched, "ok"
 
     close = float(data.iloc[index]["close"])
@@ -864,9 +882,12 @@ def _semantic_right_entry_gate(
         })
         return False, enriched, "risk_pct_too_wide"
 
-    target, target_basis = _planned_right_target(
-        data, index, signal, entry_price, risk_amount, candidate,
-    )
+    if expected is None:
+        target, target_basis = _planned_right_target(
+            data, index, signal, entry_price, risk_amount, candidate,
+        )
+    else:
+        target, target_basis = expected["target"], "visible_forward_structure_net_expectancy"
     reward_risk = (target - entry_price) / risk_amount if risk_amount > 0 else 0.0
     required_rr = 3.0 if signal_type == "uptrend_support_pullback" else 2.5
     if signal_type == "uptrend_support_pullback" and large_liquid_trend_core:

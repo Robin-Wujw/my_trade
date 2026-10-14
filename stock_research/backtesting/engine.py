@@ -340,6 +340,8 @@ def _run_portfolio_backtest(
     security_end_dates=None,
     price_frames_prepared=False,
     research_policy=None,
+    research_cash_book=None,
+    research_expectancy_book=None,
 ):
     """Replay a portfolio without filling dates before candidate coverage."""
     if close_confirmed_execution not in {"next_open", "close_proxy"}:
@@ -507,6 +509,30 @@ def _run_portfolio_backtest(
     formula33_rules_enabled = research_policy is None or research_policy.formula33_enabled
     research_risk_decisions = []
     research_execution_marks = {}
+
+    def semantic_right_entry_gate(data, index, candidate, signal, **gate_kwargs):
+        if research_expectancy_book is not None and signal:
+            gate_kwargs["research_expectancy"] = research_expectancy_book.estimate(
+                pd.Timestamp(data.iloc[index]["date"]).normalize(), str(signal.get("signal_type") or ""),
+            )
+        return _semantic_right_entry_gate(data, index, candidate, signal, **gate_kwargs)
+
+    def advance_research_cash(timestamp, *, invest=False):
+        nonlocal cash_balance, realized, transaction_costs
+        if research_cash_book is None:
+            return
+        previous = len(research_cash_book.ledger)
+        if invest:
+            cash_balance = research_cash_book.invest(timestamp, cash_balance, stock_event_count=len(events))
+        else:
+            cash_balance = research_cash_book.advance(timestamp, cash_balance, stock_event_count=len(events))
+        rows = research_cash_book.ledger[previous:]
+        realized += sum(row["income"] for row in rows) / float(initial_capital)
+        transaction_costs += sum(row["fee"] + row["tax"] for row in rows) / float(initial_capital)
+
+    def cash_phase_time(date, clock):
+        return pd.Timestamp(f"{date:%Y-%m-%d}T{clock}+08:00")
+
     next_batch_id = 1
     last_candidate_scores = {}
     last_candidates = {}
@@ -805,6 +831,8 @@ def _run_portfolio_backtest(
             lots = states[held_code].left + states[held_code].right + corporate_book.lots(held_code)
             symbol_values[held_code] = sum(float(lot["quantity"]) * quote for lot in lots)
         nav = float(cash_balance) + corporate_book.receivable + sum(symbol_values.values())
+        if research_cash_book is not None:
+            nav += research_cash_book.principal
         return nav, symbol_values
 
     def entry_capital_limit():
@@ -1073,6 +1101,8 @@ def _run_portfolio_backtest(
     def begin_execution_phase(phase):
         nonlocal execution_phase, phase_buy_budget, phase_reserved_codes
         nonlocal phase_reserved_capacity, phase_reserved_left, phase_reserved_pe_pb, phase_industry_counts
+        if research_cash_book is not None and phase in {"open", "close"}:
+            advance_research_cash(cash_phase_time(date, "09:30:00" if phase == "open" else "15:00:00"))
         execution_phase = phase
         phase_buy_budget = float(cash_balance)
         phase_reserved_codes = occupied_codes()
@@ -2029,7 +2059,7 @@ def _run_portfolio_backtest(
         )
         if not signal:
             return None
-        ok, signal, _ = _semantic_right_entry_gate(
+        ok, signal, _ = semantic_right_entry_gate(
             data, index, candidate, signal,
             current_down_streak=current_down_streak if formula33_rules_enabled else 0,
             management_transition=True,
@@ -3601,7 +3631,8 @@ def _run_portfolio_backtest(
             index = latest_frame_index(pending["code"], date)
             if index is not None:
                 pending_value += float(pending["lot"]["quantity"]) * valuation_price(pending["code"], frames[pending["code"]].iloc[index], date)
-        market_value = float(cash_balance) + corporate_book.receivable + pending_value
+        cash_principal = research_cash_book.principal if research_cash_book is not None else 0.0
+        market_value = float(cash_balance) + corporate_book.receivable + pending_value + cash_principal
         for code in sorted(occupied_codes()):
             state = states[code]
             data = frames[code]
@@ -3632,10 +3663,10 @@ def _run_portfolio_backtest(
             },
             "cash_pct": round(float(cash_balance) / market_value * 100, 4) if market_value else None,
             "gross_exposure_pct": round(gross_exposure() * 100, 2),
-            "stock_market_value": market_value - cash_balance - corporate_book.receivable,
+            "stock_market_value": market_value - cash_balance - corporate_book.receivable - cash_principal,
             "dividend_receivable": corporate_book.receivable,
             "unlisted_stock_market_value": pending_value,
-            "market_exposure_pct": (market_value - cash_balance - corporate_book.receivable) / market_value * 100 if market_value else None,
+            "market_exposure_pct": (market_value - cash_balance - corporate_book.receivable - cash_principal) / market_value * 100 if market_value else None,
             "cost_exposure_pct": gross_exposure() * 100,
             "gross_exposure_basis": "initial_capital_cost_exposure",
             "capacity_position_count": len(capacity_codes()),
@@ -3648,6 +3679,9 @@ def _run_portfolio_backtest(
                 _is_profit_tail(state) for state in states.values()
             ),
             "candidate_count": len(current_candidates),
+            **({"cash_instrument_principal": cash_principal,
+                "cash_instrument_valuation_basis": "locked_principal_at_cost; interest_only_at_settlement"}
+               if research_cash_book is not None else {}),
         })
         if research_policy is not None and research_policy.sizing_basis == "visible_nav":
             point = equity_curve[-1]
@@ -3667,7 +3701,8 @@ def _run_portfolio_backtest(
         action[key] for action in corporate_book.actions for key in ("record", "ex", "pay", "listing")
         if action[key] is not None and start <= action[key] <= end
     }
-    calendar = sorted({date for date in market_calendar if date >= start} | action_dates)
+    cash_dates = research_cash_book.calendar_dates(start, end) if research_cash_book is not None else set()
+    calendar = sorted({date for date in market_calendar if date >= start} | action_dates | cash_dates)
     next_calendar_date = {
         market_calendar[index]: market_calendar[index + 1]
         for index in range(len(market_calendar) - 1)
@@ -3692,6 +3727,8 @@ def _run_portfolio_backtest(
         execution_phase = "corporate_action"
         apply_corporate_actions(date)
         if date not in market_calendar_set:
+            if research_cash_book is not None:
+                advance_research_cash(cash_phase_time(date, "23:59:59"))
             record_equity(date)
             continue
         begin_execution_phase("open")
@@ -4554,7 +4591,7 @@ def _run_portfolio_backtest(
                         if states[code].right:
                             record_entry_block(date, code, candidate, signal, "add_current_profit_not_met")
                             continue
-                ok, signal, gate_reason = _semantic_right_entry_gate(
+                ok, signal, gate_reason = semantic_right_entry_gate(
                     data, index, candidate, signal,
                     current_down_streak=current_down_streak if formula33_rules_enabled else 0,
                     management_transition=code in left_right_switch_signals,
@@ -4771,7 +4808,7 @@ def _run_portfolio_backtest(
                     if not signal:
                         continue
                     gated_signal, gate_reason, channel_reason = research_channels.compressed_structure_setup_gate(
-                        data, index, candidate, signal, semantic_gate=_semantic_right_entry_gate,
+                        data, index, candidate, signal, semantic_gate=semantic_right_entry_gate,
                         current_down_streak=current_down_streak if formula33_rules_enabled else 0,
                         min_avg_amount=configured_compressed_structure_min_avg_amount,
                         min_entry_evidence_score=configured_compressed_structure_min_entry_evidence_score,
@@ -4804,6 +4841,9 @@ def _run_portfolio_backtest(
                 candidates, date, exited_today, left_right_switch_candidate_current,
             )
 
+        if research_cash_book is not None:
+            advance_research_cash(date, invest=True)
+            advance_research_cash(cash_phase_time(date, "23:59:59"))
         record_equity(date)
 
     curve = pd.DataFrame(equity_curve)

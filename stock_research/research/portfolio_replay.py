@@ -64,12 +64,43 @@ def freeze_research_policy(value):
     return policy, canonical, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def run_portfolio_research(*, research_policy, **kwargs):
+def run_portfolio_research(*, research_policy, cash_contract=None, cash_quotes=None,
+                           structure_label_manifests=None, **kwargs):
     """Run an independently identified policy; never alter the production API."""
     from stock_research.backtesting.engine import _run_portfolio_backtest
 
     policy, canonical, digest = freeze_research_policy(research_policy)
-    result = _run_portfolio_backtest(**kwargs, research_policy=policy if policy.active else None)
-    return {**result, "research_policy": json.loads(canonical), "research_policy_sha256": digest,
-            "research_only": True, "strict_point_in_time": False,
-            "cash_income_status": "not_applied_no_identified_source_quote"}
+    cash_book = None
+    if cash_contract is not None:
+        from stock_research.research.cash_book import CashBook
+        cash_book = CashBook(cash_contract, [] if cash_quotes is None else cash_quotes)
+    elif cash_quotes is not None:
+        raise ValueError("cash_quotes require an explicit preselected cash_contract")
+    expectancy_book = None
+    if structure_label_manifests is not None:
+        if (kwargs.get("close_confirmed_execution") != "next_open"
+                or kwargs.get("signals_effective_next_day") is not True):
+            raise ValueError("Structure expectancy requires explicit next_open and signals_effective_next_day=True")
+        unsupported = ("enable_breadth_reversal_half_pullback", "factor_only_breadth_reversal_only",
+                       "enable_factor_horizon_channel", "enable_compressed_structure_channel",
+                       "factor_only_compressed_structure_only", "enable_diversified_factor_sleeve")
+        if any(kwargs.get(key) for key in unsupported):
+            raise ValueError("Structure expectancy currently supports the existing standard semantic entry channel")
+        from stock_research.research.structure_expectancy import StructureExpectancyBook
+        expectancy_book = StructureExpectancyBook(structure_label_manifests)
+    result = _run_portfolio_backtest(**kwargs, research_policy=policy if policy.active else None,
+                                     research_cash_book=cash_book, research_expectancy_book=expectancy_book)
+    result = {**result, "research_policy": json.loads(canonical), "research_policy_sha256": digest,
+              "research_only": True, "strict_point_in_time": False,
+              "cash_income_status": "not_applied_no_identified_source_quote"}
+    if cash_book is not None:
+        from stock_research.research.cash_book import audit_cash_research
+        cash_book.verify_sources()
+        result.update(cash_book.report())
+        result["cash_accounting_audit"] = audit_cash_research(result)
+        if result["cash_accounting_audit"]["status"] != "passed":
+            raise ValueError(f"Cash research accounting failed: {result['cash_accounting_audit']['errors']}")
+    if expectancy_book is not None:
+        expectancy_book.verify_sources()
+        result.update(expectancy_book.report())
+    return result
