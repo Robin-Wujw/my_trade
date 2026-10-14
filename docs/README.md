@@ -28,6 +28,7 @@
 ## 本机与运维
 
 - [量化复盘问题与修复进度](plan/quant-review-issues-2026-10-14.md)：问题证据、建议顺序及按问题编号记录的实现和验收状态。
+- [分支审查与兼容合并](plan/branch-review-2026-10-14.md)：旧分支取舍、遗漏研究模块恢复、时点缺陷修复与历史文档边界。
 - [Windows 研究工作台](dashboard-windows.md)：本地 Streamlit 回测浏览、任务启动和安装说明。
 - [本机环境与常见坑处理手册](knowledge/local-environment-runbook.md)：PowerShell、`rg` 权限、AkShare SSL/限流、MiniQMT 只读边界、`var/` 产物和提交前检查。
 - [统一数据层架构](knowledge/unified-data-layer.md)：MiniQMT/Tushare/AKShare/SQLite 的职责边界、同步入口和缓存表。

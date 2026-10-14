@@ -380,11 +380,13 @@
 |---|---|---|
 | P0-1 | 新建 `scripts/setup_scheduled_task.ps1`，batch 仅负责启动和透传退出码；action 使用双引号路径、原位注册、安装失败写日志；日报脚本启动异常返回非零并记录日志 | 隔离 PowerShell 行为测试已验证含空格/单引号路径、启动退出码及注册失败。未修改 Windows 中的现有任务；仍须执行安装器并验证真实 `LastTaskResult=0` 和完整日报日志 |
 | P0-3 | 移除 PowerShell 月份规则；财务更新/筛选绑定 Formula33 观察日及统一报告期，拒绝未来覆盖值；生产默认补抓全部缺失股票，保留95%门禁；截面改为精确日期读取并核验元数据 | 日期边界、批量超过100只、缓存复用、失败重试、日期错配回归通过。没有实际联网补齐2026-06-30缓存，生产换期成功仍待数据源和全量覆盖验收 |
-| P2-5（依赖部分） | 冻结回放不再强制查询未使用的 scipy 包；未安装时记为 `null`，仍严格比较冻结时与回放时的依赖画像 | 已增加缺少 scipy 时的完整离线回放验证；缺失 `three_lane_selection` 的研究入口仍待单独处理 |
+| P2-5 | 冻结回放不再强制查询未使用的 scipy 包；未安装时记为 `null`，仍严格比较冻结时与回放时的依赖画像；分支审查补回缺失的 `three_lane_selection` 及测试，修复未来新股排名污染、缺复权因子静默回退，并显式标记研究用途 | 缺少scipy时完整离线回放通过；恢复入口的候选/manifest隔离链路通过，不代表历史收益重新验收 |
+| P2-4（断链部分） | 从研究分支恢复索引引用的4篇历史文档，文首明确历史口径、研究用途和数据限制，并撤销过强PIT声明 | 其余默认参数、持仓上限、旧基线数字和数据库文档分歧仍待统一；详见[分支审查](branch-review-2026-10-14.md) |
 | P3-2 | 涨跌停估算优先识别 `bj.`/`.BJ` 交易所及 `920` 新代码，北交所 ST 保持30%；精确涨跌停价仍优先 | 开盘、整日封板、限价、止损/突破单及精确限价覆盖测试通过；未重算历史收益 |
 
 ### 本轮验证范围
 
+- 后续分支兼容合并验证：生产解释器全量**934通过、1跳过**，三路研究入口`--help`成功，6份历史输出基线通过；新增研究模块的历史收益没有重跑。
 - 最终生产解释器 `D:\ActionsRunner\my-trade\python\python.exe -m pytest -q --basetemp=var/tmp/pytest-plan-production`：**920通过、1跳过**。开发解释器在北交所/可选依赖改动前的全量验证为900通过；最终交付以生产解释器结果为准。
 - `stock_research.regression.output_baseline verify tests/regression/legacy-output-v1.json`：**6 baselines verified**；`git diff --check` 通过。
 - 实际执行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_analysis.ps1 --dry-run --no-push`：退出码0，生成 transcript，列出七步入口；仅验证启动，不访问全市场数据或发送日报。

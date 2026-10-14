@@ -1,4 +1,4 @@
-"""Generate announcement-PIT three-lane candidates from frozen local data."""
+"""Generate research-only three-lane candidates; financial vintages are incomplete."""
 from __future__ import annotations
 
 import argparse
@@ -149,7 +149,7 @@ def generate_candidates(
             end_date=period_end.strftime("%Y-%m-%d"),
         )
         print(f"[three-lane] year={year} calculate technical lanes", flush=True)
-        technical = calculate_technical_lanes(prices)
+        technical = calculate_technical_lanes(prices, eligible_membership=membership)
         technical = technical[
             technical["date"].between(period_start, period_end)
         ]
@@ -201,10 +201,13 @@ def generate_candidates(
                 "financial_point_in_time": True,
                 "strict_financial_point_in_time": False,
                 "industry_point_in_time": False,
+                "research_only": True,
             })
         del membership, technical, fundamental, scores
         gc.collect()
 
+    if not snapshots:
+        raise RuntimeError("No observation dates available for three-lane research")
     manifest = {
         "version": SNAPSHOT_VERSION,
         "value_industry_rule_version": VALUE_INDUSTRY_RULE_VERSION,
@@ -219,6 +222,7 @@ def generate_candidates(
         "uses_financial_data": True,
         "financial_point_in_time": True,
         "strict_financial_point_in_time": False,
+        "research_only": True,
         "financial_point_in_time_note": (
             "Every statement row is activated no earlier than ann_date. The local "
             "cache does not prove a complete vendor revision history, so this is "
